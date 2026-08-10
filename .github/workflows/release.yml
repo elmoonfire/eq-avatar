@@ -17,7 +17,7 @@ jobs:
         with:
           dotnet-version: '8.0.x'
       - name: Publish
-        run: dotnet publish EQAvatar.Spike/EQAvatar.Spike.csproj -c Release -r win-x64 --self-contained false -o publish
+        run: dotnet publish EQAvatar.Spike.csproj -c Release -r win-x64 --self-contained false -o publish
       - name: Zip
         shell: pwsh
         run: Compress-Archive -Path publish/* -DestinationPath EQAvatar.Spike.zip -Force

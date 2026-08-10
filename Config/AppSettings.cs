@@ -36,7 +36,7 @@ public sealed class AppSettings
     // --- Client Hub (centralized licensing + usage dashboard) ---
     /// <summary>App version reported on every check-in (shown on the dashboard). Also the version
     /// the in-app updater compares against the newest GitHub release tag.</summary>
-    public const string AppVersion = "0.9.3";
+    public const string AppVersion = "0.9.4";
 
     // --- Auto-update (GitHub) ---
     public const string UpdateOwner = "elmoonfire";
@@ -64,7 +64,7 @@ public sealed class AppSettings
     public string HubRace { get; set; } = "Human";
     public string HubServer { get; set; } = "Rivervale";
 
-    // --- Grind "Hunt" engine (move → consider → fight → recover) ---
+    // --- Grind "Hunt" engine (move -> consider -> fight -> recover) ---
     // Hunt is ON by default now: pressing Start Grind should make the character actually go hunt,
     // not stand still. Uncheck Hunt for a pure stationary key-rotation.
     public bool HuntMode { get; set; } = true;
@@ -94,7 +94,7 @@ public sealed class AppSettings
     public bool AlwaysOnTop { get; set; } = true;
 
     // --- Appearance ---
-    /// <summary>Tooltip opacity (0.5–1.0). Applied to the custom light-blue tooltip.</summary>
+    /// <summary>Tooltip opacity (0.5-1.0). Applied to the custom light-blue tooltip.</summary>
     public double TooltipOpacity { get; set; } = 0.92;
 
     // --- persistence ---
