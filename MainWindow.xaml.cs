@@ -1,0 +1,1322 @@
+using System;
+using System.Diagnostics;
+using System.IO;
+using System.Runtime.InteropServices;
+using System.Text;
+using System.Threading.Tasks;
+using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Input;
+using System.Windows.Media;
+using System.Windows.Media.Effects;
+using System.Windows.Media.Imaging;
+using System.Windows.Shapes;
+using System.Windows.Threading;
+using System.Windows.Interop;
+using Microsoft.Win32;
+using EQAvatar.Spike.Config;
+using EQAvatar.Spike.Input;
+using EQAvatar.Spike.Launch;
+using EQAvatar.Spike.Log;
+using EQAvatar.Spike.Login;
+using EQAvatar.Spike.Map;
+using EQAvatar.Spike.Net;
+using EQAvatar.Spike.Overlay;
+using EQAvatar.Spike.Roles;
+using EQAvatar.Spike.Update;
+using Path = System.IO.Path;   // disambiguate from System.Windows.Shapes.Path
+
+namespace EQAvatar.Spike;
+
+public partial class MainWindow : Window
+{
+    private EqLogWatcher? _watcher;
+    private MapOverlayWindow? _overlay;
+    private string? _currentLog;
+    private int _locSeen;
+    private readonly DispatcherTimer _fgTimer = new() { Interval = TimeSpan.FromMilliseconds(300) };
+
+    // Grind role state
+    private GrindRole? _grind;
+    private HuntRole? _hunt;                         // experimental Grind v2 (move + find mobs)
+    private IntPtr _grindTarget;
+    private readonly DispatcherTimer _grindTimer = new() { Interval = TimeSpan.FromMilliseconds(250) };
+
+    private readonly AppSettings _settings = AppSettings.Load();
+    private AutoLogin? _login;
+    private CancellationTokenSource? _mouseCts;
+    private readonly Random _mouseRng = new();
+
+    // Client Hub (licensing + usage check-in)
+    private HubClient _hub = null!;
+    private readonly DispatcherTimer _hubTimer = new();
+
+    // Shell (custom chrome + left-nav) state
+    private readonly DateTime _sessionStart = DateTime.Now;
+    private bool _ready;
+    private static readonly string[] Panels =
+    {
+        "PanelHome", "PanelLog", "PanelInput", "PanelMap", "PanelGrind",
+        "PanelLogin", "PanelMouse", "PanelHeat", "PanelLicensing", "PanelSettings"
+    };
+    private static readonly string[] EqClasses =
+    {
+        "Warrior","Cleric","Paladin","Ranger","Shadow Knight","Druid","Monk","Bard",
+        "Rogue","Shaman","Necromancer","Wizard","Magician","Enchanter","Beastlord","Berserker"
+    };
+    private static readonly string[] EqRaces =
+    {
+        "Human","Barbarian","Erudite","Wood Elf","High Elf","Dark Elf","Half Elf","Dwarf",
+        "Troll","Ogre","Halfling","Gnome","Iksar","Vah Shir","Froglok","Drakkin"
+    };
+
+    // Heatmap state
+    private readonly HeatmapModel _heat = new();
+    private EqLogWatcher? _heatWatcher;
+    private readonly DispatcherTimer _heatTimer = new() { Interval = TimeSpan.FromMilliseconds(1200) };
+    private bool _heatDirty;
+    private bool _suppressZoneChange;
+    private const int HW = 560, HH = 420;
+
+    [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetWindowText(IntPtr h, StringBuilder s, int n);
+    [DllImport("user32.dll")] private static extern bool RegisterHotKey(IntPtr hWnd, int id, uint fsModifiers, uint vk);
+    [DllImport("user32.dll")] private static extern bool UnregisterHotKey(IntPtr hWnd, int id);
+    [DllImport("user32.dll")] private static extern short GetAsyncKeyState(int vKey);
+
+    private const ushort VK_RETURN = 0x0D;
+    private const int PANIC_HOTKEY_ID = 0x4551;   // 'EQ'
+    private const int PROBE_HOTKEY_ID = 0x4552;   // repeat last Input-probe action while the game is focused
+    private const int WM_HOTKEY = 0x0312;
+    private const uint VK_F12 = 0x7B;
+    private const uint VK_F9 = 0x78;
+    private const uint MOD_ALT = 0x0001, MOD_CONTROL = 0x0002;
+    private Action? _lastProbe;                   // captured so Ctrl+Alt+F9 can re-fire it in-game
+    private IntPtr _hwnd;
+
+    public MainWindow()
+    {
+        InitializeComponent();
+        Loaded += (_, _) => OnLoadedInit();
+        SourceInitialized += OnSourceInitialized;
+        _fgTimer.Tick += (_, _) => TickUi();
+        _fgTimer.Start();
+        _grindTimer.Tick += (_, _) => UpdateGrindStats();
+        _heatTimer.Tick += (_, _) => { if (_heatDirty) { _heatDirty = false; RefreshZones(); RenderHeat(); } };
+        _hub = new HubClient(_settings);
+        _hubTimer.Tick += (_, _) => { _ = DoCheckIn(false); };
+    }
+
+    private void OnSourceInitialized(object? sender, EventArgs e)
+    {
+        _hwnd = new WindowInteropHelper(this).Handle;
+        HwndSource.FromHwnd(_hwnd)?.AddHook(WndProc);
+        // Global panic key: F12 stops the grind even while the game is focused.
+        RegisterHotKey(_hwnd, PANIC_HOTKEY_ID, 0, VK_F12);
+        // Repeat the last Input-probe action while EQ is focused (safe chord so it won't clash with in-game F9).
+        RegisterHotKey(_hwnd, PROBE_HOTKEY_ID, MOD_CONTROL | MOD_ALT, VK_F9);
+    }
+
+    private IntPtr WndProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
+    {
+        if (msg == WM_HOTKEY)
+        {
+            int id = wParam.ToInt32();
+            if (id == PANIC_HOTKEY_ID)
+            {
+                StopGrind_Click(this, new RoutedEventArgs());
+                StopMouseDemo();
+                handled = true;
+            }
+            else if (id == PROBE_HOTKEY_ID)
+            {
+                _lastProbe?.Invoke();   // fires with EQ focused — this is what makes probe input actually land
+                handled = true;
+            }
+        }
+        return IntPtr.Zero;
+    }
+
+    // ---------------- Window shell: chrome, left-nav, Command Center ----------------
+
+    private void TitleMin_Click(object sender, RoutedEventArgs e) => WindowState = WindowState.Minimized;
+
+    private void TitleMax_Click(object sender, RoutedEventArgs e)
+    {
+        WindowState = WindowState == WindowState.Maximized ? WindowState.Normal : WindowState.Maximized;
+        BtnMax.Content = WindowState == WindowState.Maximized ? "" : "";
+    }
+
+    private void TitleClose_Click(object sender, RoutedEventArgs e) => Close();
+
+    private void Chip_Click(object sender, MouseButtonEventArgs e) { if (_ready) NavLicensing.IsChecked = true; }
+
+    private void Nav_Checked(object sender, RoutedEventArgs e)
+    {
+        if (!_ready) return;
+        if (sender is RadioButton rb && rb.Tag is string name) ShowPanel(name);
+    }
+
+    private void ShowPanel(string name)
+    {
+        foreach (string p in Panels)
+            if (FindName(p) is UIElement el)
+                el.Visibility = p == name ? Visibility.Visible : Visibility.Collapsed;
+        if (name == "PanelHome") RefreshHome();
+    }
+
+    private void HomeGoGrind_Click(object sender, RoutedEventArgs e) => NavGrind.IsChecked = true;
+    private void HomeGoHeat_Click(object sender, RoutedEventArgs e) => NavHeat.IsChecked = true;
+    private void HomeGoLogin_Click(object sender, RoutedEventArgs e) => NavLogin.IsChecked = true;
+
+    /// <summary>Flash a "saved" pill in the title bar that fades away — shown whenever settings are saved.</summary>
+    private void ShowToast(string msg)
+    {
+        SavedToastText.Text = msg;
+        SavedToast.BeginAnimation(UIElement.OpacityProperty, null);
+        SavedToast.Opacity = 1;
+        SavedToast.Visibility = Visibility.Visible;
+        var fade = new System.Windows.Media.Animation.DoubleAnimation
+        {
+            From = 1, To = 0,
+            BeginTime = TimeSpan.FromSeconds(1.4),
+            Duration = new Duration(TimeSpan.FromSeconds(1.1))
+        };
+        fade.Completed += (_, _) => SavedToast.Visibility = Visibility.Collapsed;
+        SavedToast.BeginAnimation(UIElement.OpacityProperty, fade);
+    }
+
+    /// <summary>Always-on 300ms tick: refresh the foreground label, the character chip, and the home stats.</summary>
+    private void TickUi()
+    {
+        UpdateForeground();
+        UpdateTopmost();
+        if (!_ready) return;
+        UpdateChip();
+        if (PanelHome.Visibility == Visibility.Visible) RefreshHome();
+    }
+
+    /// <summary>Float above other apps (browser, etc.) but step aside for the game: when EverQuest is
+    /// the foreground window we drop Topmost so it can cover us; otherwise we stay on top.</summary>
+    private void UpdateTopmost()
+    {
+        // On top of everything (Hayden's two-monitor preference). Only step aside DURING an auto-login
+        // so the app can't cover the launcher and read its own window with OCR.
+        bool launching = _login is { Running: true };
+        bool want = _settings.AlwaysOnTop && !launching;
+        if (Topmost != want) Topmost = want;
+    }
+
+    private void TopmostBox_Click(object sender, RoutedEventArgs e)
+    {
+        _settings.AlwaysOnTop = TopmostBox.IsChecked == true;
+        _settings.Save();
+        UpdateTopmost();
+        ShowToast(_settings.AlwaysOnTop ? "Staying on top (except the game)" : "Normal window order");
+    }
+
+    private void RefreshHome()
+    {
+        var (role, a, k, x) = HubStats();
+        TimeSpan up = DateTime.Now - _sessionStart;
+        HomeSession.Text = up.TotalHours >= 1 ? $"{(int)up.TotalHours}h {up.Minutes:00}m" : $"{up.Minutes}m";
+        HomeActions.Text = a.ToString("N0");
+        HomeKills.Text = k.ToString("N0");
+        HomeXp.Text = x.ToString("N0");
+        HomeRole.Text = role;
+        bool running = _grind is { Running: true };
+        bool paused = running && _grind!.Stats.Paused;
+        HomeStatusPill.Text = !running ? "Idle" : (paused ? "Paused — EQ not focused" : "Grinding");
+        HomeStatusPill.Foreground = (running && !paused) ? Hex("#B6F2C9") : Hex("#9AA7B4");
+        HomeStatusDot.Fill = (running && !paused) ? Hex("#7CE38B") : Hex("#5D6878");
+        HomeTarget.Text = _grindTarget == IntPtr.Zero ? "no target set" : "EverQuest targeted";
+        HomeChar.Text = string.IsNullOrWhiteSpace(_settings.HubUsername) ? "—" : _settings.HubUsername;
+        HomeTier.Text = (_hub.Last is { Authorized: true } l) ? (l.Tier ?? "—") : "not checked in";
+    }
+
+    private void UpdateChip()
+    {
+        string name = (_settings.HubUsername ?? "").Trim();
+        ChipName.Text = name.Length == 0 ? "Not signed in" : name;
+        ChipAvatar.Text = name.Length == 0 ? "?" : name.Substring(0, 1).ToUpperInvariant();
+        bool running = _grind is { Running: true } && !_grind.Stats.Paused;
+        ChipDot.Fill = running ? Hex("#7CE38B") : Hex("#5D6878");
+        string cls = (_settings.HubClass ?? "").Trim();
+        string charLine = cls.Length > 0
+            ? $"Lv {Math.Max(1, _settings.HubLevel)} {cls} · {(_settings.HubServer ?? "Rivervale").Trim()}"
+            : "";
+        string? tier = (_hub.Last is { Authorized: true } l) ? l.Tier : null;
+        if (tier != null)
+        {
+            ChipTierBadge.Visibility = Visibility.Visible;
+            ChipTierBadge.Background = TierFill(tier);
+            ChipTierText.Text = tier.ToUpperInvariant();
+            ChipSub.Text = charLine.Length > 0 ? charLine : (_settings.HubServer ?? "Rivervale");
+        }
+        else
+        {
+            ChipTierBadge.Visibility = Visibility.Collapsed;
+            ChipSub.Text = name.Length == 0 ? "Licensing → set your name" : (charLine.Length > 0 ? charLine : "not checked in");
+        }
+    }
+
+    private Brush TierFill(string tier) => tier switch
+    {
+        "Plaid" => PlaidBrush(),
+        "Hyper" => Hex("#7CE38B"),
+        "Ludicrous" => Hex("#FFB74D"),
+        "LDT Clan" => Hex("#4FC3F7"),
+        _ => Hex("#20303F"),
+    };
+
+    private static LinearGradientBrush PlaidBrush()
+    {
+        var g = new LinearGradientBrush { StartPoint = new System.Windows.Point(0, 0), EndPoint = new System.Windows.Point(1, 0) };
+        g.GradientStops.Add(new GradientStop(Color.FromRgb(0xE8, 0x79, 0xF9), 0));
+        g.GradientStops.Add(new GradientStop(Color.FromRgb(0x4F, 0xC3, 0xF7), 0.5));
+        g.GradientStops.Add(new GradientStop(Color.FromRgb(0x7C, 0xE3, 0x8B), 1));
+        return g;
+    }
+
+    // ---------------- Tab 1: log reader ----------------
+
+    private void BrowseLogFolder_Click(object sender, RoutedEventArgs e)
+    {
+        var dlg = new OpenFileDialog
+        {
+            Title = "Pick ANY file inside your EQL log folder",
+            CheckFileExists = false, CheckPathExists = true, ValidateNames = false,
+            FileName = "Select this folder"
+        };
+        if (dlg.ShowDialog() == true)
+        {
+            string? dir = Path.GetDirectoryName(dlg.FileName);
+            if (!string.IsNullOrEmpty(dir)) LogFolderBox.Text = dir;
+        }
+    }
+
+    private void BrowseIni_Click(object sender, RoutedEventArgs e)
+    {
+        var dlg = new OpenFileDialog
+        {
+            Title = "Locate eqclient.ini",
+            Filter = "eqclient.ini|eqclient.ini|INI files (*.ini)|*.ini|All files (*.*)|*.*"
+        };
+        if (dlg.ShowDialog() == true) IniPathBox.Text = dlg.FileName;
+    }
+
+    private void FindNewest_Click(object sender, RoutedEventArgs e)
+    {
+        _currentLog = EqLogWatcher.FindNewestLog(LogFolderBox.Text.Trim());
+        StatusLog.Text = _currentLog is null ? "No eqlog_*.txt found in that folder." : "Newest log: " + _currentLog;
+        TryAutoFillCharacter();
+    }
+
+    private void EnsureLog_Click(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            EqClientIni.Result r = EqClientIni.EnsureLoggingEnabled(IniPathBox.Text.Trim());
+            StatusLog.Text = r.Message;
+            AddSystem(r.Message + (r.BackupPath is null ? "" : $"  (backup: {r.BackupPath})"));
+        }
+        catch (Exception ex) { StatusLog.Text = "Error: " + ex.Message; }
+    }
+
+    private void ReadAll_Click(object sender, RoutedEventArgs e) => StartWatch(true);
+    private void Tail_Click(object sender, RoutedEventArgs e) => StartWatch(false);
+
+    private void StartWatch(bool fromStart)
+    {
+        StopWatch();
+        _currentLog ??= EqLogWatcher.FindNewestLog(LogFolderBox.Text.Trim());
+        if (_currentLog is null) { StatusLog.Text = "No log selected — click 'Find newest log' first."; return; }
+        _watcher = new EqLogWatcher(_currentLog);
+        _watcher.LineRead += line => Dispatcher.Invoke(() => OnLine(line));
+        _watcher.Info += info => Dispatcher.Invoke(() => StatusLog.Text = info);
+        _watcher.Start(fromStart);
+    }
+
+    private void StopWatch() { _watcher?.Dispose(); _watcher = null; }
+    private void StopTail_Click(object sender, RoutedEventArgs e) { StopWatch(); StatusLog.Text = "Stopped."; }
+    private void ClearLog_Click(object sender, RoutedEventArgs e) { LogList.Items.Clear(); _locSeen = 0; LocCount.Text = "0"; }
+
+    private void OnLine(string raw)
+    {
+        LogEvent ev = LogEventParser.Parse(raw);
+        if (ev.Kind == LogEventKind.Location) { _locSeen++; LocCount.Text = _locSeen.ToString(); }
+        AddLine(ev);
+    }
+
+    private void AddLine(LogEvent ev)
+    {
+        string tag = ev.Kind == LogEventKind.Location && ev.X is not null
+            ? $"[LOC x={ev.X:0.0} y={ev.Y:0.0} z={ev.Z:0.0}] "
+            : $"[{ev.Kind}] ";
+        var item = new ListBoxItem
+        {
+            Content = tag + ev.Text,
+            Foreground = ColorFor(ev.Kind),
+            FontWeight = ev.Kind == LogEventKind.Location ? FontWeights.Bold : FontWeights.Normal
+        };
+        LogList.Items.Add(item);
+        if (LogList.Items.Count > 2000) LogList.Items.RemoveAt(0);
+        LogList.ScrollIntoView(item);
+    }
+
+    private void AddSystem(string text) =>
+        LogList.Items.Add(new ListBoxItem { Content = "[app] " + text, Foreground = ColorFor(LogEventKind.System) });
+
+    private static Brush ColorFor(LogEventKind kind) => kind switch
+    {
+        LogEventKind.Location => Hex("#7CE38B"),
+        LogEventKind.Zone => Hex("#4FC3F7"),
+        LogEventKind.Combat => Hex("#FF8A80"),
+        LogEventKind.Experience => Hex("#FFCB6B"),
+        LogEventKind.Loot => Hex("#B39DDB"),
+        LogEventKind.Death => Hex("#FF5370"),
+        LogEventKind.System => Hex("#4FC3F7"),
+        _ => Hex("#9AA7B4"),
+    };
+
+    private static Brush Hex(string hex) => (Brush)new BrushConverter().ConvertFromString(hex)!;
+
+    // ---------------- Tab 2: input probe ----------------
+
+    private void InitElevationBanner()
+    {
+        bool admin = InputProbe.IsCurrentProcessElevated();
+        if (admin)
+        {
+            ElevBorder.Background = Hex("#337CE38B");
+            ElevBorder.BorderBrush = Hex("#7CE38B");
+            ElevBanner.Text = "Running as administrator ✓  — if input still fails, the game likely uses DirectInput; try Attach+SendInput or the child control.";
+        }
+        else
+        {
+            ElevBorder.Background = Hex("#33FFCB6B");
+            ElevBorder.BorderBrush = Hex("#FFCB6B");
+            ElevBanner.Text = "NOT running as administrator.  If EQL runs elevated, Windows silently blocks our input — this is the most likely reason nothing happened. Relaunch as admin and retry. →";
+        }
+    }
+
+    private void UpdateForeground()
+    {
+        IntPtr h = GetForegroundWindow();
+        var sb = new StringBuilder(256);
+        GetWindowText(h, sb, sb.Capacity);
+        ForegroundLabel.Text = $"foreground: \"{sb}\"  (hwnd 0x{h.ToInt64():X})";
+    }
+
+    private void RefreshWindows_Click(object sender, RoutedEventArgs e)
+    {
+        WinList.ItemsSource = WindowFinder.ListWindows();
+        Log($"{WinList.Items.Count} visible windows listed.");
+    }
+
+    private void GuessEq_Click(object sender, RoutedEventArgs e)
+    {
+        if (WinList.ItemsSource is null) WinList.ItemsSource = WindowFinder.ListWindows();
+        WindowInfo? eq = WindowFinder.GuessEverQuest();
+        if (eq is null) { Log("Couldn't spot an EverQuest window. Is the game running?"); return; }
+        WinList.SelectedItem = eq;
+        WinList.ScrollIntoView(eq);
+        Log("Guessed EverQuest: " + eq);
+    }
+
+    private void ListChildren_Click(object sender, RoutedEventArgs e)
+    {
+        if (WinList.SelectedItem is not WindowInfo w) { Log("Select a top-level window first."); return; }
+        var kids = WindowFinder.ListChildren(w.Handle);
+        ChildList.ItemsSource = kids;
+        Log($"{kids.Count} child control(s) under {w.ProcessName}. If the frame ignores input, try posting to a child.");
+    }
+
+    /// <summary>The window we send to: a selected child control if any, else the selected top-level window.</summary>
+    private WindowInfo? Target()
+    {
+        if (ChildList.SelectedItem is WindowInfo c) return c;
+        if (WinList.SelectedItem is WindowInfo w) return w;
+        Log("Pick the EverQuest window (and optionally a child control) first.");
+        return null;
+    }
+
+    private void LogTargetElevation(WindowInfo t)
+    {
+        var (ok, elevated) = InputProbe.GetProcessElevation(t.ProcessId);
+        string me = InputProbe.IsCurrentProcessElevated() ? "elevated" : "normal";
+        string tgt = !ok ? "unknown (couldn't query — often means it's higher-integrity than us!)" : (elevated ? "elevated" : "normal");
+        Log($"   target pid {t.ProcessId}: {tgt};  this app: {me}");
+    }
+
+    /// <summary>
+    /// Every probe fires through here. The core problem: clicking a WPF button makes THIS app the
+    /// focused window, so any foreground input lands on us, not the game. So we (optionally) count
+    /// down to give you time to click into EQ, and we remember the action so Ctrl+Alt+F9 can re-fire
+    /// it while EQ is focused — no need to alt-tab back here between tries.
+    /// </summary>
+    private async void RunProbe(string label, Action fire)
+    {
+        _lastProbe = fire;
+        if (ProbeCountdownBox.IsChecked == true)
+            for (int s = 3; s >= 1; s--) { Log($"Click into EQ now — '{label}' fires in {s}…"); await Task.Delay(800); }
+        try { fire(); }
+        catch (Exception ex) { Log($"'{label}' error: {ex.Message}"); return; }
+        Log($"'{label}' fired. Tip: with EQ focused, tap Ctrl+Alt+F9 to repeat it without clicking back here.");
+    }
+
+    private void PostTarget_Click(object sender, RoutedEventArgs e)
+    {
+        if (Target() is not WindowInfo t) return;
+        if (!TryResolveVk(out ushort vk, out string label)) return;
+        RunProbe($"PostMessage {label}", () =>
+        {
+            InputProbe.PostKey(t.Handle, vk, extended: ExtendedBox.IsChecked == true);
+            Log($"   PostMessage → {t.ProcessName} hwnd 0x{t.Handle.ToInt64():X}. Character react?");
+            LogTargetElevation(t);
+        });
+    }
+
+    private void SendMsgTarget_Click(object sender, RoutedEventArgs e)
+    {
+        if (Target() is not WindowInfo t) return;
+        if (!TryResolveVk(out ushort vk, out string label)) return;
+        RunProbe($"SendMessage {label}", () =>
+        {
+            InputProbe.SendKey(t.Handle, vk, extended: ExtendedBox.IsChecked == true);
+            Log($"   SendMessage → {t.ProcessName} hwnd 0x{t.Handle.ToInt64():X}. Character react?");
+        });
+    }
+
+    private void AttachTarget_Click(object sender, RoutedEventArgs e)
+    {
+        if (Target() is not WindowInfo t) return;
+        if (!TryResolveVk(out ushort vk, out string label)) return;
+        RunProbe($"Attach+SendInput {label}", () =>
+        {
+            InputProbe.AttachedSendInputKey(t.Handle, vk);
+            Log($"   Attach+SendInput → {t.ProcessName}. This often reaches DirectInput games. React?");
+        });
+    }
+
+    private void SendInputFg_Click(object sender, RoutedEventArgs e)
+    {
+        if (!TryResolveVk(out ushort vk, out string label)) return;
+        RunProbe($"SendInput {label}", () =>
+        {
+            InputProbe.SendInputKey(vk);
+            Log($"   SendInput '{label}' → the focused window. If EQ was focused and your guy reacted, this is exactly the method the Grind tab uses.");
+        });
+    }
+
+    private void LocTarget_Click(object sender, RoutedEventArgs e)
+    {
+        if (Target() is not WindowInfo t) return;
+        IntPtr h = t.Handle;
+        string name = t.ProcessName;
+        RunProbe($"/loc → {name}", () =>
+        {
+            Log($"   Sending /loc to {name} (Enter, type /loc, Enter)…");
+            Task.Run(() =>
+            {
+                InputProbe.PostKey(h, VK_RETURN); System.Threading.Thread.Sleep(150);
+                foreach (char ch in "/loc") { InputProbe.PostChar(h, ch); System.Threading.Thread.Sleep(25); }
+                System.Threading.Thread.Sleep(80);
+                InputProbe.PostKey(h, VK_RETURN);
+            }).ContinueWith(_ => Dispatcher.Invoke(() =>
+                Log("   /loc sent. If it worked, a new [LOC …] line appears on tab 1 (start Live tail first).")));
+        });
+    }
+
+    private void RelaunchAdmin_Click(object sender, RoutedEventArgs e)
+    {
+        string exe = Path.Combine(AppContext.BaseDirectory, "EQAvatar.Spike.exe");
+        if (!File.Exists(exe)) exe = Environment.ProcessPath ?? exe;
+        try
+        {
+            Process.Start(new ProcessStartInfo(exe) { UseShellExecute = true, Verb = "runas" });
+            Application.Current.Shutdown();
+        }
+        catch (Exception ex) { Log("Relaunch as admin cancelled/failed: " + ex.Message); }
+    }
+
+    private bool TryResolveVk(out ushort vk, out string label)
+    {
+        vk = 0; label = "";
+        string k = KeyBox.Text.Trim();
+        if (string.IsNullOrEmpty(k)) { Log("Type a key to send."); return false; }
+        if (k.Length >= 2 && (k[0] is 'F' or 'f') && int.TryParse(k.Substring(1), out int fn) && fn is >= 1 and <= 12)
+        { vk = (ushort)(0x70 + (fn - 1)); label = "F" + fn; return true; }
+        vk = InputProbe.VkFromChar(k[0]);
+        label = k[0].ToString().ToUpperInvariant();
+        return true;
+    }
+
+    private void Log(string msg)
+    {
+        ProbeLog.AppendText(msg + Environment.NewLine);
+        ProbeLog.ScrollToEnd();
+    }
+
+    // ---------------- Tab 3: overlay ----------------
+
+    private void ShowOverlay_Click(object sender, RoutedEventArgs e)
+    {
+        if (_overlay is null) { _overlay = new MapOverlayWindow(); _overlay.Closed += (_, _) => _overlay = null; }
+        _overlay.Show();
+        _overlay.Activate();
+    }
+
+    private void HideOverlay_Click(object sender, RoutedEventArgs e) { _overlay?.Close(); _overlay = null; }
+
+    // ---------------- Tab 4: grind role ----------------
+
+    private void TargetEq_Click(object sender, RoutedEventArgs e)
+    {
+        WindowInfo? w = WinList.SelectedItem as WindowInfo ?? WindowFinder.GuessEverQuest();
+        if (w is null) { GrindTargetLabel.Text = "target: — (pick EverQuest on the Input tab, then retry)"; return; }
+        _grindTarget = w.Handle;
+        GrindTargetLabel.Text = $"target: {w.ProcessName} \"{w.Title}\"  0x{w.Handle.ToInt64():X}";
+    }
+
+    private void StartGrind_Click(object sender, RoutedEventArgs e)
+    {
+        if (_grind is { Running: true } || _hunt is { Running: true }) { GrindLogLine("Already running."); return; }
+        if (_grindTarget == IntPtr.Zero) { GrindLogLine("Set the EverQuest target first (Target EverQuest)."); return; }
+
+        var rotation = GrindRole.ParseRotation(GrindRotation.Text);
+        _currentLog ??= EqLogWatcher.FindNewestLog(LogFolderBox.Text.Trim());
+        var sink = new ForegroundSendInputSink(() => _grindTarget);
+
+        if (HuntBox.IsChecked == true)
+        {
+            ApplyHuntFields();
+            _settings.Save();
+            _hunt = new HuntRole(sink, rotation, _currentLog, _settings, _heat);
+            _hunt.Log += m => Dispatcher.Invoke(() => GrindLogLine(m));
+            _hunt.Stopped += () => Dispatcher.Invoke(() => { _grindTimer.Stop(); UpdateGrindStats(); });
+            _hunt.Start();
+            _grindTimer.Start();
+            GrindLogLine("HUNT mode (EXPERIMENTAL). In-game: bind 'target nearest NPC' to your Hunt target key, keep a /loc macro running, walk the area once so bounds are known — and WATCH it. F12 or tab away to stop.");
+            return;
+        }
+
+        if (rotation.Count == 0) { GrindLogLine("Rotation is empty — add at least one 'key,delayMs' line."); return; }
+        _grind = new GrindRole(sink, rotation, StopOnDeathBox.IsChecked == true, _currentLog, _settings);
+        _grind.Log += m => Dispatcher.Invoke(() => GrindLogLine(m));
+        _grind.Stopped += () => Dispatcher.Invoke(() => { _grindTimer.Stop(); UpdateGrindStats(); });
+        _grind.Start();
+        _grindTimer.Start();
+        if (_currentLog is null) GrindLogLine("No log found — kills/xp/death-safety are off until you set the log folder on the Log Reader panel.");
+    }
+
+    /// <summary>Read the Grind keybind boxes into settings (used before a run and by Save settings).</summary>
+    private void ApplyHuntFields()
+    {
+        if (!string.IsNullOrWhiteSpace(HuntForwardKeyBox.Text)) _settings.HuntForwardKey = HuntForwardKeyBox.Text.Trim();
+        if (!string.IsNullOrWhiteSpace(HuntBackKeyBox.Text)) _settings.HuntBackKey = HuntBackKeyBox.Text.Trim();
+        if (!string.IsNullOrWhiteSpace(HuntLeftKeyBox.Text)) _settings.HuntLeftKey = HuntLeftKeyBox.Text.Trim();
+        if (!string.IsNullOrWhiteSpace(HuntRightKeyBox.Text)) _settings.HuntRightKey = HuntRightKeyBox.Text.Trim();
+        if (!string.IsNullOrWhiteSpace(HuntTargetKeyBox.Text)) _settings.HuntTargetKey = HuntTargetKeyBox.Text.Trim();
+        if (!string.IsNullOrWhiteSpace(HuntConsiderKeyBox.Text)) _settings.HuntConsiderKey = HuntConsiderKeyBox.Text.Trim();
+        _settings.HuntLocKey = HuntLocKeyBox.Text.Trim();   // may be blank (optional)
+        if (int.TryParse(HuntRestBox.Text.Trim(), out int r)) _settings.HuntRestSeconds = Math.Clamp(r, 0, 600);
+        _settings.HuntMode = HuntBox.IsChecked == true;
+    }
+
+    /// <summary>Fill the Grind keybind boxes from saved settings on load.</summary>
+    private void InitGrindTab()
+    {
+        HuntBox.IsChecked = _settings.HuntMode;
+        HuntForwardKeyBox.Text = _settings.HuntForwardKey;
+        HuntBackKeyBox.Text = _settings.HuntBackKey;
+        HuntLeftKeyBox.Text = _settings.HuntLeftKey;
+        HuntRightKeyBox.Text = _settings.HuntRightKey;
+        HuntTargetKeyBox.Text = _settings.HuntTargetKey;
+        HuntConsiderKeyBox.Text = _settings.HuntConsiderKey;
+        HuntLocKeyBox.Text = _settings.HuntLocKey;
+        HuntRestBox.Text = _settings.HuntRestSeconds.ToString();
+        if (!string.IsNullOrWhiteSpace(_settings.HubServer)) LoginServerBox.Text = _settings.HubServer;
+        LauncherPathBox.Text = _settings.LauncherPath;
+        TopmostBox.IsChecked = _settings.AlwaysOnTop;
+    }
+
+    private void SaveGrind_Click(object sender, RoutedEventArgs e)
+    {
+        ApplyHuntFields();
+        _settings.Save();
+        GrindLogLine("Settings saved.");
+        ShowToast("Grind settings saved");
+    }
+
+    // ---------------- Settings panel ----------------
+
+    private void InitSettingsTab()
+    {
+        VarianceBox.Text = ((int)Math.Round(_settings.RandomVariancePercent)).ToString();
+        TellPauseBox.Text = _settings.TellPauseMinutes.ToString();
+        SettingsTopmostBox.IsChecked = _settings.AlwaysOnTop;
+        TooltipOpacitySlider.Value = Math.Clamp(_settings.TooltipOpacity, 0.5, 1.0);
+        UpdateTooltipOpacityLabel();
+        ApplyTooltipOpacity();
+    }
+
+    private void ApplyTooltipOpacity() => Application.Current.Resources["TooltipOpacity"] = _settings.TooltipOpacity;
+
+    private void UpdateTooltipOpacityLabel()
+    {
+        if (TooltipOpacityVal != null) TooltipOpacityVal.Text = $"{(int)Math.Round(_settings.TooltipOpacity * 100)}%";
+    }
+
+    private void TooltipOpacity_Changed(object sender, RoutedPropertyChangedEventArgs<double> e)
+    {
+        _settings.TooltipOpacity = Math.Clamp(e.NewValue, 0.5, 1.0);
+        UpdateTooltipOpacityLabel();
+        ApplyTooltipOpacity();
+    }
+
+    private void SettingsTopmost_Click(object sender, RoutedEventArgs e)
+    {
+        _settings.AlwaysOnTop = SettingsTopmostBox.IsChecked == true;
+        if (TopmostBox != null) TopmostBox.IsChecked = _settings.AlwaysOnTop;   // keep the Command Center toggle in sync
+        _settings.Save();
+        UpdateTopmost();
+    }
+
+    private void SaveSettings_Click(object sender, RoutedEventArgs e)
+    {
+        if (double.TryParse(VarianceBox.Text.Trim(), out double v)) _settings.RandomVariancePercent = Math.Clamp(v, 0, 60);
+        if (int.TryParse(TellPauseBox.Text.Trim(), out int tp)) _settings.TellPauseMinutes = Math.Clamp(tp, 0, 120);
+        _settings.TooltipOpacity = Math.Clamp(TooltipOpacitySlider.Value, 0.5, 1.0);
+        _settings.AlwaysOnTop = SettingsTopmostBox.IsChecked == true;
+        _settings.Save();
+        ApplyTooltipOpacity();
+        ShowToast("Settings saved");
+    }
+
+    private void StopGrind_Click(object sender, RoutedEventArgs e)
+    {
+        _grind?.Stop();
+        _hunt?.Stop();
+        _grindTimer.Stop();
+        UpdateGrindStats();
+    }
+
+    /// <summary>The big colored ACTIVE/STOPPED banner at the top of the Grind panel.</summary>
+    private void UpdateGrindBanner()
+    {
+        if (_hunt is { Running: true })
+        {
+            string st = _hunt.Stats.State;
+            bool paused = st.Contains("paused", StringComparison.OrdinalIgnoreCase);
+            SetGrindBanner(paused ? 1 : 2, paused ? $"PAUSED — {st}" : $"HUNTING — {st}");
+        }
+        else if (_grind is { Running: true })
+        {
+            bool paused = _grind.Stats.Paused;
+            SetGrindBanner(paused ? 1 : 2, paused ? "PAUSED — EQ not focused" : "RUNNING — rotation");
+        }
+        else SetGrindBanner(0, "STOPPED — press Start grind");
+    }
+
+    /// <summary>kind: 0 = stopped (gray), 1 = paused (amber), 2 = active (green).</summary>
+    private void SetGrindBanner(int kind, string text)
+    {
+        if (GrindBanner is null) return;
+        GrindBannerText.Text = text;
+        (string bg, string bd, string dot, string fg) = kind switch
+        {
+            2 => ("#12261B", "#2C8C55", "#7CE38B", "#B6F2C9"),
+            1 => ("#2A2410", "#7A6320", "#FFCB6B", "#FFE1A6"),
+            _ => ("#20303F", "#2A4A57", "#5D6878", "#C6D2DE"),
+        };
+        GrindBanner.Background = Hex(bg);
+        GrindBanner.BorderBrush = Hex(bd);
+        GrindBannerDot.Fill = Hex(dot);
+        GrindBannerText.Foreground = Hex(fg);
+    }
+
+    private void UpdateGrindStats()
+    {
+        UpdateGrindBanner();
+        if (_hunt is { Running: true })
+        {
+            HuntStats h = _hunt.Stats;
+            GrindStatsLabel.Text = $"HUNT [{h.State}] — kills {h.Kills} · fights {h.Fights} · considered {h.MobsConsidered} · skipped {h.Skipped}";
+            UpdateLicSessionLabel();
+            return;
+        }
+        if (_grind is null) { GrindStatsLabel.Text = "idle — keys 0 · kills 0 · xp 0 · loops 0"; return; }
+        GrindStats s = _grind.Stats;
+        string state = !_grind.Running ? "stopped" : (s.Paused ? "PAUSED (game not focused)" : "running");
+        GrindStatsLabel.Text = $"{state} — keys {s.KeysSent} · kills {s.Kills} · xp {s.XpGains} · loops {s.Loops}";
+        UpdateLicSessionLabel();
+    }
+
+    private void GrindLogLine(string msg)
+    {
+        GrindLog.AppendText(msg + Environment.NewLine);
+        GrindLog.ScrollToEnd();
+    }
+
+    // ---------------- Tab 5: auto-login ----------------
+
+    private void StartLogin_Click(object sender, RoutedEventArgs e) => BeginLaunch(startLauncher: false);
+
+    private void StopLogin_Click(object sender, RoutedEventArgs e)
+    {
+        _login?.Stop();
+        LaunchStatus.Text = "Launch stopped.";
+    }
+
+    /// <summary>Command Center one-click Launch: start the launcher (if set), then auto-login. Stays on
+    /// Command Center; every step streams into the Login Console.</summary>
+    private void LaunchGame_Click(object sender, RoutedEventArgs e)
+    {
+        string path = LauncherPathBox.Text.Trim();
+        if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
+        {
+            var res = MessageBox.Show(
+                "Before I can launch the game, I need to know where your EverQuest Legends launcher is " +
+                "(usually LaunchPad.exe).\n\nPick it now?",
+                "Set your launcher", MessageBoxButton.OKCancel, MessageBoxImage.Information);
+            if (res != MessageBoxResult.OK) { LaunchStatus.Text = "Launch cancelled — set the launcher path to enable it."; return; }
+            var dlg = new OpenFileDialog { Title = "Pick the EQL launcher (LaunchPad.exe)", Filter = "Programs (*.exe)|*.exe|All files (*.*)|*.*" };
+            if (dlg.ShowDialog() != true) return;
+            LauncherPathBox.Text = dlg.FileName;
+            _settings.LauncherPath = dlg.FileName;
+            _settings.Save();
+            ShowToast("Launcher path saved");
+        }
+        BeginLaunch(startLauncher: true);
+        LaunchStatus.Text = "Launching… watch the Login Console for each step.";
+    }
+
+    private void BeginLaunch(bool startLauncher)
+    {
+        _settings.LauncherPath = LauncherPathBox.Text.Trim();
+        if (_login is { Running: true }) { LoginLogLine("Launch already running."); return; }
+        _login = new AutoLogin(LoginServerBox.Text, _settings) { LauncherPath = startLauncher ? _settings.LauncherPath : "" };
+        _login.Log += m => Dispatcher.Invoke(() => { LoginLogLine(m); LaunchStatus.Text = m; });
+        _login.Done += () => Dispatcher.Invoke(() => { LoginLogLine("Reached the game. Launch complete."); LaunchStatus.Text = "In the game. ▶"; });
+        _login.Start();
+        LoginLogLine(startLauncher ? "Launch requested from Command Center." : "Auto-login started.");
+    }
+
+    private void PickLauncher_Click(object sender, RoutedEventArgs e)
+    {
+        var dlg = new OpenFileDialog { Title = "Pick the EQL launcher (LaunchPad) exe", Filter = "Programs (*.exe)|*.exe|All files (*.*)|*.*" };
+        if (dlg.ShowDialog() == true)
+        {
+            LauncherPathBox.Text = dlg.FileName;
+            _settings.LauncherPath = dlg.FileName;
+            _settings.Save();
+            ShowToast("Launcher path saved");
+        }
+    }
+
+    // ---------------- Auto-updater (GitHub Releases) ----------------
+
+    private async void CheckUpdates_Click(object sender, RoutedEventArgs e)
+    {
+        UpdateStatus.Text = "Checking…";
+        UpdateBtn.IsEnabled = false;
+        try
+        {
+            UpdateInfo info = await Updater.CheckAsync();
+            if (info.Error != null) { UpdateStatus.Text = "Check failed: " + Trunc(info.Error, 48); return; }
+            if (!info.Available)
+            {
+                UpdateStatus.Text = $"Up to date (v{info.CurrentVersion}).";
+                ShowToast("You're up to date");
+                return;
+            }
+            var ok = MessageBox.Show(
+                $"Update available: v{info.LatestVersion}\n(you have v{info.CurrentVersion}).\n\nDownload and install now? EQ Avatar will close, update, and reopen.",
+                "EQ Avatar update", MessageBoxButton.OKCancel, MessageBoxImage.Information);
+            if (ok != MessageBoxResult.OK) { UpdateStatus.Text = $"v{info.LatestVersion} available."; return; }
+
+            UpdateStatus.Text = "Downloading…";
+            string dir = await Updater.DownloadAndStageAsync(info);
+            UpdateStatus.Text = "Installing…";
+            Updater.ApplyAndRestart(dir);
+            Application.Current.Shutdown();
+        }
+        catch (Exception ex) { UpdateStatus.Text = "Update error: " + Trunc(ex.Message, 48); }
+        finally { UpdateBtn.IsEnabled = true; }
+    }
+
+    private static string Trunc(string s, int n) => string.IsNullOrEmpty(s) || s.Length <= n ? s : s.Substring(0, n) + "…";
+
+    private void LoadMascot()
+    {
+        try
+        {
+            var bmp = new BitmapImage();
+            bmp.BeginInit();
+            bmp.CacheOption = BitmapCacheOption.OnLoad;
+            bmp.UriSource = new Uri("pack://application:,,,/assets/mascot.jpg", UriKind.Absolute);
+            bmp.EndInit();
+            MascotImg.Source = bmp;
+        }
+        catch { /* no bundled mascot — the glow shows instead */ }
+    }
+
+    private void LoginLogLine(string msg)
+    {
+        LoginLog.AppendText(msg + Environment.NewLine);
+        LoginLog.ScrollToEnd();
+    }
+
+    // ---------------- Tab 6: humanized mouse ----------------
+
+    private void ApplyMouse_Click(object sender, RoutedEventArgs e)
+    {
+        if (double.TryParse(MouseSpeedBox.Text.Trim(), out double sp)) _settings.MouseSpeedPxPerSec = Math.Clamp(sp, 120, 4000);
+        if (double.TryParse(MouseArcBox.Text.Trim(), out double arc)) _settings.MouseArc = Math.Clamp(arc, 0, 0.6);
+        if (double.TryParse(MouseAngleBox.Text.Trim(), out double ang)) _settings.MouseAngleJitterDegrees = Math.Clamp(ang, 0, 45);
+        _settings.Save();
+        MouseLogLine($"Applied: speed {_settings.MouseSpeedPxPerSec:0} px/s, arc {_settings.MouseArc:0.00}, angle jitter {_settings.MouseAngleJitterDegrees:0}°.");
+        ShowToast("Mouse settings saved");
+    }
+
+    private void StartMouseDemo_Click(object sender, RoutedEventArgs e)
+    {
+        if (_mouseCts is { IsCancellationRequested: false }) { MouseLogLine("Demo already running."); return; }
+        _mouseCts = new CancellationTokenSource();
+        CancellationToken ct = _mouseCts.Token;
+        MouseLogLine("Fluid demo started. STOP it with: Esc, F12, or fling the cursor into any screen corner. Auto-stops after 30s.");
+
+        // Watchdog: because the demo owns the cursor, give reliable escape hatches that don't
+        // need you to click the (moving) Stop button — Esc/F12 anytime, or a corner during a pause.
+        DateTime started = DateTime.Now;
+        Task.Run(async () =>
+        {
+            try
+            {
+                while (!ct.IsCancellationRequested)
+                {
+                    bool esc = (GetAsyncKeyState(0x1B) & 0x8000) != 0;   // ESC
+                    bool f12 = (GetAsyncKeyState(0x7B) & 0x8000) != 0;   // F12
+                    var (cx, cy) = HumanizedMouse.CursorPos();
+                    var (vx, vy, vw, vh) = HumanizedMouse.VirtualScreen();
+                    bool corner = (cx <= vx + 3 || cx >= vx + vw - 4) && (cy <= vy + 3 || cy >= vy + vh - 4);
+                    if (esc || f12 || corner || (DateTime.Now - started).TotalSeconds > 30)
+                    {
+                        Dispatcher.Invoke(() => MouseLogLine(esc ? "Esc — stopping." : f12 ? "F12 — stopping." : corner ? "Corner — stopping." : "30s limit — stopping."));
+                        _mouseCts?.Cancel();
+                        break;
+                    }
+                    await Task.Delay(40, ct);
+                }
+            }
+            catch (OperationCanceledException) { }
+        });
+
+        Task.Run(async () =>
+        {
+            try
+            {
+                var (vx, vy, vw, vh) = HumanizedMouse.VirtualScreen();
+                while (!ct.IsCancellationRequested)
+                {
+                    double tx = vx + 40 + _mouseRng.NextDouble() * Math.Max(1, vw - 80);
+                    double ty = vy + 40 + _mouseRng.NextDouble() * Math.Max(1, vh - 80);
+                    await HumanizedMouse.MoveTo(tx, ty, _settings, _mouseRng, ct);
+                    await Task.Delay(_settings.Vary(500, _mouseRng), ct);
+                }
+            }
+            catch (OperationCanceledException) { }
+        });
+    }
+
+    private void StopMouseDemo_Click(object sender, RoutedEventArgs e) => StopMouseDemo();
+
+    private void StopMouseDemo()
+    {
+        _mouseCts?.Cancel();
+        MouseLogLine("Mouse demo stopped.");
+    }
+
+    private void MouseLogLine(string msg)
+    {
+        MouseLog.AppendText(msg + Environment.NewLine);
+        MouseLog.ScrollToEnd();
+    }
+
+    // ---------------- Tab 7: heatmap ----------------
+
+    private void ReplayHeat_Click(object sender, RoutedEventArgs e)
+    {
+        StopHeat();
+        string? log = _currentLog ?? EqLogWatcher.FindNewestLog(LogFolderBox.Text.Trim());
+        if (log is null) { HeatStatus.Text = "No log found — set the log folder on tab 1."; return; }
+        _heat.Clear();
+        try
+        {
+            foreach (string line in System.IO.File.ReadLines(log))
+                _heat.Feed(LogEventParser.Parse(line));
+        }
+        catch (Exception ex) { HeatStatus.Text = "Read error: " + ex.Message; return; }
+        RefreshZones();
+        RenderHeat();
+    }
+
+    private void LiveHeat_Click(object sender, RoutedEventArgs e)
+    {
+        StopHeat();
+        string? log = _currentLog ?? EqLogWatcher.FindNewestLog(LogFolderBox.Text.Trim());
+        if (log is null) { HeatStatus.Text = "No log found — set the log folder on tab 1."; return; }
+        _heat.Clear();
+        _heatWatcher = new EqLogWatcher(log);
+        _heatWatcher.LineRead += line => Dispatcher.Invoke(() => { _heat.Feed(LogEventParser.Parse(line)); _heatDirty = true; });
+        _heatWatcher.Start(fromStart: false);
+        _heatTimer.Start();
+        HeatStatus.Text = "Live — move around in-game (with a /loc macro running) and watch it fill in.";
+    }
+
+    private void StopHeat_Click(object sender, RoutedEventArgs e) => StopHeat();
+
+    private void StopHeat()
+    {
+        _heatWatcher?.Dispose();
+        _heatWatcher = null;
+        _heatTimer.Stop();
+    }
+
+    private void SimulateHeat_Click(object sender, RoutedEventArgs e)
+    {
+        StopHeat();
+        _heat.Clear();
+        _heat.Feed(new LogEvent(null, LogEventKind.Zone, "You have entered Demo Zone."));
+        double x = 0, y = 0, vx = 0, vy = 0;
+        for (int i = 0; i < 700; i++)
+        {
+            vx = vx * 0.9 + (_mouseRng.NextDouble() - 0.5) * 7;
+            vy = vy * 0.9 + (_mouseRng.NextDouble() - 0.5) * 7;
+            x += vx; y += vy;
+            _heat.Feed(new LogEvent(null, LogEventKind.Location, "", X: x, Y: y));
+            if (_mouseRng.NextDouble() < 0.06)            // occasional dwell → hotspot
+                for (int k = 0; k < 18; k++)
+                    _heat.Feed(new LogEvent(null, LogEventKind.Location, "", X: x + (_mouseRng.NextDouble() - 0.5) * 4, Y: y + (_mouseRng.NextDouble() - 0.5) * 4));
+        }
+        RefreshZones();
+        RenderHeat();
+    }
+
+    private void ExportHeat_Click(object sender, RoutedEventArgs e)
+    {
+        var dlg = new SaveFileDialog { Filter = "PNG image|*.png", FileName = "eqavatar-heatmap.png" };
+        if (dlg.ShowDialog() != true) return;
+        try
+        {
+            var rtb = new RenderTargetBitmap(HW, HH, 96, 96, PixelFormats.Pbgra32);
+            rtb.Render(HeatSurface);
+            var enc = new PngBitmapEncoder();
+            enc.Frames.Add(BitmapFrame.Create(rtb));
+            using var fs = System.IO.File.Create(dlg.FileName);
+            enc.Save(fs);
+            HeatStatus.Text = "Exported → " + dlg.FileName;
+        }
+        catch (Exception ex) { HeatStatus.Text = "Export failed: " + ex.Message; }
+    }
+
+    private void ZoneCombo_Changed(object sender, SelectionChangedEventArgs e)
+    {
+        if (!_suppressZoneChange) RenderHeat();
+    }
+
+    private void RefreshZones()
+    {
+        _suppressZoneChange = true;
+        string? keep = ZoneCombo.SelectedItem as string ?? _heat.Current;
+        var zones = new List<string>(_heat.Zones);
+        ZoneCombo.ItemsSource = zones;
+        if (keep != null && zones.Contains(keep)) ZoneCombo.SelectedItem = keep;
+        else if (zones.Count > 0) ZoneCombo.SelectedItem = zones[0];
+        _suppressZoneChange = false;
+    }
+
+    private void RenderHeat()
+    {
+        string? zone = ZoneCombo.SelectedItem as string ?? _heat.Current;
+        var pts = _heat.PointsFor(zone);
+        HeatmapRenderer.Result r = HeatmapRenderer.Render(pts, HW, HH);
+        HeatImage.Source = r.Bitmap;
+
+        PathCanvas.Children.Clear();
+        if (r.PixelPoints.Count > 1)
+        {
+            var poly = new Polyline { Stroke = Hex("#4FC3F7"), StrokeThickness = 1.4, Opacity = 0.65 };
+            var pc = new PointCollection();
+            foreach (var p in r.PixelPoints) pc.Add(p);
+            poly.Points = pc;
+            PathCanvas.Children.Add(poly);
+        }
+        if (r.PixelPoints.Count > 0)
+        {
+            var last = r.PixelPoints[^1];
+            var orb = new Ellipse { Width = 12, Height = 12, Fill = Hex("#EAF8FF"), Effect = new DropShadowEffect { Color = Colors.Cyan, BlurRadius = 14, ShadowDepth = 0 } };
+            Canvas.SetLeft(orb, last.X - 6);
+            Canvas.SetTop(orb, last.Y - 6);
+            PathCanvas.Children.Add(orb);
+        }
+        HeatStatus.Text = pts.Count == 0
+            ? "no /loc points for this zone yet"
+            : $"zone: {zone}  ·  {pts.Count} points  ·  {_heat.Zones.Count} zone(s) this session";
+    }
+
+    // ---------------- Tab 8: licensing / hub ----------------
+
+    private void InitLicensingTab()
+    {
+        LicUserBox.Text = _settings.HubUsername;
+        LicUrlBox.Text = _settings.HubUrl;
+        LicKeyBox.Text = _settings.HubApiKey;
+        LicIntervalBox.Text = _settings.HubCheckInSeconds.ToString();
+        LicMachineLabel.Text = _hub.Machine;
+        LicClassCombo.ItemsSource = EqClasses;
+        LicRaceCombo.ItemsSource = EqRaces;
+        if (!string.IsNullOrWhiteSpace(_settings.HubClass)) LicClassCombo.SelectedItem = _settings.HubClass;
+        LicRaceCombo.SelectedItem = string.IsNullOrWhiteSpace(_settings.HubRace) ? "Human" : _settings.HubRace;
+        LicLevelBox.Text = Math.Max(1, _settings.HubLevel).ToString();
+        LicServerBox.Text = string.IsNullOrWhiteSpace(_settings.HubServer) ? "Rivervale" : _settings.HubServer;
+        LicAutoBox.IsChecked = _settings.HubAutoCheckIn;
+        UpdateLicSessionLabel();
+    }
+
+    /// <summary>If the newest log names a character (eqlog_Name_server.txt), fill it in when blank.</summary>
+    private void TryAutoFillCharacter()
+    {
+        if (EqLogWatcher.CharacterFromLog(_currentLog) is not { } who) return;
+        if (string.IsNullOrWhiteSpace(LicUserBox.Text))
+        {
+            LicUserBox.Text = who.name;
+            _settings.HubUsername = who.name;
+            if (!string.IsNullOrWhiteSpace(who.server)) { LicServerBox.Text = who.server; _settings.HubServer = who.server; }
+            LicLogLine($"Character detected from log: {who.name}" + (who.server.Length > 0 ? $" · {who.server}" : ""));
+            UpdateChip();
+        }
+    }
+
+    /// <summary>What this install would report right now: role + cumulative counters.</summary>
+    private (string role, int actions, int kills, int xp) HubStats()
+    {
+        if (_hunt is { Running: true })
+        {
+            HuntStats h = _hunt.Stats;
+            return ("Hunt", h.Fights, h.Kills, 0);
+        }
+        if (_grind is { Running: true })
+        {
+            GrindStats s = _grind.Stats;
+            return ("Grind", s.KeysSent, s.Kills, s.XpGains);
+        }
+        return ("Idle", 0, 0, 0);
+    }
+
+    private void UpdateLicSessionLabel()
+    {
+        if (LicSessionText is null) return;   // before the tab is loaded
+        var (role, a, k, x) = HubStats();
+        LicSessionText.Text = $"reporting: role {role} · actions {a} · kills {k} · xp {x}";
+    }
+
+    private void ApplyLicensingFields()
+    {
+        _settings.HubUsername = LicUserBox.Text.Trim();
+        if (!string.IsNullOrWhiteSpace(LicUrlBox.Text)) _settings.HubUrl = LicUrlBox.Text.Trim();
+        _settings.HubApiKey = LicKeyBox.Text.Trim();
+        if (int.TryParse(LicIntervalBox.Text.Trim(), out int iv))
+            _settings.HubCheckInSeconds = Math.Clamp(iv, 15, 3600);
+        _settings.HubClass = LicClassCombo.SelectedItem as string ?? _settings.HubClass;
+        _settings.HubRace = LicRaceCombo.SelectedItem as string ?? _settings.HubRace;
+        if (int.TryParse(LicLevelBox.Text.Trim(), out int lv)) _settings.HubLevel = Math.Clamp(lv, 1, 120);
+        if (!string.IsNullOrWhiteSpace(LicServerBox.Text)) _settings.HubServer = LicServerBox.Text.Trim();
+    }
+
+    private async Task DoCheckIn(bool manual)
+    {
+        ApplyLicensingFields();
+        if (string.IsNullOrWhiteSpace(_settings.HubUsername))
+        {
+            LicStatusText.Text = "Enter a character/account name to check in as.";
+            if (manual) LicLogLine("No name set — nothing sent.");
+            return;
+        }
+        UpdateLicSessionLabel();
+        var (role, actions, kills, xp) = HubStats();
+        HubResponse r = await _hub.CheckIn(role, actions, kills, xp);
+        RenderHubResponse(r);
+    }
+
+    private void RenderHubResponse(HubResponse r)
+    {
+        if (!r.NetworkOk)
+        {
+            SetTierBadge(null);
+            LicStatusText.Text = "Couldn't reach the hub — " + (r.Error ?? "network error") +
+                                 ".  (The hub is IP-restricted to the GCI network.)";
+            LicLogLine("× check-in failed: " + (r.Error ?? "network"));
+            return;
+        }
+        if (!r.Authorized)
+        {
+            SetTierBadge(null);
+            LicStatusText.Text = "Not authorized — " + (r.Message ?? "check the API key.");
+            LicLogLine("× unauthorized: " + (r.Message ?? ""));
+            return;
+        }
+        SetTierBadge(r.Tier);
+        LicStatusText.Text = $"Online as {_settings.HubUsername}  ·  {r.Message}";
+        LicRolesText.Text = "unlocked roles: " + r.RolesText;
+        LicLastText.Text = $"last check-in: {r.When:g}  ·  next in ~{r.Interval}s";
+        LicLogLine($"✓ {r.Tier} — {r.RolesText}");
+        UpdateChip();
+    }
+
+    private void SetTierBadge(string? tier)
+    {
+        LicTierText.Text = tier ?? "not checked in";
+        if (tier is null)
+        {
+            LicTierBadge.Background = Hex("#20303F");
+            LicTierText.Foreground = Hex("#E6EDF3");
+            return;
+        }
+        if (tier == "Plaid")   // the top tier gets the plaid gradient, matching the dashboard
+        {
+            var g = new LinearGradientBrush { StartPoint = new System.Windows.Point(0, 0), EndPoint = new System.Windows.Point(1, 0) };
+            g.GradientStops.Add(new GradientStop(Color.FromRgb(0xE8, 0x79, 0xF9), 0));
+            g.GradientStops.Add(new GradientStop(Color.FromRgb(0x4F, 0xC3, 0xF7), 0.5));
+            g.GradientStops.Add(new GradientStop(Color.FromRgb(0x7C, 0xE3, 0x8B), 1));
+            LicTierBadge.Background = g;
+            LicTierText.Foreground = Hex("#0B0F16");
+            return;
+        }
+        string col = tier switch { "Hyper" => "#7CE38B", "Ludicrous" => "#FFB74D", _ => "#4FC3F7" };
+        LicTierBadge.Background = Hex(col);
+        LicTierText.Foreground = Hex("#0B0F16");
+    }
+
+    private async void CheckInNow_Click(object sender, RoutedEventArgs e)
+    {
+        LicLogLine("checking in…");
+        await DoCheckIn(true);
+    }
+
+    private void SaveLicensing_Click(object sender, RoutedEventArgs e)
+    {
+        ApplyLicensingFields();
+        _settings.Save();
+        LicMachineLabel.Text = _hub.Machine;
+        LicLogLine("Saved. This install now checks in as " +
+                   (string.IsNullOrWhiteSpace(_settings.HubUsername) ? "(no name yet)" : _settings.HubUsername) + ".");
+        ShowToast("Account settings saved");
+    }
+
+    private void LicAuto_Click(object sender, RoutedEventArgs e)
+    {
+        _settings.HubAutoCheckIn = LicAutoBox.IsChecked == true;
+        if (_settings.HubAutoCheckIn)
+        {
+            ApplyLicensingFields();
+            _hubTimer.Interval = TimeSpan.FromSeconds(Math.Clamp(_settings.HubCheckInSeconds, 15, 3600));
+            _hubTimer.Start();
+            LicLogLine($"Auto check-in on — every {_settings.HubCheckInSeconds}s (persists across restarts).");
+            _ = DoCheckIn(false);
+        }
+        else
+        {
+            _hubTimer.Stop();
+            LicLogLine("Auto check-in off.");
+        }
+        _settings.Save();
+    }
+
+    private void OpenDashboard_Click(object sender, RoutedEventArgs e)
+    {
+        string url = _settings.HubUrl;
+        int i = url.IndexOf("api.php", StringComparison.OrdinalIgnoreCase);
+        string dash = i >= 0 ? url.Substring(0, i) : url;
+        try { Process.Start(new ProcessStartInfo(dash) { UseShellExecute = true }); }
+        catch (Exception ex) { LicLogLine("Couldn't open browser: " + ex.Message); }
+    }
+
+    private void LicLogLine(string msg)
+    {
+        LicLog.AppendText(msg + Environment.NewLine);
+        LicLog.ScrollToEnd();
+    }
+
+    // ---------------- Launch method ----------------
+
+    private void OnLoadedInit()
+    {
+        InitElevationBanner();
+        InitLicensingTab();
+        InitGrindTab();
+        InitSettingsTab();
+        UpdateLaunchLabel();
+        VersionRun.Text = "v" + AppSettings.AppVersion;
+        LoadMascot();
+        _ready = true;
+        UpdateChip();
+        RefreshHome();
+
+        // Detect the character from the newest log, then check in on launch so the dashboard
+        // shows you online immediately — and resume auto check-in if it was left on.
+        try { _currentLog ??= EqLogWatcher.FindNewestLog(LogFolderBox.Text.Trim()); TryAutoFillCharacter(); } catch { }
+        if (!string.IsNullOrWhiteSpace(_settings.HubUsername))
+        {
+            _ = DoCheckIn(false);
+            if (_settings.HubAutoCheckIn)
+            {
+                _hubTimer.Interval = TimeSpan.FromSeconds(Math.Clamp(_settings.HubCheckInSeconds, 15, 3600));
+                _hubTimer.Start();
+            }
+        }
+        // First launch: no method chosen yet → show the picker, but let the splash finish first.
+        if (string.IsNullOrEmpty(_settings.LaunchMethod))
+        {
+            var t = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1.8) };
+            t.Tick += (s, e) => { t.Stop(); OpenLaunchPicker(); };
+            t.Start();
+        }
+    }
+
+    private void LaunchMethod_Click(object sender, RoutedEventArgs e) => OpenLaunchPicker();
+
+    private void OpenLaunchPicker()
+    {
+        var picker = new LaunchMethodPicker(_settings.LaunchMethod) { Owner = this };
+        if (picker.ShowDialog() == true && picker.SelectedId != null)
+        {
+            _settings.LaunchMethod = picker.SelectedId;
+            _settings.Save();
+            UpdateLaunchLabel();
+        }
+    }
+
+    private void UpdateLaunchLabel()
+    {
+        var m = LaunchMethods.ById(_settings.LaunchMethod);
+        LaunchMethodLabel.Text = m is null ? "method: not set" : $"method: {m.Title}";
+    }
+
+    protected override void OnClosed(EventArgs e)
+    {
+        _fgTimer.Stop();
+        _grindTimer.Stop();
+        _hubTimer.Stop();
+        _grind?.Stop();
+        _hunt?.Stop();
+        _login?.Stop();
+        _mouseCts?.Cancel();
+        StopHeat();
+        if (_hwnd != IntPtr.Zero) { UnregisterHotKey(_hwnd, PANIC_HOTKEY_ID); UnregisterHotKey(_hwnd, PROBE_HOTKEY_ID); }
+        StopWatch();
+        _overlay?.Close();
+        base.OnClosed(e);
+    }
+}

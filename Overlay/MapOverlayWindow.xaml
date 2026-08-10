@@ -1,0 +1,87 @@
+<Window x:Class="EQAvatar.Spike.Overlay.MapOverlayWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="EQ Avatar — Zone Map (spike)"
+        Width="440" Height="470"
+        WindowStyle="None" AllowsTransparency="True" Background="Transparent"
+        Topmost="True" ShowInTaskbar="False" ResizeMode="NoResize"
+        WindowStartupLocation="Manual">
+
+    <Border CornerRadius="14" BorderThickness="1.5" BorderBrush="#664FC3F7">
+        <Border.Background>
+            <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
+                <GradientStop Color="#D9101821" Offset="0"/>
+                <GradientStop Color="#D90B0F14" Offset="1"/>
+            </LinearGradientBrush>
+        </Border.Background>
+
+        <Grid>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="*"/>
+                <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+
+            <!-- Header (used for drag + close only when click-through is OFF) -->
+            <Border x:Name="HeaderBar" Grid.Row="0" Background="#204FC3F7" CornerRadius="12,12,0,0"
+                    MouseLeftButtonDown="Header_Drag" Padding="12,8">
+                <Grid>
+                    <TextBlock Text="◈  EAST COMMONLANDS" FontWeight="Bold" Foreground="#CFE9F7"
+                               FontFamily="Consolas" FontSize="13"/>
+                    <TextBlock x:Name="ClickThroughTag" Text="click-through ON" HorizontalAlignment="Right"
+                               Foreground="#7CE38B" FontSize="11" VerticalAlignment="Center"/>
+                </Grid>
+            </Border>
+
+            <!-- The "artistic top-down zone" placeholder. Real zones become a traced map later. -->
+            <Border Grid.Row="1" Margin="10" CornerRadius="10" ClipToBounds="True">
+                <Border.Background>
+                    <RadialGradientBrush GradientOrigin="0.4,0.35" Center="0.4,0.35" RadiusX="0.9" RadiusY="0.9">
+                        <GradientStop Color="#25324A" Offset="0"/>
+                        <GradientStop Color="#141C28" Offset="1"/>
+                    </RadialGradientBrush>
+                </Border.Background>
+
+                <Canvas x:Name="MapCanvas">
+                    <!-- decorative "roads"/borders to suggest a hand-drawn zone -->
+                    <Path Stroke="#2E4056" StrokeThickness="10" StrokeStartLineCap="Round" StrokeEndLineCap="Round"
+                          Data="M 40,300 C 120,250 150,150 260,150 S 380,120 400,60"/>
+                    <Path Stroke="#233246" StrokeThickness="6" StrokeDashArray="2 3"
+                          Data="M 30,120 L 380,320"/>
+
+                    <!-- Breadcrumb trail of where the player has walked -->
+                    <Polyline x:Name="Trail" Stroke="#4FC3F7" StrokeThickness="2.5"
+                              StrokeLineJoin="Round" Opacity="0.9"/>
+
+                    <!-- Glowing player orb (Canvas.Left/Top set in code) -->
+                    <Grid x:Name="Orb" Width="26" Height="26">
+                        <Ellipse Width="26" Height="26">
+                            <Ellipse.Fill>
+                                <RadialGradientBrush>
+                                    <GradientStop Color="#804FC3F7" Offset="0.0"/>
+                                    <GradientStop Color="#004FC3F7" Offset="1.0"/>
+                                </RadialGradientBrush>
+                            </Ellipse.Fill>
+                        </Ellipse>
+                        <Ellipse Width="10" Height="10" HorizontalAlignment="Center" VerticalAlignment="Center"
+                                 Fill="#EAF8FF">
+                            <Ellipse.Effect>
+                                <DropShadowEffect Color="#4FC3F7" BlurRadius="18" ShadowDepth="0"/>
+                            </Ellipse.Effect>
+                        </Ellipse>
+                    </Grid>
+                </Canvas>
+            </Border>
+
+            <!-- Legend / status -->
+            <Grid Grid.Row="2" Margin="12,0,12,10">
+                <TextBlock x:Name="CoordLabel" Text="loc  —, —, —" Foreground="#9AA7B4"
+                           FontFamily="Consolas" FontSize="12"/>
+                <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                    <Button Content="ghost" Click="Grab_Click" Padding="8,2" Margin="0,0,6,0"/>
+                    <Button Content="close" Click="Close_Click" Padding="8,2"/>
+                </StackPanel>
+            </Grid>
+        </Grid>
+    </Border>
+</Window>
