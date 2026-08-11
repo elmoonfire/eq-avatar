@@ -36,7 +36,7 @@ public sealed class AppSettings
     // --- Client Hub (centralized licensing + usage dashboard) ---
     /// <summary>App version reported on every check-in (shown on the dashboard). Also the version
     /// the in-app updater compares against the newest GitHub release tag.</summary>
-    public const string AppVersion = "0.9.12";
+    public const string AppVersion = "0.9.13";
 
     // --- Auto-update (GitHub) ---
     public const string UpdateOwner = "elmoonfire";

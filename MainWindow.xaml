@@ -1084,6 +1084,7 @@
                             <RowDefinition Height="Auto"/>
                             <RowDefinition Height="Auto"/>
                             <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
                             <RowDefinition Height="*"/>
                         </Grid.RowDefinitions>
 
@@ -1186,7 +1187,33 @@
                             </StackPanel>
                         </Border>
 
-                        <TextBox x:Name="LicLog" Grid.Row="5" IsReadOnly="True"
+                        <Border Grid.Row="5" Style="{StaticResource Card}" Margin="0,0,0,10">
+                            <StackPanel>
+                                <Grid>
+                                    <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                                    <TextBlock Text="LAST 10 CONNECTIONS" FontSize="11" Foreground="{StaticResource TextDim}"/>
+                                    <Button Grid.Column="1" Content="Refresh" Click="ConnRefresh_Click" Padding="10,2"/>
+                                </Grid>
+                                <ListView x:Name="ConnList" Height="152" Margin="0,8,0,0" Background="#0C0F13" Foreground="#EAF6FF"
+                                          BorderBrush="#26405A" FontSize="12" VirtualizingPanel.IsVirtualizing="True">
+                                    <ListView.View>
+                                        <GridView>
+                                            <GridViewColumn Header="When" Width="108" DisplayMemberBinding="{Binding WhenText}"/>
+                                            <GridViewColumn Header="Duration" Width="72" DisplayMemberBinding="{Binding DurText}"/>
+                                            <GridViewColumn Header="Roles" Width="150" DisplayMemberBinding="{Binding RolesText}"/>
+                                            <GridViewColumn Header="Actions" Width="68" DisplayMemberBinding="{Binding ActionsText}"/>
+                                            <GridViewColumn Header="Kills" Width="54" DisplayMemberBinding="{Binding KillsText}"/>
+                                            <GridViewColumn Header="XP" Width="74" DisplayMemberBinding="{Binding XpText}"/>
+                                            <GridViewColumn Header="From" Width="104" DisplayMemberBinding="{Binding FromText}"/>
+                                        </GridView>
+                                    </ListView.View>
+                                </ListView>
+                                <TextBlock x:Name="ConnHint" Text="What this install did on the hub — sessions, roles used, and totals. Refreshes after each check-in."
+                                           Foreground="{StaticResource TextDim}" FontSize="11" Margin="0,6,0,0" TextWrapping="Wrap"/>
+                            </StackPanel>
+                        </Border>
+
+                        <TextBox x:Name="LicLog" Grid.Row="6" IsReadOnly="True"
                                  Background="#0C0F13" Foreground="{StaticResource Good}" FontFamily="Consolas" FontSize="11"
                                  VerticalScrollBarVisibility="Auto" TextWrapping="Wrap"/>
                     </Grid>

@@ -182,6 +182,7 @@ public partial class MainWindow : Window
         if (name == "PanelData") EnsureDataLoaded();
         if (name == "PanelSessions") RefreshSessions();
         if (name == "PanelCombat") RefreshCombatPanel();
+        if (name == "PanelLicensing" && ConnList.ItemsSource is null) _ = RefreshConnections();
     }
 
     private void HomeGoGrind_Click(object sender, RoutedEventArgs e) => NavGrind.IsChecked = true;
@@ -1755,6 +1756,7 @@ public partial class MainWindow : Window
         LicLastText.Text = $"last check-in: {r.When:g}  ·  next in ~{r.Interval}s";
         LicLogLine($"✓ {r.Tier} — {r.RolesText}");
         UpdateChip();
+        _ = RefreshConnections();   // keep the "last 10 connections" card current
     }
 
     private void SetTierBadge(string? tier)

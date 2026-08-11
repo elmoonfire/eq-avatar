@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Net.Http;
 using System.Text;
 using System.Text.Json;
@@ -26,6 +27,36 @@ public sealed class HubResponse
     public DateTime When { get; set; }
 
     public string RolesText => Roles is { Length: > 0 } ? string.Join(", ", Roles) : "—";
+}
+
+/// <summary>One past hub connection, as grouped by the server (roles used, work done, where from).</summary>
+public sealed class ConnRow
+{
+    public long Start { get; set; }
+    public long End { get; set; }
+    public int Actions { get; set; }
+    public int Seconds { get; set; }
+    public int Kills { get; set; }
+    public int Xp { get; set; }
+    public int Checkins { get; set; }
+    public string[]? Roles { get; set; }
+    public string? Ip { get; set; }
+
+    public DateTime StartLocal => DateTimeOffset.FromUnixTimeSeconds(Start).LocalDateTime;
+    public string WhenText => StartLocal.ToString("MMM d  HH:mm");
+    public string DurText
+    {
+        get
+        {
+            var t = TimeSpan.FromSeconds(Math.Max(Seconds, End - Start));
+            return t.TotalHours >= 1 ? $"{(int)t.TotalHours}h {t.Minutes:00}m" : $"{Math.Max(1, t.Minutes)}m";
+        }
+    }
+    public string RolesText => Roles is { Length: > 0 } ? string.Join(", ", Roles) : "idle";
+    public string ActionsText => Actions.ToString("N0");
+    public string KillsText => Kills.ToString("N0");
+    public string XpText => Xp.ToString("N0");
+    public string FromText => Ip ?? "";
 }
 
 /// <summary>
@@ -139,6 +170,38 @@ public sealed class HubClient
                                 : (false, r.Message ?? r.Error ?? "hub declined the update");
         }
         catch (Exception ex) { return (false, ex.Message); }
+    }
+
+    /// <summary>
+    /// Fetch this character's last 10 hub connections (server groups check-ins: a 15-minute
+    /// silence starts a new connection). Null = network problem or unauthorized.
+    /// </summary>
+    public async Task<List<ConnRow>?> GetHistory(CancellationToken ct = default)
+    {
+        var payload = new
+        {
+            api_key  = _s.HubApiKey,
+            username = (_s.HubUsername ?? "").Trim(),
+            history  = 1,
+        };
+        try
+        {
+            using var req = new HttpRequestMessage(HttpMethod.Post, _s.HubUrl)
+            { Content = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json") };
+            req.Headers.TryAddWithoutValidation("X-API-KEY", _s.HubApiKey);
+            using var resp = await Http.SendAsync(req, ct);
+            string body = await resp.Content.ReadAsStringAsync(ct);
+            var opts = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
+            HistoryResponse? h = JsonSerializer.Deserialize<HistoryResponse>(body, opts);
+            return h is { Authorized: true } ? (h.History ?? new List<ConnRow>()) : null;
+        }
+        catch { return null; }
+    }
+
+    private sealed class HistoryResponse
+    {
+        public bool Authorized { get; set; }
+        public List<ConnRow>? History { get; set; }
     }
 
     private static HubResponse Parse(string body)
