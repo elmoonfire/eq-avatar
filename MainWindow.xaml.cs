@@ -60,7 +60,7 @@ public partial class MainWindow : Window
     private bool _ready;
     private static readonly string[] Panels =
     {
-        "PanelHome", "PanelLog", "PanelInput", "PanelMap", "PanelMaps", "PanelData", "PanelGrind", "PanelFollower",
+        "PanelHome", "PanelLog", "PanelInput", "PanelMap", "PanelMaps", "PanelData", "PanelSessions", "PanelGrind", "PanelFollower",
         "PanelLogin", "PanelMouse", "PanelHeat", "PanelLicensing", "PanelSettings"
     };
     private static readonly string[] EqClasses =
@@ -179,6 +179,7 @@ public partial class MainWindow : Window
                 el.Visibility = p == name ? Visibility.Visible : Visibility.Collapsed;
         if (name == "PanelHome") RefreshHome();
         if (name == "PanelData") EnsureDataLoaded();
+        if (name == "PanelSessions") RefreshSessions();
     }
 
     private void HomeGoGrind_Click(object sender, RoutedEventArgs e) => NavGrind.IsChecked = true;
@@ -610,9 +611,11 @@ public partial class MainWindow : Window
             _settings.Save();
             _hunt = new HuntRole(sink, rotation, _currentLog, _settings, _heat);
             _hunt.Log += m => Dispatcher.Invoke(() => GrindLogLine(m));
-            _hunt.Stopped += () => Dispatcher.Invoke(() => { _grindTimer.Stop(); UpdateGrindStats(); });
+            _hunt.Stopped += () => Dispatcher.Invoke(() => { _grindTimer.Stop(); UpdateGrindStats(); EndRoleSession(); });
             _hunt.Start();
             _grindTimer.Start();
+            Recorder.Begin("Hunt", SnapshotGrindSettings(hunt: true));
+            if (_mapsWatcher is null) StartMapsWatcher();
             GrindLogLine("HUNT mode (EXPERIMENTAL). In-game: bind 'target nearest NPC' to your Hunt target key, keep a /loc macro running, walk the area once so bounds are known — and WATCH it. F12 or tab away to stop.");
             return;
         }
@@ -620,9 +623,11 @@ public partial class MainWindow : Window
         if (rotation.Count == 0) { GrindLogLine("Rotation is empty — add at least one 'key,delayMs' line."); return; }
         _grind = new GrindRole(sink, rotation, StopOnDeathBox.IsChecked == true, _currentLog, _settings);
         _grind.Log += m => Dispatcher.Invoke(() => GrindLogLine(m));
-        _grind.Stopped += () => Dispatcher.Invoke(() => { _grindTimer.Stop(); UpdateGrindStats(); });
+        _grind.Stopped += () => Dispatcher.Invoke(() => { _grindTimer.Stop(); UpdateGrindStats(); EndRoleSession(); });
         _grind.Start();
         _grindTimer.Start();
+        Recorder.Begin("Grind", SnapshotGrindSettings(hunt: false));
+        if (_mapsWatcher is null) StartMapsWatcher();
         if (_currentLog is null) GrindLogLine("No log found — kills/xp/death-safety are off until you set the log folder on the Log Reader panel.");
     }
 
@@ -797,7 +802,10 @@ public partial class MainWindow : Window
     /// <summary>Push this session's /loc points for the open zone into the view, in map space.</summary>
     private void RefreshMapsHeat()
     {
-        if (MapsHeatBox.IsChecked != true || _mapZone is null) { MapsView.SetHeat(Array.Empty<System.Windows.Point>()); return; }
+        if (MapsHeatBox.IsChecked != true || _mapZone is null)
+        { _sessionHeatPts = null; MapsView.SetHeat(Array.Empty<System.Windows.Point>()); return; }
+        // A recorded session is being replayed — hold it on screen instead of the live heat.
+        if (_sessionHeatPts != null) { MapsView.SetHeat(_sessionHeatPts); MapsStatus.Text = _sessionHeatLabel; return; }
         string? heatZone = _heat.Zones.FirstOrDefault(z => ZoneTable.ShortFor(z) == _mapZone);
         if (heatZone is null) { MapsView.SetHeat(Array.Empty<System.Windows.Point>()); return; }
         var pts = _heat.PointsFor(heatZone);
@@ -855,6 +863,7 @@ public partial class MainWindow : Window
     {
         LogEvent ev = LogEventParser.Parse(line);
         if (_heatWatcher is null) _heat.Feed(ev);   // one shared session heat model, never double-fed
+        FeedRecorder(ev);                            // active role session: trail + xp/aa/kill/death
 
         if (ev.Kind == LogEventKind.Zone)
         {
@@ -911,9 +920,11 @@ public partial class MainWindow : Window
         var sink = new ForegroundSendInputSink(() => _grindTarget);
         _follower = new FollowerRole(sink, rotation, _currentLog, _settings);
         _follower.Log += m => Dispatcher.Invoke(() => FollowerLogLine(m));
-        _follower.Stopped += () => Dispatcher.Invoke(() => { _followerTimer.Stop(); UpdateFollowerStats(); });
+        _follower.Stopped += () => Dispatcher.Invoke(() => { _followerTimer.Stop(); UpdateFollowerStats(); EndRoleSession(); });
         _follower.Start();
         _followerTimer.Start();
+        Recorder.Begin("Follower", SnapshotFollowerSettings());
+        if (_mapsWatcher is null) StartMapsWatcher();
     }
 
     private void StopFollower_Click(object sender, RoutedEventArgs e)
@@ -1882,6 +1893,7 @@ public partial class MainWindow : Window
         _grind?.Stop();
         _hunt?.Stop();
         _follower?.Stop();
+        EndRoleSession();                 // persist a session cut short by closing the app
         _login?.Stop();
         _mouseCts?.Cancel();
         _mapsWatcher?.Dispose();

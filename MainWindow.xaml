@@ -244,6 +244,9 @@
                             <RadioButton x:Name="NavData" Style="{StaticResource NavItem}" GroupName="nav" Tag="PanelData" Checked="Nav_Checked">
                                 <StackPanel Orientation="Horizontal"><TextBlock Style="{StaticResource NavGlyph}" Text="&#xE82D;"/><TextBlock Text="Game Data"/></StackPanel>
                             </RadioButton>
+                            <RadioButton x:Name="NavSessions" Style="{StaticResource NavItem}" GroupName="nav" Tag="PanelSessions" Checked="Nav_Checked">
+                                <StackPanel Orientation="Horizontal"><TextBlock Style="{StaticResource NavGlyph}" Text="&#xE81C;"/><TextBlock Text="Sessions"/></StackPanel>
+                            </RadioButton>
                             <RadioButton x:Name="NavHeat" Style="{StaticResource NavItem}" GroupName="nav" Tag="PanelHeat" Checked="Nav_Checked">
                                 <StackPanel Orientation="Horizontal"><TextBlock Style="{StaticResource NavGlyph}" Text="&#xE9D9;"/><TextBlock Text="Heatmaps"/></StackPanel>
                             </RadioButton>
@@ -591,6 +594,74 @@
                         <TextBox x:Name="GrindLog" Grid.Row="6" Height="96" IsReadOnly="True"
                                  Background="#0C0F13" Foreground="{StaticResource Good}" FontFamily="Consolas" FontSize="11"
                                  VerticalScrollBarVisibility="Auto" TextWrapping="Wrap"/>
+                    </Grid>
+
+                    <!-- ===== SESSIONS (recorded role runs: stats, rates, settings, heatmap replay) ===== -->
+                    <Grid x:Name="PanelSessions" Margin="18" Visibility="Collapsed">
+                        <Grid.Resources>
+                            <Style TargetType="GridViewColumnHeader">
+                                <Setter Property="Background" Value="#121A28"/>
+                                <Setter Property="Foreground" Value="#7FB2D9"/>
+                                <Setter Property="BorderBrush" Value="#26405A"/>
+                                <Setter Property="BorderThickness" Value="0,0,1,1"/>
+                                <Setter Property="Padding" Value="8,5"/>
+                                <Setter Property="FontSize" Value="11.5"/>
+                                <Setter Property="Cursor" Value="Hand"/>
+                                <Setter Property="HorizontalContentAlignment" Value="Left"/>
+                            </Style>
+                        </Grid.Resources>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="*"/>
+                            <RowDefinition Height="Auto"/>
+                        </Grid.RowDefinitions>
+
+                        <StackPanel Grid.Row="0" Margin="0,0,0,6">
+                            <TextBlock Text="Session History" FontSize="18" FontWeight="Bold" Foreground="#EAF6FF"/>
+                            <TextBlock TextWrapping="Wrap" Foreground="{StaticResource TextDim}" FontSize="11.5" Margin="0,3,0,0"
+                                       Text="Every role run records itself: duration, kills, XP ticks, AA points, the exact settings it ran with, and the travel trail. Click a column header to sort (click again to flip) — e.g. sort XP/h to find your best run, open it, and compare its settings against a slower one. XP has no amounts in the game's log, so XP is counted in ticks (gains); AA points are exact."/>
+                        </StackPanel>
+
+                        <WrapPanel Grid.Row="1" Margin="0,0,0,6">
+                            <ComboBox x:Name="SessRoleBox" Width="110" SelectedIndex="0" VerticalAlignment="Center" Margin="0,0,8,0"
+                                      SelectionChanged="SessFilter_Changed">
+                                <ComboBoxItem Content="All roles"/><ComboBoxItem Content="Grind"/><ComboBoxItem Content="Hunt"/><ComboBoxItem Content="Follower"/>
+                            </ComboBox>
+                            <TextBox x:Name="SessFilterBox" Width="220" VerticalAlignment="Center" Margin="0,0,8,0"
+                                     TextChanged="SessFilter_Changed" ToolTip="Filter by zone, role, or any setting value (e.g. 'oasis', 'rest s: 8')."/>
+                            <Button Content="Refresh" Click="SessRefresh_Click" Margin="0,0,10,0"/>
+                            <TextBlock x:Name="SessCount" Text="" VerticalAlignment="Center" Foreground="{StaticResource TextDim}" FontSize="11.5"/>
+                        </WrapPanel>
+
+                        <ListView x:Name="SessList" Grid.Row="2" Background="#0C0F13" Foreground="#EAF6FF" BorderBrush="#26405A"
+                                  SelectionChanged="SessList_Selected" GridViewColumnHeader.Click="SessSort_Click"
+                                  VirtualizingPanel.IsVirtualizing="True" FontSize="12">
+                            <ListView.View>
+                                <GridView>
+                                    <GridViewColumn Width="112" DisplayMemberBinding="{Binding DateText}"><GridViewColumn.Header><GridViewColumnHeader Content="Date" Tag="StartedAt"/></GridViewColumn.Header></GridViewColumn>
+                                    <GridViewColumn Width="76" DisplayMemberBinding="{Binding Role}"><GridViewColumn.Header><GridViewColumnHeader Content="Role" Tag="Role"/></GridViewColumn.Header></GridViewColumn>
+                                    <GridViewColumn Width="84" DisplayMemberBinding="{Binding DurationText}"><GridViewColumn.Header><GridViewColumnHeader Content="Duration" Tag="DurationSeconds"/></GridViewColumn.Header></GridViewColumn>
+                                    <GridViewColumn Width="70" DisplayMemberBinding="{Binding Actions}"><GridViewColumn.Header><GridViewColumnHeader Content="Actions" Tag="Actions"/></GridViewColumn.Header></GridViewColumn>
+                                    <GridViewColumn Width="56" DisplayMemberBinding="{Binding Kills}"><GridViewColumn.Header><GridViewColumnHeader Content="Kills" Tag="Kills"/></GridViewColumn.Header></GridViewColumn>
+                                    <GridViewColumn Width="56" DisplayMemberBinding="{Binding XpTicks}"><GridViewColumn.Header><GridViewColumnHeader Content="XP" Tag="XpTicks"/></GridViewColumn.Header></GridViewColumn>
+                                    <GridViewColumn Width="70" DisplayMemberBinding="{Binding XpRateText}"><GridViewColumn.Header><GridViewColumnHeader Content="XP/h" Tag="XpPerHour"/></GridViewColumn.Header></GridViewColumn>
+                                    <GridViewColumn Width="50" DisplayMemberBinding="{Binding AaPoints}"><GridViewColumn.Header><GridViewColumnHeader Content="AA" Tag="AaPoints"/></GridViewColumn.Header></GridViewColumn>
+                                    <GridViewColumn Width="70" DisplayMemberBinding="{Binding AaRateText}"><GridViewColumn.Header><GridViewColumnHeader Content="AA/h" Tag="AaPerHour"/></GridViewColumn.Header></GridViewColumn>
+                                    <GridViewColumn Width="60" DisplayMemberBinding="{Binding Deaths}"><GridViewColumn.Header><GridViewColumnHeader Content="Deaths" Tag="Deaths"/></GridViewColumn.Header></GridViewColumn>
+                                    <GridViewColumn Width="170" DisplayMemberBinding="{Binding PrimaryZone}"><GridViewColumn.Header><GridViewColumnHeader Content="Zone" Tag="PrimaryZone"/></GridViewColumn.Header></GridViewColumn>
+                                </GridView>
+                            </ListView.View>
+                        </ListView>
+
+                        <Border Grid.Row="3" Background="#0C0F13" BorderBrush="#26405A" BorderThickness="1" CornerRadius="8" Padding="12" Margin="0,8,0,0" MaxHeight="210">
+                            <ScrollViewer VerticalScrollBarVisibility="Auto">
+                                <StackPanel>
+                                    <TextBlock x:Name="SessDetailHint" Text="Select a session to see its settings and heatmap." Foreground="{StaticResource TextDim}" FontSize="12"/>
+                                    <StackPanel x:Name="SessDetail"/>
+                                </StackPanel>
+                            </ScrollViewer>
+                        </Border>
                     </Grid>
 
                     <!-- ===== GAME DATA (Companion catalogs: mobs, raid targets, PoSky, hunting guide) ===== -->
