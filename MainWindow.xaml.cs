@@ -991,6 +991,97 @@ public partial class MainWindow : Window
         FollowerLog.ScrollToEnd();
     }
 
+    // ---------------- Character Sheet OCR (Licensing panel card) ----------------
+
+    private Ocr.InventorySnapshot? _lastSnap;
+
+    private async void OcrRead_Click(object sender, RoutedEventArgs e)
+    {
+        OcrStatus.Text = "reading…";
+        OcrSendBtn.IsEnabled = false;
+        IntPtr hwnd = _grindTarget;
+        if (hwnd == IntPtr.Zero && WindowFinder.GuessEverQuest() is { } w) hwnd = w.Handle;
+        if (hwnd == IntPtr.Zero) { OcrStatus.Text = "no game window found"; return; }
+
+        Ocr.InventorySnapshot? snap = await Ocr.InventoryReader.ReadAsync(hwnd, m => LicLogLine("[ocr] " + m));
+        if (snap is null) { OcrStatus.Text = "inventory not found — open it in-game and retry"; return; }
+        _lastSnap = snap;
+
+        // auto-fill the licensing character fields from the sheet (nothing entered by hand)
+        if (snap.Level is int lv) LicLevelBox.Text = lv.ToString();
+        if (snap.Classes is string cls)
+        {
+            string first = cls.Split('/')[0];
+            string? full = EqClasses.FirstOrDefault(c => c.StartsWith(first, StringComparison.OrdinalIgnoreCase)
+                          || Abbrev(c).Equals(first, StringComparison.OrdinalIgnoreCase));
+            if (full != null) LicClassCombo.SelectedItem = full;
+        }
+        if (!string.IsNullOrWhiteSpace(snap.Name) && string.IsNullOrWhiteSpace(LicUserBox.Text))
+            LicUserBox.Text = snap.Name;
+
+        string hp = Pair(snap, "hp"), mana = Pair(snap, "mana"), end = Pair(snap, "end");
+        string coins = snap.Plat is long p ? $"{p:n0}p {snap.Gold:n0}g {snap.Silver:n0}s {snap.Copper:n0}c" : "—";
+        OcrSummary.Text =
+            $"{snap.Name ?? "?"}  {snap.Level?.ToString() ?? "?"} {snap.Classes ?? "?"}\n" +
+            $"HP {hp}   Mana {mana}   End {end}   AC {snap.First("ac")?.ToString("0") ?? "?"}   " +
+            $"Atk {snap.First("attack")?.ToString("0") ?? "?"}   Spd {snap.First("attack speed")?.ToString("0") ?? "?"}%\n" +
+            $"STR {Stat(snap, "strength")}  STA {Stat(snap, "stamina")}  AGI {Stat(snap, "agility")}  DEX {Stat(snap, "dexterity")}  " +
+            $"WIS {Stat(snap, "wisdom")}  INT {Stat(snap, "intelligence")}  CHA {Stat(snap, "charisma")}\n" +
+            $"MR {Stat(snap, "sv magic")}  FR {Stat(snap, "sv fire")}  CR {Stat(snap, "sv cold")}  " +
+            $"DR {Stat(snap, "sv disease")}  PR {Stat(snap, "sv poison")}  VR {Stat(snap, "sv void")}   Coin {coins}";
+        OcrStatus.Text = snap.Warnings.Count == 0
+            ? $"read OK at {snap.CapturedAt:HH:mm:ss}"
+            : $"read with {snap.Warnings.Count} warning(s): {string.Join(" · ", snap.Warnings.Take(2))}";
+        OcrSendBtn.IsEnabled = snap.Fields.ContainsKey("hp");
+        LicLogLine("[ocr] parsed " + snap.Fields.Count + " rows. Raw lines below:");
+        LicLogLine(snap.RawSeen);
+    }
+
+    private static string Pair(Ocr.InventorySnapshot s, string k) =>
+        s.First(k) is double a ? (s.Nth(k, 1) is double b ? $"{a:0}/{b:0}" : $"{a:0}") : "?";
+    private static string Stat(Ocr.InventorySnapshot s, string k) => s.First(k)?.ToString("0") ?? "?";
+    private static string Abbrev(string cls) => cls.Length <= 3 ? cls.ToUpperInvariant()
+        : cls.Replace(" ", "")[..3].ToUpperInvariant();
+
+    private async void OcrSend_Click(object sender, RoutedEventArgs e)
+    {
+        if (_lastSnap is not { } s) return;
+        OcrStatus.Text = "sending…";
+        ApplyLicensingFields();          // keep name/class/level in settings current before the post
+        _settings.Save();
+
+        object attrs = new
+        {
+            STR = s.First("strength"), STA = s.First("stamina"), AGI = s.First("agility"),
+            DEX = s.First("dexterity"), WIS = s.First("wisdom"), INT = s.First("intelligence"),
+            CHA = s.First("charisma"),
+        };
+        object res = new
+        {
+            MR = s.First("sv magic"), FR = s.First("sv fire"), CR = s.First("sv cold"),
+            DR = s.First("sv disease"), PR = s.First("sv poison"), VR = s.First("sv void"),
+        };
+        object real = new
+        {
+            hp = s.First("hp"), hpmax = s.Nth("hp", 1),
+            mana = s.First("mana"), manamax = s.Nth("mana", 1),
+            end = s.First("end"), endmax = s.Nth("end", 1),
+            ac = s.First("ac"),
+            attack = s.First("attack"),
+            atkspeed = s.First("attack speed"),
+            hpregen = s.First("hp regen"), manaregen = s.First("mana regen"), endregen = s.First("end regen"),
+            weight = s.First("weight"),
+            attrs, res,
+            coin = new { plat = s.Plat, gold = s.Gold, silver = s.Silver, copper = s.Copper },
+            level = s.Level, classes = s.Classes,
+            read_at = s.CapturedAt.ToString("yyyy-MM-dd HH:mm:ss"),
+        };
+        (bool ok, string msg) = await _hub.SendStats(real);
+        OcrStatus.Text = ok ? "profile updated ✓" : "send failed: " + Trunc(msg, 60);
+        LicLogLine("[ocr] " + msg);
+        if (ok) ShowToast("Character sheet sent to profile");
+    }
+
     // ---------------- Settings panel ----------------
 
     private void InitSettingsTab()

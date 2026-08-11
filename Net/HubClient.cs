@@ -109,6 +109,38 @@ public sealed class HubClient
         return r;
     }
 
+    /// <summary>POST the OCR'd character sheet to the hub as real_stats — the profile page
+    /// flips to "read from in-game" and renders these numbers instead of estimates.</summary>
+    public async Task<(bool ok, string message)> SendStats(object realStats, CancellationToken ct = default)
+    {
+        var payload = new
+        {
+            api_key   = _s.HubApiKey,
+            username  = (_s.HubUsername ?? "").Trim(),
+            machine   = Machine,
+            version   = AppSettings.AppVersion,
+            role      = "Idle",
+            actions   = 0, seconds = 0, kills = 0, xp = 0,
+            @class    = _s.HubClass ?? "",
+            level     = _s.HubLevel,
+            race      = _s.HubRace ?? "",
+            server    = _s.HubServer ?? "",
+            real_stats = realStats,
+        };
+        try
+        {
+            using var req = new HttpRequestMessage(HttpMethod.Post, _s.HubUrl)
+            { Content = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json") };
+            req.Headers.TryAddWithoutValidation("X-API-KEY", _s.HubApiKey);
+            using var resp = await Http.SendAsync(req, ct);
+            string body = await resp.Content.ReadAsStringAsync(ct);
+            HubResponse r = Parse(body);
+            return r.Authorized ? (true, "Profile updated — stats read from in-game.")
+                                : (false, r.Message ?? r.Error ?? "hub declined the update");
+        }
+        catch (Exception ex) { return (false, ex.Message); }
+    }
+
     private static HubResponse Parse(string body)
     {
         try
