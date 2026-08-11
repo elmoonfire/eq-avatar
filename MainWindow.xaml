@@ -197,8 +197,26 @@
                         <StackPanel DockPanel.Dock="Bottom">
                             <Button Content="Launch Method" Click="LaunchMethod_Click" HorizontalAlignment="Stretch" Margin="0,8,0,4"/>
                             <TextBlock x:Name="LaunchMethodLabel" Text="method: not set" Foreground="{StaticResource TextDim}" FontSize="11" Margin="2,0,0,0"/>
-                            <Button x:Name="UpdateBtn" Content="Check for updates" Click="CheckUpdates_Click" HorizontalAlignment="Stretch" Margin="0,8,0,2"/>
-                            <TextBlock x:Name="UpdateStatus" Text="" Foreground="{StaticResource TextDim}" FontSize="10.5" Margin="2,0,0,0" TextWrapping="Wrap"/>
+                            <!-- Ambient update chip (Companion-style): one calm line normally, a hairline
+                                 bar while downloading, and a single gold "Restart to update" when a build is
+                                 staged. It glows once on arrival, then rests. No popups, ever. -->
+                            <Border x:Name="UpdaterChip" Margin="0,8,0,2" CornerRadius="6" Padding="10,6"
+                                    Background="Transparent" BorderBrush="Transparent" BorderThickness="1"
+                                    Cursor="Hand" MouseLeftButtonUp="UpdaterChip_Click" ToolTip="Click to check for updates">
+                                <StackPanel>
+                                    <StackPanel Orientation="Horizontal">
+                                        <TextBlock x:Name="UpdaterChipIcon" Text="⟳" FontSize="12" Margin="0,0,6,0"
+                                                   VerticalAlignment="Center" Foreground="#D9B25F" Visibility="Collapsed"/>
+                                        <TextBlock x:Name="UpdaterChipText" Text="not checked yet" Foreground="{StaticResource TextDim}"
+                                                   FontSize="11" TextWrapping="Wrap" VerticalAlignment="Center"/>
+                                    </StackPanel>
+                                    <TextBlock x:Name="UpdaterChipSub" Text="" Foreground="#E6C879" FontSize="10"
+                                               FontFamily="Consolas" Margin="18,1,0,0" Visibility="Collapsed"/>
+                                    <ProgressBar x:Name="UpdaterChipBar" Height="2" Margin="0,5,0,0" Minimum="0" Maximum="100"
+                                                 Value="0" Background="#1AFFFFFF" Foreground="#D9B25F" BorderThickness="0"
+                                                 Visibility="Collapsed"/>
+                                </StackPanel>
+                            </Border>
                             <TextBlock Margin="2,6,0,0" Foreground="#5D6878" FontSize="11">
                                 <Run Text="EQ Avatar"/> <Run x:Name="VersionRun" Text="v0.9.1"/></TextBlock>
                         </StackPanel>

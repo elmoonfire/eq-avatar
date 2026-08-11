@@ -815,35 +815,167 @@ public partial class MainWindow : Window
         }
     }
 
-    // ---------------- Auto-updater (GitHub Releases) ----------------
+    // ---------------- Auto-updater (GitHub Releases) — ambient chip, no popups ----------------
+    // Modeled on EQ Legends Companion's UpdateChip: an update is a reward, not a nag. One calm
+    // resting line ("v0.9.5 · checked 2m ago", click to check), a hairline bar while downloading,
+    // and exactly one loud state — a gold "Restart to update" that glows once, then rests. Errors
+    // fall back to the quiet line; a failed check is not the user's problem.
 
-    private async void CheckUpdates_Click(object sender, RoutedEventArgs e)
+    private static readonly Color UpdGold = Color.FromRgb(0xD9, 0xB2, 0x5F);
+    private static readonly Brush UpdGoldBrush = new SolidColorBrush(UpdGold);
+    private DateTime? _updCheckedAt;
+    private string? _updStagedDir;          // non-null once a build is downloaded & staged (ready state)
+    private bool _updBusy;                   // a check/download is in flight
+    private readonly DispatcherTimer _updAgeTimer = new() { Interval = TimeSpan.FromSeconds(60) };
+    private readonly DispatcherTimer _updPeriodicTimer = new() { Interval = TimeSpan.FromHours(4) };
+
+    private void InitUpdater()
     {
-        UpdateStatus.Text = "Checking…";
-        UpdateBtn.IsEnabled = false;
+        SetUpdaterQuiet();
+        _updAgeTimer.Tick += (_, _) => { if (_updStagedDir == null && !_updBusy) SetUpdaterQuiet(); };
+        _updAgeTimer.Start();
+        _updPeriodicTimer.Tick += async (_, _) => await RunUpdateCheck(false);
+        _updPeriodicTimer.Start();
+        _ = FirstUpdateCheckAsync();          // one quiet check shortly after launch
+    }
+
+    private async Task FirstUpdateCheckAsync()
+    {
+        try { await Task.Delay(TimeSpan.FromSeconds(20)); } catch { /* ignore */ }
+        await RunUpdateCheck(false);
+    }
+
+    /// <summary>Nav chip + Settings button share one action: install if a build is staged, else check.</summary>
+    private void UpdaterChip_Click(object sender, MouseButtonEventArgs e) => TriggerUpdateAction();
+    private void CheckUpdates_Click(object sender, RoutedEventArgs e) => TriggerUpdateAction();
+
+    private void TriggerUpdateAction()
+    {
+        if (_updStagedDir != null)
+        {
+            try { Updater.ApplyAndRestart(_updStagedDir); Application.Current.Shutdown(); }
+            catch (Exception ex) { SetUpdaterQuiet(tip: "Couldn't start the update — " + Trunc(ex.Message, 80)); }
+            return;
+        }
+        if (!_updBusy) _ = RunUpdateCheck(manual: true);
+    }
+
+    private async Task RunUpdateCheck(bool manual)
+    {
+        if (_updBusy || _updStagedDir != null) return;
+        _updBusy = true;
         try
         {
+            SetUpdaterChecking();
             UpdateInfo info = await Updater.CheckAsync();
-            if (info.Error != null) { UpdateStatus.Text = "Check failed: " + Trunc(info.Error, 48); return; }
-            if (!info.Available)
+            _updCheckedAt = DateTime.Now;
+            if (info.Error != null)
             {
-                UpdateStatus.Text = $"Up to date (v{info.CurrentVersion}).";
-                ShowToast("You're up to date");
+                SetUpdaterQuiet(tip: "Last check didn't complete — " + Trunc(info.Error, 80) + ". Click to try again.");
+                if (manual) ShowToast("Update check failed");
                 return;
             }
-            var ok = MessageBox.Show(
-                $"Update available: v{info.LatestVersion}\n(you have v{info.CurrentVersion}).\n\nDownload and install now? EQ Avatar will close, update, and reopen.",
-                "EQ Avatar update", MessageBoxButton.OKCancel, MessageBoxImage.Information);
-            if (ok != MessageBoxResult.OK) { UpdateStatus.Text = $"v{info.LatestVersion} available."; return; }
-
-            UpdateStatus.Text = "Downloading…";
-            string dir = await Updater.DownloadAndStageAsync(info);
-            UpdateStatus.Text = "Installing…";
-            Updater.ApplyAndRestart(dir);
-            Application.Current.Shutdown();
+            if (!info.Available)
+            {
+                SetUpdaterQuiet($"v{info.CurrentVersion} · up to date");
+                if (manual) ShowToast("You're up to date");
+                return;
+            }
+            var progress = new Progress<double>(p => SetUpdaterDownloading((int)Math.Round(p)));
+            SetUpdaterDownloading(0);
+            string dir = await Updater.DownloadAndStageAsync(info, progress);
+            SetUpdaterReady(info.LatestVersion, dir, glow: true);
+            if (manual) ShowToast($"v{info.LatestVersion} ready — click Restart to update");
         }
-        catch (Exception ex) { UpdateStatus.Text = "Update error: " + Trunc(ex.Message, 48); }
-        finally { UpdateBtn.IsEnabled = true; }
+        catch (Exception ex) { SetUpdaterQuiet(tip: "Update error — " + Trunc(ex.Message, 80)); }
+        finally { _updBusy = false; }
+    }
+
+    // ---- chip state rendering ----
+
+    private void SetUpdaterQuiet(string? overrideText = null, string? tip = null)
+    {
+        _updStagedDir = null;
+        UpdaterChip.Effect = null;
+        UpdaterChip.Background = Brushes.Transparent;
+        UpdaterChip.BorderBrush = Brushes.Transparent;
+        UpdaterChipIcon.Visibility = Visibility.Collapsed;
+        UpdaterChipSub.Visibility = Visibility.Collapsed;
+        UpdaterChipBar.Visibility = Visibility.Collapsed;
+        UpdaterChipText.Foreground = (Brush)FindResource("TextDim");
+        UpdaterChipText.FontWeight = FontWeights.Normal;
+        string v = "v" + AppSettings.AppVersion;
+        UpdaterChipText.Text = overrideText
+            ?? (_updCheckedAt is DateTime t ? $"{v} · checked {FormatAge(t)}" : $"{v} · not checked yet");
+        UpdaterChip.ToolTip = tip ?? "Click to check for updates";
+    }
+
+    private void SetUpdaterChecking()
+    {
+        UpdaterChip.Effect = null;
+        UpdaterChip.Background = Brushes.Transparent;
+        UpdaterChip.BorderBrush = Brushes.Transparent;
+        UpdaterChipIcon.Visibility = Visibility.Collapsed;
+        UpdaterChipSub.Visibility = Visibility.Collapsed;
+        UpdaterChipBar.Visibility = Visibility.Collapsed;
+        UpdaterChipText.Foreground = (Brush)FindResource("TextDim");
+        UpdaterChipText.FontWeight = FontWeights.Normal;
+        UpdaterChipText.Text = "Checking for updates…";
+        UpdaterChip.ToolTip = "Checking for updates…";
+    }
+
+    private void SetUpdaterDownloading(int pct)
+    {
+        UpdaterChip.Effect = null;
+        UpdaterChip.Background = Brushes.Transparent;
+        UpdaterChip.BorderBrush = Brushes.Transparent;
+        UpdaterChipIcon.Visibility = Visibility.Collapsed;
+        UpdaterChipSub.Visibility = Visibility.Collapsed;
+        UpdaterChipText.Foreground = (Brush)FindResource("TextDim");
+        UpdaterChipText.FontWeight = FontWeights.Normal;
+        UpdaterChipText.Text = $"Downloading update · {pct}%";
+        UpdaterChipBar.Visibility = Visibility.Visible;
+        UpdaterChipBar.Value = pct;
+        UpdaterChip.ToolTip = "Downloading the new version…";
+    }
+
+    private void SetUpdaterReady(string ver, string dir, bool glow)
+    {
+        _updStagedDir = dir;
+        UpdaterChipBar.Visibility = Visibility.Collapsed;
+        UpdaterChipIcon.Visibility = Visibility.Visible;
+        UpdaterChipText.Text = "Restart to update";
+        UpdaterChipText.Foreground = UpdGoldBrush;
+        UpdaterChipText.FontWeight = FontWeights.SemiBold;
+        UpdaterChipSub.Text = "v" + ver;
+        UpdaterChipSub.Visibility = Visibility.Visible;
+        UpdaterChip.Background = new SolidColorBrush(Color.FromArgb(0x1A, UpdGold.R, UpdGold.G, UpdGold.B));
+        UpdaterChip.BorderBrush = new SolidColorBrush(Color.FromArgb(0x8C, UpdGold.R, UpdGold.G, UpdGold.B));
+        UpdaterChip.ToolTip = $"Restart to update to v{ver}";
+        if (glow)
+        {
+            var eff = new DropShadowEffect { Color = UpdGold, ShadowDepth = 0, BlurRadius = 0, Opacity = 0.85 };
+            UpdaterChip.Effect = eff;
+            var anim = new System.Windows.Media.Animation.DoubleAnimation
+            {
+                From = 0,
+                To = 13,
+                Duration = new Duration(TimeSpan.FromSeconds(1.5)),
+                AutoReverse = true,
+                RepeatBehavior = new System.Windows.Media.Animation.RepeatBehavior(2)
+            };
+            anim.Completed += (_, _) => { if (UpdaterChip.Effect is DropShadowEffect d) d.BlurRadius = 0; };
+            eff.BeginAnimation(DropShadowEffect.BlurRadiusProperty, anim);
+        }
+    }
+
+    private static string FormatAge(DateTime t)
+    {
+        TimeSpan d = DateTime.Now - t;
+        if (d.TotalSeconds < 45) return "just now";
+        if (d.TotalMinutes < 60) return $"{Math.Max(1, (int)d.TotalMinutes)}m ago";
+        if (d.TotalHours < 24) return $"{(int)d.TotalHours}h ago";
+        return $"{(int)d.TotalDays}d ago";
     }
 
     private static string Trunc(string s, int n) => string.IsNullOrEmpty(s) || s.Length <= n ? s : s.Substring(0, n) + "…";
@@ -1263,6 +1395,7 @@ public partial class MainWindow : Window
         _ready = true;
         UpdateChip();
         RefreshHome();
+        InitUpdater();   // ambient update chip + background check (no popups)
 
         // Detect the character from the newest log, then check in on launch so the dashboard
         // shows you online immediately — and resume auto check-in if it was left on.

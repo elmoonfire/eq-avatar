@@ -54,8 +54,9 @@ public static class Updater
         }
     }
 
-    /// <summary>Download the release zip and extract it to a temp staging folder; returns that folder.</summary>
-    public static async Task<string> DownloadAndStageAsync(UpdateInfo info)
+    /// <summary>Download the release zip and extract it to a temp staging folder; returns that folder.
+    /// Reports 0–100 download percent via <paramref name="progress"/> when the server sends a length.</summary>
+    public static async Task<string> DownloadAndStageAsync(UpdateInfo info, IProgress<double>? progress = null)
     {
         if (info.DownloadUrl is null) throw new InvalidOperationException("No download URL for this release.");
         string root = Path.Combine(Path.GetTempPath(), "EQAvatarUpdate");
@@ -64,8 +65,23 @@ public static class Updater
         if (Directory.Exists(root)) Directory.Delete(root, true);
         Directory.CreateDirectory(extract);
 
-        byte[] bytes = await Http.GetByteArrayAsync(info.DownloadUrl);
-        await File.WriteAllBytesAsync(zip, bytes);
+        using (HttpResponseMessage resp = await Http.GetAsync(info.DownloadUrl, HttpCompletionOption.ResponseHeadersRead))
+        {
+            resp.EnsureSuccessStatusCode();
+            long? total = resp.Content.Headers.ContentLength;
+            using Stream src = await resp.Content.ReadAsStreamAsync();
+            using var dst = File.Create(zip);
+            byte[] buf = new byte[81920];
+            long read = 0;
+            int n;
+            while ((n = await src.ReadAsync(buf)) > 0)
+            {
+                await dst.WriteAsync(buf.AsMemory(0, n));
+                read += n;
+                if (total is long tt && tt > 0) progress?.Report(Math.Min(100.0, read * 100.0 / tt));
+            }
+        }
+        progress?.Report(100);
         ZipFile.ExtractToDirectory(zip, extract, overwriteFiles: true);
         try { File.Delete(zip); } catch { /* non-fatal */ }
         return extract;
