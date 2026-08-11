@@ -526,6 +526,7 @@
                             <RowDefinition Height="Auto"/>
                             <RowDefinition Height="Auto"/>
                             <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
                         </Grid.RowDefinitions>
 
                         <StackPanel Grid.Row="0" Margin="0,0,0,8">
@@ -557,8 +558,25 @@
                             <Button Content="Start grind" Click="StartGrind_Click" Margin="0,0,8,8"/>
                             <Button Content="Stop (F12)" Click="StopGrind_Click" Margin="0,0,8,8"/>
                             <Button Content="Save settings" Click="SaveGrind_Click" Margin="0,0,16,8"/>
-                            <CheckBox x:Name="HuntBox" Content="Hunt mode (roam &amp; find mobs)" IsChecked="True"
+                            <CheckBox x:Name="HuntBox" Content="Hunt mode (roam &amp; find mobs)" IsChecked="True" Visibility="Collapsed"
                                       Foreground="{StaticResource Warn}" VerticalAlignment="Center" Margin="0,0,12,8"/>
+                            <TextBlock Text="Mode" VerticalAlignment="Center" Foreground="{StaticResource Warn}" Margin="0,0,5,8" FontWeight="Bold"/>
+                            <ComboBox x:Name="GrindModeBox" Width="215" VerticalAlignment="Center" Margin="0,0,6,8"
+                                      SelectionChanged="GrindMode_Changed"
+                                      ToolTip="Hunt roams and destroys. Camp holds this exact spot (hazard-safe: it barely moves) and kills the respawns. Hunting Zone stays inside the shape you draw on the Maps page. Waypoints patrols the route you draw on the Maps page. Rotation only just cycles keys with no movement.">
+                                <ComboBoxItem Content="Hunt — roam &amp; destroy" IsSelected="True"/>
+                                <ComboBoxItem Content="Camp — hold this spot"/>
+                                <ComboBoxItem Content="Hunting Zone — stay in the drawn area"/>
+                                <ComboBoxItem Content="Waypoints — patrol the route"/>
+                                <ComboBoxItem Content="Rotation only (no movement)"/>
+                            </ComboBox>
+                            <ComboBox x:Name="WaypointOrderBox" Width="150" VerticalAlignment="Center" Margin="0,0,6,8" Visibility="Collapsed"
+                                      ToolTip="Sequence walks 1→N then back again (ping-pong). Random hops between waypoints like a player with no plan.">
+                                <ComboBoxItem Content="In sequence ⇄" IsSelected="True"/>
+                                <ComboBoxItem Content="Random order"/>
+                            </ComboBox>
+                            <Button x:Name="GrindPlanBtn" Content="Draw on map →" Visibility="Collapsed" Margin="0,0,12,8"
+                                    Click="GrindPlan_Click" ToolTip="Opens the Maps page with the drawing tools for this mode."/>
                             <CheckBox x:Name="StopOnDeathBox" Content="stop on death" IsChecked="True"
                                       Foreground="{StaticResource TextDim}" VerticalAlignment="Center" Margin="0,0,16,8"/>
                             <TextBlock Text="fwd" VerticalAlignment="Center" Foreground="{StaticResource TextDim}" Margin="0,0,3,8"/>
@@ -651,6 +669,42 @@
                         <TextBox x:Name="GrindLog" Grid.Row="7" Height="96" IsReadOnly="True"
                                  Background="#0C0F13" Foreground="{StaticResource Good}" FontFamily="Consolas" FontSize="11"
                                  VerticalScrollBarVisibility="Auto" TextWrapping="Wrap"/>
+
+                        <Expander Grid.Row="8" Margin="0,8,0,0" Foreground="{StaticResource Text}" IsExpanded="False"
+                                  Expanded="GrindSess_Expanded">
+                            <Expander.Header>
+                                <TextBlock Text="PREVIOUS GRIND SESSIONS" FontSize="11.5" FontWeight="Bold" Foreground="#7FB2D9"/>
+                            </Expander.Header>
+                            <StackPanel Margin="0,6,0,0">
+                                <WrapPanel Margin="0,0,0,4">
+                                    <TextBlock Text="filter" VerticalAlignment="Center" Foreground="{StaticResource TextDim}" Margin="0,0,5,0"/>
+                                    <TextBox x:Name="GrindSessFilter" Width="180" TextChanged="GrindSessFilter_Changed"
+                                             ToolTip="Type to filter by mode or zone. Click any column header to sort."/>
+                                </WrapPanel>
+                                <DataGrid x:Name="GrindSessGrid" AutoGenerateColumns="False" IsReadOnly="True" MaxHeight="240"
+                                          Background="#0C0F13" RowBackground="#0F141C" AlternatingRowBackground="#111A26"
+                                          Foreground="{StaticResource Text}" BorderBrush="#26405A" BorderThickness="1"
+                                          GridLinesVisibility="None" HeadersVisibility="Column" CanUserAddRows="False"
+                                          FontSize="11.5" ColumnHeaderHeight="26">
+                                    <DataGrid.Columns>
+                                        <DataGridTextColumn Header="When" Binding="{Binding When, StringFormat='{}{0:MMM d HH:mm}'}" Width="105" SortDirection="Descending"/>
+                                        <DataGridTextColumn Header="Mode" Binding="{Binding Mode}" Width="90"/>
+                                        <DataGridTextColumn Header="Zone" Binding="{Binding Zone}" Width="130"/>
+                                        <DataGridTextColumn Header="Duration" Binding="{Binding Duration}" Width="75"/>
+                                        <DataGridTextColumn Header="Kills" Binding="{Binding Kills}" Width="55"/>
+                                        <DataGridTextColumn Header="XP" Binding="{Binding Xp}" Width="50"/>
+                                        <DataGridTextColumn Header="AA" Binding="{Binding Aa}" Width="45"/>
+                                        <DataGridTextColumn Header="Deaths" Binding="{Binding Deaths}" Width="60"/>
+                                        <DataGridTextColumn Header="Dmg dealt" Binding="{Binding Dealt, StringFormat=N0}" Width="85"/>
+                                        <DataGridTextColumn Header="Dmg taken" Binding="{Binding Taken, StringFormat=N0}" Width="*"/>
+                                    </DataGrid.Columns>
+                                </DataGrid>
+                                <Border Background="#13243B" CornerRadius="6" Padding="10,6" Margin="0,4,0,0">
+                                    <TextBlock x:Name="GrindSessTally" FontFamily="Consolas" FontSize="11.5" Foreground="#9FB6CC"
+                                               Text="no sessions yet"/>
+                                </Border>
+                            </StackPanel>
+                        </Expander>
                     </Grid>
 
                     <!-- ===== COMBAT (live DPS meter + per-fight parse from the log) ===== -->
@@ -945,8 +999,25 @@
                             <Button Content="Fit" Click="MapsFit_Click" Margin="0,0,14,4"/>
                             <Button x:Name="MapsOverlayBtn" Content="Overlay in-game" Click="MapsOverlay_Click" Margin="0,0,2,4"
                                     ToolTip="Float THIS map (with heat/trail as toggled) over the game — transparent, always on top. The overlay's 'ghost' button makes it click-through."/>
-                            <Button Content="Export PNG" Click="MapsExport_Click" Margin="0,0,0,4"
+                            <Button Content="Export PNG" Click="MapsExport_Click" Margin="0,0,14,4"
                                     ToolTip="Save the current map view (including the heat overlay) as a PNG to share."/>
+                            <TextBlock Text="plan:" VerticalAlignment="Center" Foreground="{StaticResource Warn}" Margin="0,0,4,4"
+                                       ToolTip="Draw this zone's hunting plan: a waypoint route and/or a hunting-zone shape. Saved per zone; the Grind role's Waypoints / Hunting Zone modes follow it."/>
+                            <ToggleButton x:Name="EditWpBtn" Content="✎ waypoints" Padding="8,3" Margin="0,0,2,4" Checked="MapsEdit_Changed" Unchecked="MapsEdit_Changed"
+                                          ToolTip="Click the map to drop numbered waypoints along the route you want patrolled."/>
+                            <ToggleButton x:Name="EditCircleBtn" Content="◯" Padding="8,3" Margin="0,0,2,4" Checked="MapsEdit_Changed" Unchecked="MapsEdit_Changed"
+                                          ToolTip="Hunting zone as a circle: click the CENTER, then click the EDGE."/>
+                            <ToggleButton x:Name="EditRectBtn" Content="▭" Padding="8,3" Margin="0,0,2,4" Checked="MapsEdit_Changed" Unchecked="MapsEdit_Changed"
+                                          ToolTip="Hunting zone as a rectangle: click two opposite corners."/>
+                            <ToggleButton x:Name="EditPolyBtn" Content="⬠" Padding="8,3" Margin="0,0,2,4" Checked="MapsEdit_Changed" Unchecked="MapsEdit_Changed"
+                                          ToolTip="Hunting zone as any shape: click each corner, then press 'close'."/>
+                            <Button x:Name="EditPolyCloseBtn" Content="close" Padding="8,3" Margin="0,0,6,4" Visibility="Collapsed" Click="MapsPolyClose_Click"
+                                    ToolTip="Close the polygon with the points placed so far (needs at least 3)."/>
+                            <Button Content="clear route" Padding="8,3" Margin="0,0,2,4" Click="MapsClearWp_Click"
+                                    ToolTip="Delete this zone's saved waypoints."/>
+                            <Button Content="clear zone" Padding="8,3" Margin="0,0,6,4" Click="MapsClearShape_Click"
+                                    ToolTip="Delete this zone's saved hunting-zone shape."/>
+                            <TextBlock x:Name="MapsEditHint" Text="" VerticalAlignment="Center" Foreground="{StaticResource TextDim}" Margin="0,0,0,4"/>
                         </WrapPanel>
 
                         <Border Grid.Row="2" CornerRadius="10" BorderBrush="#26405A" BorderThickness="1" ClipToBounds="True" Background="#0B121E">

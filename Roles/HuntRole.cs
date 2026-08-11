@@ -116,6 +116,30 @@ public sealed class HuntRole
     public double? AnchorNs => _startY;
 
     private string Stance => (_s.GrindStance ?? "aggressive").Trim().ToLowerInvariant();
+    private string Mode => (_s.GrindMode ?? "hunt").Trim().ToLowerInvariant();
+
+    // --- zone plan (waypoints + hunting-zone shape drawn on the Maps page) -------------------
+    private ZonePlan? _plan;
+    private string? _planZone;
+    private int _wpIndex = -1, _wpStep = 1;
+    private double _wpTx, _wpTy;
+    private bool _wpHave, _noPlanWarned;
+
+    private ZonePlan? CurrentPlan()
+    {
+        string? stem = ZoneTable.ShortFor(_heat.Current ?? "");
+        if (stem is null) return _plan;                      // zone unknown yet — keep last known
+        if (stem != _planZone)
+        {
+            _planZone = stem;
+            _plan = ZonePlan.Load(stem);
+            _wpIndex = -1; _wpHave = false; _noPlanWarned = false;
+            if (_plan != null)
+                Log?.Invoke($"Plan loaded for {stem}: {_plan.Waypoints.Count} waypoint(s)"
+                          + (_plan.HasShape ? $" + a {_plan.ShapeType} hunting zone." : "."));
+        }
+        return _plan;
+    }
 
     public void Start()
     {
@@ -508,10 +532,15 @@ public sealed class HuntRole
                 }
                 else
                 {
-                    // 1) SEEK — wander within explored bounds (and the tether), then target + consider
+                    // 1) SEEK — move per the selected hunt mode, then target + consider
                     Stats.State = "seeking";
                     await MaybeLoc(ct);
-                    await Wander(ct);
+                    switch (Mode)
+                    {
+                        case "camp": await CampScan(ct); break;              // hold this spot
+                        case "waypoints": await NavigateWaypoints(ct); break; // patrol the route
+                        default: await Wander(ct); break;                     // hunt / zone roam
+                    }
                     if (!_sink.Ready) continue;
                     _sink.Send(_target);                    // target nearest NPC (Tab by default)
                     await Task.Delay(Vary(350), ct);
@@ -604,16 +633,98 @@ public sealed class HuntRole
     }
 
     /// <summary>Periodically fire the user's /loc macro key so position stays live for bounds/heatmap.
-    /// A tight tether needs a fast fix: position refreshes every ~2–3s when the radius is small.</summary>
+    /// A tight tether, a camp, or a waypoint run needs a fast fix (~2–3s).</summary>
     private async Task MaybeLoc(CancellationToken ct)
     {
         if (_loc.IsNone || !_sink.Ready) return;
         int every = Math.Max(2, _s.HuntLocEverySeconds);
-        if (_s.HuntTetherEnabled && _s.HuntTetherRadius <= 100) every = Math.Min(every, 3);
+        if ((_s.HuntTetherEnabled && _s.HuntTetherRadius <= 100) || Mode is "camp" or "waypoints")
+            every = Math.Min(every, 3);
         if ((DateTime.Now - _lastLoc).TotalSeconds < every) return;
         _sink.Send(_loc);
         _lastLoc = DateTime.Now;
         await Task.Delay(Vary(120), ct);
+    }
+
+    /// <summary>CAMP mode: hold this exact spot (hazards all around) — never stride away. Turn in
+    /// place to scan for spawns; only ever MOVE to shuffle back inside a ~12-unit circle around
+    /// where the run started. Targeting/fighting (or the bard melody) does the rest.</summary>
+    private async Task CampScan(CancellationToken ct)
+    {
+        if (_startX is not null && TetherDistance() > 12)
+        {
+            Stats.State = "camp — shuffling back";
+            await GoHome(ct, 12);
+            return;
+        }
+        Stats.State = "camp — holding position";
+        if (_rng.NextDouble() < 0.6)
+            await TurnBy((_rng.Next(2) == 0 ? 1 : -1) * _rng.Next(35, 95), ct);   // scan for the respawn
+        await Task.Delay(Vary(500), ct);
+    }
+
+    /// <summary>WAYPOINTS mode: run the route drawn on the Maps page — closely but never exactly
+    /// (each leg aims at the waypoint ± a wobble, speeds vary, sometimes it just pauses like a
+    /// person checking the area). Fights still happen along the way per stance.</summary>
+    private async Task NavigateWaypoints(CancellationToken ct)
+    {
+        ZonePlan? plan = CurrentPlan();
+        if (plan is null || plan.Waypoints.Count < 2)
+        {
+            if (!_noPlanWarned)
+            { _noPlanWarned = true; Log?.Invoke("Waypoints mode, but this zone has fewer than 2 saved waypoints — draw a route on the Maps page. Roaming instead."); }
+            await Wander(ct);
+            return;
+        }
+        if (_x is not double x || _y is not double y)
+        { await FreshLoc(ct); await HoldKey(_fwd, Vary(500), ct); return; }
+
+        if (!_wpHave) NextWaypoint(plan, announce: true);
+        double dist = Math.Sqrt((x - _wpTx) * (x - _wpTx) + (y - _wpTy) * (y - _wpTy));
+        if (dist < 18)
+        {
+            Log?.Invoke($"Waypoint {_wpIndex + 1}/{plan.Waypoints.Count} reached.");
+            NextWaypoint(plan, announce: false);
+            if (_rng.NextDouble() < 0.35) { Stats.State = "waypoints — pausing"; await Task.Delay(Vary(900), ct); }
+        }
+        Stats.State = $"waypoints — to #{_wpIndex + 1}";
+        RefreshHeadingFromCompass();
+        if (!_hdgValid)
+        { await FreshLoc(ct); await HoldKey(_fwd, 600, ct); await FreshLoc(ct); }
+        if (_hdgValid)
+        {
+            double err = BearingErrorDegTo(_wpTx, _wpTy);
+            if (Math.Abs(err) > 22) await TurnBy(err * (0.75 + _rng.NextDouble() * 0.35), ct);
+        }
+        int run = (int)Math.Clamp(dist / Math.Max(20, _speed) * 1000 * 0.7, 400, 1600);
+        await HoldKey(_fwd, Vary(run), ct);
+        await MaybeLoc(ct);
+    }
+
+    private void NextWaypoint(ZonePlan plan, bool announce)
+    {
+        int n = plan.Waypoints.Count;
+        if ((_s.WaypointOrder ?? "sequence").StartsWith("rand", StringComparison.OrdinalIgnoreCase))
+        {
+            int nxt;
+            do { nxt = _rng.Next(n); } while (n > 1 && nxt == _wpIndex);
+            _wpIndex = nxt;
+        }
+        else
+        {
+            if (_wpIndex < 0) { _wpIndex = 0; _wpStep = 1; }
+            else
+            {
+                if (_wpIndex + _wpStep >= n || _wpIndex + _wpStep < 0) _wpStep = -_wpStep;
+                _wpIndex += _wpStep;
+            }
+        }
+        double[] wp = plan.Waypoints[Math.Clamp(_wpIndex, 0, n - 1)];
+        _wpTx = wp[0] + (_rng.NextDouble() * 2 - 1) * 10;    // human wobble — never the exact point
+        _wpTy = wp[1] + (_rng.NextDouble() * 2 - 1) * 10;
+        _wpHave = true;
+        if (announce)
+            Log?.Invoke($"Patrolling {n} waypoints ({((_s.WaypointOrder ?? "sequence").StartsWith("rand", StringComparison.OrdinalIgnoreCase) ? "random order" : "in sequence, ping-pong")}).");
     }
 
     /// <summary>Run forward with strafes, an occasional back-step, and right-mouse look-around;
@@ -621,6 +732,19 @@ public sealed class HuntRole
     private async Task Wander(CancellationToken ct)
     {
         if (!_sink.Ready) return;
+
+        // HUNTING ZONE: outside the drawn shape → walk back toward its middle before anything else.
+        if (Mode == "zone" && CurrentPlan() is { HasShape: true } zp
+            && _x is double zx && _y is double zy && !zp.Contains(zx, zy))
+        {
+            (double cx2, double cy2) = zp.Center();
+            Stats.State = "zone — returning inside";
+            Log?.Invoke("Outside the hunting zone — heading back in.");
+            RefreshHeadingFromCompass();
+            if (_hdgValid) await TurnBy(BearingErrorDegTo(cx2, cy2), ct);
+            await HoldKey(_fwd, Vary(1100), ct);
+            return;
+        }
 
         double r = Math.Max(10, _s.HuntTetherRadius);
 

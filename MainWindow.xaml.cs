@@ -105,7 +105,9 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        Diag.BotLog.Init(AppSettings.AppVersion);
         Loaded += (_, _) => OnLoadedInit();
+        Loaded += (_, _) => { try { new Ui.SplashWindow(this).Show(); } catch { /* art missing = no splash */ } };
         SourceInitialized += OnSourceInitialized;
         _fgTimer.Tick += (_, _) => TickUi();
         _fgTimer.Start();
@@ -662,7 +664,7 @@ public partial class MainWindow : Window
             _hunt.Stopped += () => Dispatcher.Invoke(() => { _grindTimer.Stop(); UpdateGrindStats(); EndRoleSession(); });
             _hunt.Start();
             _grindTimer.Start();
-            Recorder.Begin("Hunt", SnapshotGrindSettings(hunt: true));
+            Recorder.Begin(GrindModeLabel(), SnapshotGrindSettings(hunt: true));
             if (_mapsWatcher is null) StartMapsWatcher();
             GrindLogLine("HUNT mode (EXPERIMENTAL). In-game: bind 'target nearest NPC' to your Hunt target key, keep a /loc macro running, walk the area once so bounds are known — and WATCH it. F12 or tab away to stop.");
             return;
@@ -700,6 +702,8 @@ public partial class MainWindow : Window
         _settings.LevEnabled = LevBox.IsChecked == true;
         _settings.LevCastKey = LevKeyBox.Text.Trim();
         if (!string.IsNullOrWhiteSpace(LevNameBox.Text)) _settings.LevBuffName = LevNameBox.Text.Trim();
+        _settings.GrindMode = GrindModeSetting();
+        _settings.WaypointOrder = WaypointOrderBox.SelectedIndex == 1 ? "random" : "sequence";
     }
 
     private void TetherSlider_Changed(object sender, RoutedPropertyChangedEventArgs<double> e)
@@ -736,6 +740,9 @@ public partial class MainWindow : Window
         LevBox.IsChecked = _settings.LevEnabled;
         LevKeyBox.Text = _settings.LevCastKey;
         LevNameBox.Text = _settings.LevBuffName;
+        GrindModeBox.SelectedIndex = !_settings.HuntMode ? 4 : (_settings.GrindMode ?? "hunt") switch
+        { "camp" => 1, "zone" => 2, "waypoints" => 3, _ => 0 };
+        WaypointOrderBox.SelectedIndex = (_settings.WaypointOrder ?? "sequence").StartsWith("rand", StringComparison.OrdinalIgnoreCase) ? 1 : 0;
         UpdateCompassStatus();
         OcrAutoBox.IsChecked = _settings.OcrAutoScan;
         if (_settings.OcrAutoScan) StartOcrAuto();
@@ -833,6 +840,8 @@ public partial class MainWindow : Window
         ApplyMapsLayers();
         UpdateMapsFloorChip();
         RefreshMapsHeat();
+        HookPlanEditor();
+        RefreshPlanOverlay();                                // this zone's waypoints + hunting shape
 
         int idx = _mapsZoneStems.IndexOf(stem);
         if (idx >= 0 && MapsZoneBox.SelectedIndex != idx) { _mapsReady = false; MapsZoneBox.SelectedIndex = idx; _mapsReady = true; }
@@ -1088,6 +1097,7 @@ public partial class MainWindow : Window
 
     private void FollowerLogLine(string msg)
     {
+        Diag.BotLog.Log("follower", msg);
         FollowerLog.AppendText(msg + Environment.NewLine);
         FollowerLog.ScrollToEnd();
     }
@@ -1295,6 +1305,7 @@ public partial class MainWindow : Window
 
     private void GrindLogLine(string msg)
     {
+        Diag.BotLog.Log("grind", msg);
         GrindLog.AppendText(msg + Environment.NewLine);
         GrindLog.ScrollToEnd();
     }
@@ -1796,6 +1807,7 @@ public partial class MainWindow : Window
 
     private void LicLogLine(string msg)
     {
+        Diag.BotLog.Log("hub", msg);
         LicLog.AppendText(msg + Environment.NewLine);
         LicLog.ScrollToEnd();
     }

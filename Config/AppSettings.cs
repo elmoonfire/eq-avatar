@@ -36,7 +36,7 @@ public sealed class AppSettings
     // --- Client Hub (centralized licensing + usage dashboard) ---
     /// <summary>App version reported on every check-in (shown on the dashboard). Also the version
     /// the in-app updater compares against the newest GitHub release tag.</summary>
-    public const string AppVersion = "0.9.17";
+    public const string AppVersion = "0.9.18";
 
     // --- Auto-update (GitHub) ---
     public const string UpdateOwner = "elmoonfire";
@@ -117,6 +117,14 @@ public sealed class AppSettings
     public string LevBuffName { get; set; } = "Levitate";
     /// <summary>Safety-net recast interval in minutes (0 = only recast on the worn-off line).</summary>
     public int LevRecastMinutes { get; set; } = 8;
+
+    // --- Hunt modes (0.9.18) ---
+    /// <summary>How the hunt moves: "hunt" (roam & destroy), "camp" (hold this spot — barely
+    /// moves, kills what spawns), "zone" (stay inside the shape drawn on the Maps page),
+    /// "waypoints" (patrol the route drawn on the Maps page).</summary>
+    public string GrindMode { get; set; } = "hunt";
+    /// <summary>Waypoint order: "sequence" (1→N then back, ping-pong) or "random".</summary>
+    public string WaypointOrder { get; set; } = "sequence";
     /// <summary>Licensing panel: keep scanning for the open inventory and read it automatically.</summary>
     public bool OcrAutoScan { get; set; } = false;
 

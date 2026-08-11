@@ -161,7 +161,101 @@ public sealed class MapViewElement : FrameworkElement
 
     protected override void OnMouseLeftButtonUp(MouseButtonEventArgs e)
     {
+        bool wasDrag = _dragging;
         _dragging = false; ReleaseMouseCapture(); Cursor = Cursors.Arrow; ViewChanged?.Invoke();
+        // Editing: a CLICK (not a pan-drag) places a waypoint / shape point at the map spot.
+        if (wasDrag && EditMode.Length > 0 && _map != null)
+        {
+            Point p = e.GetPosition(this);
+            if (Math.Abs(p.X - _dragStart.X) + Math.Abs(p.Y - _dragStart.Y) < 6)
+            {
+                (double mx, double my) = Unproject(p);
+                MapClicked?.Invoke(mx, my);
+            }
+        }
+    }
+
+    // ---- plan editing + overlay (waypoints / hunting-zone shape) ---------------------------
+
+    /// <summary>"" = normal pan/zoom; "wp" | "circle" | "rect" | "poly" arm click-to-place.</summary>
+    public string EditMode { get; set; } = "";
+
+    /// <summary>Raised with MAP-space coords when the user clicks while an edit mode is armed.</summary>
+    public event Action<double, double>? MapClicked;
+
+    private IReadOnlyList<Point> _planWps = Array.Empty<Point>();
+    private string _planShapeType = "";
+    private IReadOnlyList<Point> _planShapePts = Array.Empty<Point>();
+
+    /// <summary>Show the zone plan (all MAP space): numbered waypoints + the hunting-zone shape.</summary>
+    public void SetPlanOverlay(IReadOnlyList<Point> waypoints, string shapeType, IReadOnlyList<Point> shapePts)
+    {
+        _planWps = waypoints; _planShapeType = shapeType; _planShapePts = shapePts;
+        InvalidateVisual();
+    }
+
+    private void DrawPlan(DrawingContext dc)
+    {
+        var amber = Color.FromRgb(0xFF, 0xB7, 0x4D);
+        var green = Color.FromRgb(0x7C, 0xE3, 0x8B);
+
+        if (_planShapePts.Count > 0)
+        {
+            var pen = new Pen(new SolidColorBrush(Color.FromArgb(0xB4, green.R, green.G, green.B)), 1.6)
+            { DashStyle = new DashStyle(new double[] { 5, 3 }, 0) };
+            var fill = new SolidColorBrush(Color.FromArgb(0x12, green.R, green.G, green.B));
+            switch (_planShapeType)
+            {
+                case "circle" when _planShapePts.Count >= 2:
+                {
+                    Point c = Project(_planShapePts[0].X, _planShapePts[0].Y);
+                    Point edge = Project(_planShapePts[1].X, _planShapePts[1].Y);
+                    double rr = Math.Sqrt((edge.X - c.X) * (edge.X - c.X) + (edge.Y - c.Y) * (edge.Y - c.Y));
+                    dc.DrawEllipse(fill, pen, c, rr, rr);
+                    break;
+                }
+                case "rect" when _planShapePts.Count >= 2:
+                {
+                    Point a = Project(_planShapePts[0].X, _planShapePts[0].Y);
+                    Point b = Project(_planShapePts[1].X, _planShapePts[1].Y);
+                    dc.DrawRectangle(fill, pen, new Rect(a, b));
+                    break;
+                }
+                default:
+                {
+                    if (_planShapePts.Count >= 2)
+                    {
+                        var geo = new StreamGeometry();
+                        using (StreamGeometryContext ctx = geo.Open())
+                        {
+                            ctx.BeginFigure(Project(_planShapePts[0].X, _planShapePts[0].Y), _planShapePts.Count >= 3, _planShapePts.Count >= 3);
+                            for (int i = 1; i < _planShapePts.Count; i++)
+                                ctx.LineTo(Project(_planShapePts[i].X, _planShapePts[i].Y), true, true);
+                        }
+                        geo.Freeze();
+                        dc.DrawGeometry(_planShapePts.Count >= 3 ? fill : null, pen, geo);
+                    }
+                    foreach (Point sp in _planShapePts)
+                        dc.DrawEllipse(new SolidColorBrush(green), null, Project(sp.X, sp.Y), 3, 3);
+                    break;
+                }
+            }
+        }
+
+        if (_planWps.Count > 0)
+        {
+            var line = new Pen(new SolidColorBrush(Color.FromArgb(0x66, amber.R, amber.G, amber.B)), 1.3);
+            for (int i = 1; i < _planWps.Count; i++)
+                dc.DrawLine(line, Project(_planWps[i - 1].X, _planWps[i - 1].Y), Project(_planWps[i].X, _planWps[i].Y));
+            for (int i = 0; i < _planWps.Count; i++)
+            {
+                Point s = Project(_planWps[i].X, _planWps[i].Y);
+                dc.DrawEllipse(new SolidColorBrush(Color.FromArgb(0x2E, amber.R, amber.G, amber.B)), null, s, 9, 9);
+                dc.DrawEllipse(null, new Pen(new SolidColorBrush(amber), 1.5), s, 9, 9);
+                FormattedText ft = Text((i + 1).ToString(), 10, amber);
+                dc.DrawText(ft, new Point(s.X - ft.Width / 2, s.Y - ft.Height / 2));
+            }
+        }
     }
 
     protected override void OnRenderSizeChanged(SizeChangedInfo info)
@@ -255,6 +349,7 @@ public sealed class MapViewElement : FrameworkElement
         DrawHeat(dc);
         DrawTrail(dc);
         DrawTether(dc);
+        DrawPlan(dc);
         DrawLabels(dc);
         DrawMarker(dc);
     }
