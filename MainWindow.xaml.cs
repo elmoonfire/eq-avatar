@@ -60,7 +60,7 @@ public partial class MainWindow : Window
     private bool _ready;
     private static readonly string[] Panels =
     {
-        "PanelHome", "PanelLog", "PanelInput", "PanelMap", "PanelMaps", "PanelGrind", "PanelFollower",
+        "PanelHome", "PanelLog", "PanelInput", "PanelMap", "PanelMaps", "PanelData", "PanelGrind", "PanelFollower",
         "PanelLogin", "PanelMouse", "PanelHeat", "PanelLicensing", "PanelSettings"
     };
     private static readonly string[] EqClasses =
@@ -178,6 +178,7 @@ public partial class MainWindow : Window
             if (FindName(p) is UIElement el)
                 el.Visibility = p == name ? Visibility.Visible : Visibility.Collapsed;
         if (name == "PanelHome") RefreshHome();
+        if (name == "PanelData") EnsureDataLoaded();
     }
 
     private void HomeGoGrind_Click(object sender, RoutedEventArgs e) => NavGrind.IsChecked = true;

@@ -19,6 +19,9 @@
   <ItemGroup>
     <Resource Include="assets\eqavatar-512.png" />
     <Resource Include="assets\mascot.jpg" />
+    <Resource Include="assets\data\mobs.json.gz" />
+    <Resource Include="assets\data\bosses.json.gz" />
+    <Resource Include="assets\data\posky.json.gz" />
   </ItemGroup>
 
   <ItemGroup>

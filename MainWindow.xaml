@@ -241,6 +241,9 @@
                             <RadioButton x:Name="NavMaps" Style="{StaticResource NavItem}" GroupName="nav" Tag="PanelMaps" Checked="Nav_Checked">
                                 <StackPanel Orientation="Horizontal"><TextBlock Style="{StaticResource NavGlyph}" Text="&#xE909;"/><TextBlock Text="Maps"/></StackPanel>
                             </RadioButton>
+                            <RadioButton x:Name="NavData" Style="{StaticResource NavItem}" GroupName="nav" Tag="PanelData" Checked="Nav_Checked">
+                                <StackPanel Orientation="Horizontal"><TextBlock Style="{StaticResource NavGlyph}" Text="&#xE82D;"/><TextBlock Text="Game Data"/></StackPanel>
+                            </RadioButton>
                             <RadioButton x:Name="NavHeat" Style="{StaticResource NavItem}" GroupName="nav" Tag="PanelHeat" Checked="Nav_Checked">
                                 <StackPanel Orientation="Horizontal"><TextBlock Style="{StaticResource NavGlyph}" Text="&#xE9D9;"/><TextBlock Text="Heatmaps"/></StackPanel>
                             </RadioButton>
@@ -588,6 +591,111 @@
                         <TextBox x:Name="GrindLog" Grid.Row="6" Height="96" IsReadOnly="True"
                                  Background="#0C0F13" Foreground="{StaticResource Good}" FontFamily="Consolas" FontSize="11"
                                  VerticalScrollBarVisibility="Auto" TextWrapping="Wrap"/>
+                    </Grid>
+
+                    <!-- ===== GAME DATA (Companion catalogs: mobs, raid targets, PoSky, hunting guide) ===== -->
+                    <Grid x:Name="PanelData" Margin="18" Visibility="Collapsed">
+                        <Grid.Resources>
+                            <Style x:Key="DataTab" TargetType="RadioButton">
+                                <Setter Property="Foreground" Value="#9FB6CC"/>
+                                <Setter Property="Cursor" Value="Hand"/>
+                                <Setter Property="Margin" Value="0,0,8,0"/>
+                                <Setter Property="Template">
+                                    <Setter.Value>
+                                        <ControlTemplate TargetType="RadioButton">
+                                            <Border x:Name="bd" CornerRadius="16" Padding="14,6" Background="#121A28" BorderBrush="#26405A" BorderThickness="1">
+                                                <ContentPresenter TextElement.Foreground="{TemplateBinding Foreground}" VerticalAlignment="Center"/>
+                                            </Border>
+                                            <ControlTemplate.Triggers>
+                                                <Trigger Property="IsChecked" Value="True">
+                                                    <Setter TargetName="bd" Property="Background" Value="#1B3A57"/>
+                                                    <Setter TargetName="bd" Property="BorderBrush" Value="#4FC3F7"/>
+                                                    <Setter Property="Foreground" Value="#EAF6FF"/>
+                                                </Trigger>
+                                            </ControlTemplate.Triggers>
+                                        </ControlTemplate>
+                                    </Setter.Value>
+                                </Setter>
+                            </Style>
+                        </Grid.Resources>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="*"/>
+                        </Grid.RowDefinitions>
+
+                        <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,10">
+                            <RadioButton Style="{StaticResource DataTab}" GroupName="datatab" Tag="Mobs" IsChecked="True" Checked="DataTab_Checked" Content="Mobs"/>
+                            <RadioButton Style="{StaticResource DataTab}" GroupName="datatab" Tag="Raid" Checked="DataTab_Checked" Content="Raid Targets"/>
+                            <RadioButton Style="{StaticResource DataTab}" GroupName="datatab" Tag="Sky" Checked="DataTab_Checked" Content="Plane of Sky"/>
+                            <RadioButton Style="{StaticResource DataTab}" GroupName="datatab" Tag="Guide" Checked="DataTab_Checked" Content="Hunting Guide"/>
+                        </StackPanel>
+                        <TextBlock x:Name="DataStatus" Grid.Row="1" FontSize="11" Foreground="{StaticResource TextDim}" Margin="2,0,0,8" Text="opening…"/>
+
+                        <Grid Grid.Row="2">
+                            <!-- MOBS -->
+                            <Grid x:Name="DataViewMobs">
+                                <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+                                <WrapPanel Grid.Row="0" Margin="0,0,0,6">
+                                    <TextBox x:Name="DataSearchBox" Width="320" VerticalAlignment="Center" Margin="0,0,10,0"
+                                             TextChanged="DataSearch_Changed"
+                                             ToolTip="Search 7,872 mobs by name, zone, or drop — e.g. 'guk ghoul', 'flowing black', 'oasis'."/>
+                                    <TextBlock x:Name="MobsCount" Text="" VerticalAlignment="Center" Foreground="{StaticResource TextDim}" FontSize="11.5"/>
+                                </WrapPanel>
+                                <Grid Grid.Row="1">
+                                    <Grid.ColumnDefinitions><ColumnDefinition Width="7*"/><ColumnDefinition Width="6*"/></Grid.ColumnDefinitions>
+                                    <ListBox x:Name="MobsList" Grid.Column="0" Margin="0,0,10,0" Background="#0C0F13" BorderBrush="#26405A"
+                                             SelectionChanged="MobsList_Selected" HorizontalContentAlignment="Stretch"
+                                             VirtualizingPanel.IsVirtualizing="True" ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                                        <ListBox.ItemTemplate>
+                                            <DataTemplate>
+                                                <StackPanel Margin="2,3">
+                                                    <TextBlock Text="{Binding Name}" Foreground="#EAF6FF" FontSize="13"/>
+                                                    <StackPanel Orientation="Horizontal">
+                                                        <TextBlock Text="{Binding LevelText}" Foreground="#7FB2D9" FontSize="11" Margin="0,0,8,0"/>
+                                                        <TextBlock Text="{Binding ZonesText}" Foreground="#5D6878" FontSize="11" TextTrimming="CharacterEllipsis"/>
+                                                    </StackPanel>
+                                                </StackPanel>
+                                            </DataTemplate>
+                                        </ListBox.ItemTemplate>
+                                    </ListBox>
+                                    <Border Grid.Column="1" Background="#0C0F13" BorderBrush="#26405A" BorderThickness="1" CornerRadius="8" Padding="12">
+                                        <ScrollViewer VerticalScrollBarVisibility="Auto">
+                                            <StackPanel x:Name="MobDetail">
+                                                <TextBlock Text="Pick a mob to see its levels, zones, and drops." Foreground="{StaticResource TextDim}" FontSize="12"/>
+                                            </StackPanel>
+                                        </ScrollViewer>
+                                    </Border>
+                                </Grid>
+                            </Grid>
+                            <!-- RAID -->
+                            <ScrollViewer x:Name="DataViewRaid" Visibility="Collapsed" VerticalScrollBarVisibility="Auto">
+                                <StackPanel x:Name="RaidHost" MaxWidth="640" HorizontalAlignment="Left"/>
+                            </ScrollViewer>
+                            <!-- PLANE OF SKY -->
+                            <Grid x:Name="DataViewSky" Visibility="Collapsed">
+                                <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+                                <WrapPanel Grid.Row="0" Margin="0,0,0,8">
+                                    <TextBlock Text="Class" VerticalAlignment="Center" Foreground="{StaticResource TextDim}" Margin="0,0,6,0"/>
+                                    <ComboBox x:Name="SkyClassBox" Width="160" SelectionChanged="SkyClass_Changed"/>
+                                </WrapPanel>
+                                <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
+                                    <StackPanel x:Name="SkyHost" MaxWidth="720" HorizontalAlignment="Left"/>
+                                </ScrollViewer>
+                            </Grid>
+                            <!-- HUNTING GUIDE -->
+                            <Grid x:Name="DataViewGuide" Visibility="Collapsed">
+                                <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+                                <WrapPanel Grid.Row="0" Margin="0,0,0,8">
+                                    <TextBlock Text="Your level" VerticalAlignment="Center" Foreground="{StaticResource TextDim}" Margin="0,0,6,0"/>
+                                    <TextBox x:Name="GuideLevelBox" Width="52" VerticalAlignment="Center" TextChanged="GuideLevel_Changed" Text="50"/>
+                                    <TextBlock Text="zones ranked by how many catalog mobs sit within −3…+2 of you (computed, not hand-curated)" VerticalAlignment="Center" Foreground="{StaticResource TextDim}" FontSize="11" Margin="10,0,0,0"/>
+                                </WrapPanel>
+                                <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
+                                    <StackPanel x:Name="GuideHost" MaxWidth="720" HorizontalAlignment="Left"/>
+                                </ScrollViewer>
+                            </Grid>
+                        </Grid>
                     </Grid>
 
                     <!-- ===== MAPS (Companion-style zone maps: default + Brewall, heat overlay) ===== -->
