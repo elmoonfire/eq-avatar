@@ -604,13 +604,17 @@
                                     <CheckBox x:Name="HostileOnlyBox" Content="only scowls / threatening" Margin="0,0,12,6"
                                               Foreground="{StaticResource Warn}" VerticalAlignment="Center"
                                               ToolTip="Skip anything whose /con attitude isn't scowls or glares threateningly — no faction accidents."/>
+                                    <CheckBox x:Name="BardBox" Content="bard melody mode" Margin="0,0,12,6"
+                                              Foreground="{StaticResource Text}" VerticalAlignment="Center"
+                                              ToolTip="For bards running /melody: the FIRST rotation line is your melody hotkey. It fires once and keeps singing — the bot only recasts when the log says the melody stopped (stun, fizzled note, song end). No more interrupting your own songs."/>
                                 </WrapPanel>
                                 <WrapPanel>
                                     <CheckBox x:Name="TetherBox" Content="tether to start point" VerticalAlignment="Center" Margin="0,0,10,4"
                                               Foreground="{StaticResource Text}"
-                                              ToolTip="Anchors where the run starts (first /loc). Wander past the radius and it turns back."/>
-                                    <Slider x:Name="TetherSlider" Width="180" Minimum="50" Maximum="1500" Value="300"
-                                            TickFrequency="50" IsSnapToTickEnabled="True" VerticalAlignment="Center" Margin="0,0,8,4"
+                                              ToolTip="Anchors where the run starts (first /loc). The bot walks straight back inside whenever it crosses the radius, and the circle is drawn on the Maps page + overlay. Tight radii need a /loc key bound (or a repeating /loc macro) so its position stays fresh."/>
+                                    <Slider x:Name="TetherSlider" Width="180" Minimum="10" Maximum="1500" Value="300"
+                                            TickFrequency="50" IsSnapToTickEnabled="False" VerticalAlignment="Center" Margin="0,0,8,4"
+                                            ToolTip="10-unit steps below 50 for tight little camps; 50-unit steps from 50 up."
                                             ValueChanged="TetherSlider_Changed"/>
                                     <TextBlock x:Name="TetherLabel" Text="300 units" VerticalAlignment="Center"
                                                Foreground="{StaticResource TextDim}" Margin="0,0,16,4" MinWidth="70"/>

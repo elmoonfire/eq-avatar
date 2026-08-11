@@ -132,7 +132,7 @@ public partial class MainWindow
     /// <summary>Phone: "keep it near where it is" — tether to the current spot with the given radius.</summary>
     private (bool ok, string result) RemoteSetGrindArea(RemoteCommand cmd)
     {
-        int radius = int.TryParse(cmd.Str("radius"), out int r) ? Math.Clamp(r, 50, 1500) : _settings.HuntTetherRadius;
+        int radius = int.TryParse(cmd.Str("radius"), out int r) ? Math.Clamp(r, 10, 1500) : _settings.HuntTetherRadius;
         TetherBox.IsChecked = true;
         TetherSlider.Value = radius;
         ApplyHuntFields();

@@ -55,6 +55,29 @@ public sealed class HuntRole
     private DateTime _lastLoc = DateTime.MinValue;
     private readonly List<string> _targets = new();          // directive mode: lowercase mob names
 
+    // --- heading, homing + calibration (0.9.15) -------------------------------------------
+    // The log gives POSITION but not FACING. Heading is derived from the vector between two
+    // /loc points taken while running forward; turns are made with right-mouse mouselook drags
+    // (pixels ∝ degrees) and the px/degree ratio self-calibrates from measured heading changes.
+    private double _hdg;                                     // radians in loc space (x=EW, y=NS)
+    private bool _hdgValid;
+    private double _pxPerDeg;                                // mouselook px per degree (self-tuning)
+    private int _turnSign = 1;                               // drag direction ↔ angle sign (auto-detected)
+    private int _signMisses;
+    private double _cmdTurnDeg;                              // commanded turn sum since last measured heading
+    private double _preTurnHdg;
+    private int _turnsSinceMeasure;
+    private double _fwdMsSinceLoc, _sideMsSinceLoc;          // motion mix between locs (heading quality gate)
+    private double _speed = 50;                              // measured run speed, units/sec (closed-loop)
+    private long _locTicks;                                  // last /loc line time (for FreshLoc waits)
+    private long _prevSegTicks;
+
+    // facing + bard state fed from the log
+    private volatile bool _cantSee, _tooFar;
+    private int _ourSwings;                                  // count of OUR outgoing combat lines
+    private volatile bool _singing;                          // bard melody believed active
+    private DateTime _melodyAt = DateTime.MinValue;
+
     // resolved binds
     private readonly InputKey _fwd, _left, _right, _back, _target, _con, _loc;
 
@@ -76,7 +99,12 @@ public sealed class HuntRole
             string t = line.Trim().ToLowerInvariant();
             if (t.Length > 1 && !_targets.Contains(t)) _targets.Add(t);
         }
+        _pxPerDeg = Math.Clamp(s.HuntTurnPxPerDegree <= 0 ? 3.5 : s.HuntTurnPxPerDegree, 0.8, 12);
     }
+
+    /// <summary>Tether anchor (loc coords) for the map circle; null until the first /loc lands.</summary>
+    public double? AnchorEw => _startX;
+    public double? AnchorNs => _startY;
 
     private string Stance => (_s.GrindStance ?? "aggressive").Trim().ToLowerInvariant();
 
@@ -96,6 +124,8 @@ public sealed class HuntRole
         _cts.Cancel();
         if (_watcher != null) { _watcher.LineRead -= OnLine; _watcher.Dispose(); }
         ReleaseKeys();
+        if (Math.Abs(_s.HuntTurnPxPerDegree - _pxPerDeg) > 0.05)
+        { _s.HuntTurnPxPerDegree = Math.Round(_pxPerDeg, 2); _s.Save(); }   // keep the calibration
         Stats.State = "stopped";
         Log?.Invoke("Hunt stopped.");
         Stopped?.Invoke();
@@ -103,13 +133,43 @@ public sealed class HuntRole
 
     private void OnLine(string raw)
     {
+        // Facing/range feedback + bard interrupts arrive as plain lines the parser doesn't type.
+        if (raw.Contains("You cannot see your target", StringComparison.OrdinalIgnoreCase)) _cantSee = true;
+        else if (raw.Contains("too far away", StringComparison.OrdinalIgnoreCase)) _tooFar = true;
+        if (_s.GrindBardMode && _singing && LogEventParser.MelodyStopped(raw))
+        { _singing = false; Log?.Invoke("Melody stopped (log) — will recast."); }
+
         LogEvent ev = LogEventParser.Parse(raw);
         switch (ev.Kind)
         {
             case LogEventKind.Location:
-                _x = ev.X; _y = ev.Y;
-                if (_startX is null && ev.X is double sx && ev.Y is double sy)
-                { _startX = sx; _startY = sy; if (_s.HuntTetherEnabled) Log?.Invoke($"Tether anchored at /loc {sy:0}, {sx:0} — radius {_s.HuntTetherRadius}."); }
+                if (ev.X is double nx && ev.Y is double ny)
+                {
+                    long now = DateTime.Now.Ticks;
+                    // Heading = direction of the last movement segment, but only when the motion
+                    // between the two locs was forward-dominant (strafes/backsteps corrupt it).
+                    if (_x is double ox && _y is double oy
+                        && _fwdMsSinceLoc >= 300 && _sideMsSinceLoc <= _fwdMsSinceLoc * 0.4)
+                    {
+                        double dx = nx - ox, dy = ny - oy;
+                        double seg = Math.Sqrt(dx * dx + dy * dy);
+                        if (seg >= 5)
+                        {
+                            double measured = Math.Atan2(dy, dx);
+                            CalibrateTurn(measured);
+                            _hdg = measured; _hdgValid = true;
+                            double dt = (now - Interlocked.Read(ref _prevSegTicks)) / (double)TimeSpan.TicksPerSecond;
+                            if (dt > 0.4 && dt < 30)
+                                _speed = Math.Clamp(0.7 * _speed + 0.3 * (seg / dt), 20, 130);
+                        }
+                    }
+                    Interlocked.Exchange(ref _prevSegTicks, now);
+                    Interlocked.Exchange(ref _locTicks, now);
+                    _fwdMsSinceLoc = 0; _sideMsSinceLoc = 0;
+                    _x = nx; _y = ny;
+                    if (_startX is null)
+                    { _startX = nx; _startY = ny; if (_s.HuntTetherEnabled) Log?.Invoke($"Tether anchored at /loc {ny:0}, {nx:0} — radius {_s.HuntTetherRadius}."); }
+                }
                 break;
             case LogEventKind.Consider:
                 _lastCon = LogEventParser.ConsiderReading(ev.Text);
@@ -123,10 +183,133 @@ public sealed class HuntRole
                 if (ev.Text.Contains(" YOU ", StringComparison.Ordinal) || ev.Text.Contains(" YOU!", StringComparison.Ordinal)
                     || ev.Text.Contains(" YOU for ", StringComparison.Ordinal))
                     _attacked = true;
+                else if (ev.Text.StartsWith("You ", StringComparison.Ordinal)
+                         || ev.Text.Contains("by your ", StringComparison.OrdinalIgnoreCase))
+                    Interlocked.Increment(ref _ourSwings);   // OUR output is landing → facing is fine
                 break;
             case LogEventKind.Kill: _mobDead = true; break;
             case LogEventKind.Death: _selfDead = true; break;
         }
+    }
+
+    // ---------------- heading + turning (mouselook) ----------------
+
+    private static double Deg(double rad) => rad * 180.0 / Math.PI;
+    private static double NormDeg(double d) { while (d > 180) d -= 360; while (d < -180) d += 360; return d; }
+
+    /// <summary>Compare a freshly measured heading against the turns commanded since the last
+    /// measurement; tune px/degree (and the drag-direction sign) so turns converge.</summary>
+    private void CalibrateTurn(double measuredHdg)
+    {
+        if (_turnsSinceMeasure < 1 || !_hdgValid) { _cmdTurnDeg = 0; _turnsSinceMeasure = 0; return; }
+        double actual = NormDeg(Deg(measuredHdg) - Deg(_preTurnHdg));
+        double cmd = _cmdTurnDeg;
+        _cmdTurnDeg = 0; _turnsSinceMeasure = 0;
+        if (Math.Abs(cmd) < 25 || Math.Abs(actual) < 8) return;
+        if (Math.Sign(actual) != Math.Sign(cmd))
+        {
+            if (++_signMisses >= 2)
+            { _turnSign = -_turnSign; _signMisses = 0; Log?.Invoke("Turn direction was inverted — flipped mouselook sign."); }
+            return;
+        }
+        _signMisses = 0;
+        double ratio = Math.Clamp(cmd / actual, 0.34, 3.0);
+        _pxPerDeg = Math.Clamp(_pxPerDeg * (0.7 + 0.3 * ratio), 0.8, 12);
+    }
+
+    /// <summary>Turn the character by ~degrees using a right-mouse mouselook drag (positive =
+    /// toward increasing loc-space angle once calibrated). Optimistically updates the heading;
+    /// the next measured /loc segment corrects and calibrates.</summary>
+    private async Task TurnBy(double degrees, CancellationToken ct)
+    {
+        degrees = NormDeg(degrees);
+        if (Math.Abs(degrees) < 5 || !_sink.Ready) return;
+        int totalPx = (int)Math.Round(Math.Abs(degrees) * _pxPerDeg);
+        int dir = (degrees >= 0 ? 1 : -1) * _turnSign;
+        if (_turnsSinceMeasure == 0 && _hdgValid) _preTurnHdg = _hdg;
+        _turnsSinceMeasure++;
+        _cmdTurnDeg += degrees;
+        InputProbe.MouseButtonEvent(MouseBtn.Right, true);
+        _rmbDown = true;
+        try
+        {
+            int moved = 0;
+            while (moved < totalPx && !ct.IsCancellationRequested && _sink.Ready)
+            {
+                int step = Math.Min(totalPx - moved, _rng.Next(14, 27));
+                InputProbe.MouseMoveRelative(dir * step, _rng.Next(-2, 3));
+                moved += step;
+                await Task.Delay(16, ct);
+            }
+        }
+        finally { InputProbe.MouseButtonEvent(MouseBtn.Right, false); _rmbDown = false; }
+        if (_hdgValid) _hdg += degrees * Math.PI / 180.0;    // optimistic; measurement corrects
+        await Task.Delay(Vary(90), ct);
+    }
+
+    /// <summary>Fire the /loc key and wait for a fresh position line (max ~1.4s).</summary>
+    private async Task<bool> FreshLoc(CancellationToken ct, int timeoutMs = 1400)
+    {
+        if (_loc.IsNone || !_sink.Ready) return false;
+        long mark = DateTime.Now.Ticks;
+        _sink.Send(_loc);
+        _lastLoc = DateTime.Now;
+        for (int i = 0; i < timeoutMs / 100; i++)
+        {
+            await Task.Delay(100, ct);
+            if (Interlocked.Read(ref _locTicks) > mark) return true;
+        }
+        return false;
+    }
+
+    /// <summary>Signed degrees to turn so the current heading points at the tether anchor.</summary>
+    private double HomeErrorDeg()
+    {
+        if (_startX is not double sx || _startY is not double sy || _x is not double x || _y is not double y) return 0;
+        double bearing = Math.Atan2(sy - y, sx - x);
+        return NormDeg(Deg(bearing) - Deg(_hdg));
+    }
+
+    /// <summary>Walk STRAIGHT back inside the tether: learn heading from /loc pairs if needed,
+    /// turn toward the anchor, run a distance-sized burst, re-measure, correct. Closed loop —
+    /// no more drifting further away on a blind turn.</summary>
+    private async Task GoHome(CancellationToken ct, double r)
+    {
+        Stats.State = "tether — homing";
+        Log?.Invoke($"Past the tether ({TetherDistance():0} > {r:0}) — walking straight back.");
+        bool blind = _loc.IsNone && (DateTime.Now.Ticks - Interlocked.Read(ref _locTicks)) > 12L * TimeSpan.TicksPerSecond;
+        if (blind)
+        {
+            // No /loc source → we can't steer. Old behavior as a last resort, once.
+            Log?.Invoke("Tether homing needs a /loc key (Grind settings) or a repeating /loc macro — doing a blind turn instead.");
+            await TurnBy(150 * (_rng.Next(2) == 0 ? 1 : -1), ct);
+            await HoldKey(_fwd, Vary(1100), ct);
+            return;
+        }
+        for (int leg = 0; leg < 8 && !ct.IsCancellationRequested && _sink.Ready; leg++)
+        {
+            double before = TetherDistance();
+            if (before <= r * 0.55) { Log?.Invoke($"Back inside the tether ({before:0} ≤ {r:0})."); Stats.State = "seeking"; return; }
+            if (!_hdgValid)
+            {
+                // Learn heading: a short forward stride bracketed by two fresh locs.
+                await FreshLoc(ct);
+                await HoldKey(_fwd, 700, ct);
+                if (!await FreshLoc(ct)) { await Task.Delay(300, ct); }
+                if (!_hdgValid) continue;                    // try another stride
+            }
+            await TurnBy(HomeErrorDeg(), ct);
+            int run = (int)Math.Clamp(before / Math.Max(20, _speed) * 1000 * 0.8, 450, 2400);
+            await HoldKey(_fwd, run, ct);
+            await FreshLoc(ct);
+            double after = TetherDistance();
+            if (after > before + 5 && _hdgValid)
+            {
+                Log?.Invoke($"Homing leg went the wrong way ({before:0} → {after:0}) — reversing.");
+                _hdg += Math.PI;                             // stale heading; flip and re-run the loop
+            }
+        }
+        Log?.Invoke("Homing paused this pass (wall or bad reads) — will keep trying.");
     }
 
     /// <summary>Does the last con line name a mob on the directive target list?</summary>
@@ -204,18 +387,55 @@ public sealed class HuntRole
 
                 // 2) FIGHT — run the rotation until the mob dies / we die / timeout
                 Stats.State = "fighting"; Stats.Fights++;
-                _mobDead = false;
-                DateTime fightStart = DateTime.Now;
-                int i = 0;
+                _mobDead = false; _cantSee = false; _tooFar = false;
+                DateTime fightStart = DateTime.Now, lastOut = DateTime.Now;
+                int i = 0, sweep = 0, swingsSeen = _ourSwings;
                 while (!ct.IsCancellationRequested && !_mobDead && !_selfDead)
                 {
                     if (!_sink.Ready) { await Task.Delay(300, ct); continue; }
                     if ((DateTime.Now - fightStart).TotalSeconds > _s.HuntMaxFightSeconds)
                     { Log?.Invoke("Fight timed out — moving on."); break; }
-                    (InputKey key, int delay) = _rotation.Count > 0 ? _rotation[i % _rotation.Count] : (InputKey.FromVk(0x34), 1400); // default '4'
-                    _sink.Send(key);
-                    i++;
-                    await Task.Delay(Vary(Math.Max(50, delay)), ct);
+
+                    if (_s.GrindBardMode)
+                    {
+                        // Bard melody: fire the melody hotkey ONCE and let it sing. Recast only
+                        // when the log said it stopped (stun / fizzled note / song end).
+                        if (!_singing)
+                        {
+                            (InputKey mk, int _) = _rotation.Count > 0 ? _rotation[0] : (InputKey.FromVk(0x34), 0);
+                            _sink.Send(mk);
+                            _singing = true; _melodyAt = DateTime.Now;
+                            Log?.Invoke("Melody cast — holding until the log says it stopped.");
+                        }
+                        await Task.Delay(Vary(500), ct);
+                    }
+                    else
+                    {
+                        (InputKey key, int delay) = _rotation.Count > 0 ? _rotation[i % _rotation.Count] : (InputKey.FromVk(0x34), 1400); // default '4'
+                        _sink.Send(key);
+                        i++;
+                        await Task.Delay(Vary(Math.Max(50, delay)), ct);
+                    }
+
+                    // FACING FIX: if our hits are landing, all good. If the log says we can't see
+                    // the target / it's out of reach — or nothing lands for a few seconds — turn in
+                    // a widening sweep (and close distance) until our swings start printing.
+                    if (_ourSwings != swingsSeen) { swingsSeen = _ourSwings; sweep = 0; lastOut = DateTime.Now; }
+                    if (_tooFar)
+                    { _tooFar = false; Stats.State = "fighting — closing in"; await HoldKey(_fwd, Vary(430), ct); }
+                    // Bard songs tick slower than melee swings — give them a longer quiet window.
+                    double noOut = _s.GrindBardMode ? 6.5 : 3.2;
+                    if (_cantSee || (DateTime.Now - lastOut).TotalSeconds > noOut)
+                    {
+                        bool sawIt = _cantSee; _cantSee = false;
+                        double[] scan = { 60, -90, 120, -150, 180, 180 };
+                        double a = scan[Math.Min(sweep, scan.Length - 1)]; sweep++;
+                        Stats.State = "fighting — facing target";
+                        Log?.Invoke((sawIt ? "Can't see the target" : "No hits landing") + $" — turning {a:0}° to face it.");
+                        await TurnBy(a, ct);
+                        lastOut = DateTime.Now;
+                        Stats.State = "fighting";
+                    }
                 }
                 if (_mobDead) { Stats.Kills++; Log?.Invoke($"Kill #{Stats.Kills}."); }
                 _attacked = false;                          // a fight resolves the defensive trigger
@@ -231,11 +451,14 @@ public sealed class HuntRole
         finally { ReleaseKeys(); }
     }
 
-    /// <summary>Periodically fire the user's /loc macro key so position stays live for bounds/heatmap.</summary>
+    /// <summary>Periodically fire the user's /loc macro key so position stays live for bounds/heatmap.
+    /// A tight tether needs a fast fix: position refreshes every ~2–3s when the radius is small.</summary>
     private async Task MaybeLoc(CancellationToken ct)
     {
         if (_loc.IsNone || !_sink.Ready) return;
-        if ((DateTime.Now - _lastLoc).TotalSeconds < Math.Max(2, _s.HuntLocEverySeconds)) return;
+        int every = Math.Max(2, _s.HuntLocEverySeconds);
+        if (_s.HuntTetherEnabled && _s.HuntTetherRadius <= 100) every = Math.Min(every, 3);
+        if ((DateTime.Now - _lastLoc).TotalSeconds < every) return;
         _sink.Send(_loc);
         _lastLoc = DateTime.Now;
         await Task.Delay(Vary(120), ct);
@@ -247,15 +470,25 @@ public sealed class HuntRole
     {
         if (!_sink.Ready) return;
 
-        // Tether: past the leash radius → turn hard and burst back toward the anchor's side.
-        if (_s.HuntTetherEnabled && TetherDistance() > Math.Max(50, _s.HuntTetherRadius))
+        double r = Math.Max(10, _s.HuntTetherRadius);
+
+        // Tether breached → closed-loop homing straight back to the anchor.
+        if (_s.HuntTetherEnabled && TetherDistance() > r)
         {
-            Stats.State = "tether — heading home";
-            Log?.Invoke($"Past the tether radius ({TetherDistance():0} > {_s.HuntTetherRadius}) — turning back.");
-            await LookAround(ct, big: true);                // reorient the camera
-            await HoldKey(_rng.Next(2) == 0 ? _left : _right, Vary(700), ct);
-            await HoldKey(_fwd, Vary(900), ct);             // stride back before hunting again
+            await GoHome(ct, r);
             return;
+        }
+
+        // Pre-emptive containment: past ~70% of the leash, curve the wander back toward the
+        // anchor BEFORE crossing the line — the circle becomes a wall, not a rubber band.
+        if (_s.HuntTetherEnabled && _hdgValid && TetherDistance() > r * 0.7)
+        {
+            double err = HomeErrorDeg();
+            if (Math.Abs(err) > 35)
+            {
+                Stats.State = "tether — curving back";
+                await TurnBy(err * 0.8, ct);
+            }
         }
 
         var bounds = _heat.BoundsFor(_heat.Current);
@@ -279,26 +512,39 @@ public sealed class HuntRole
             await HoldKey(_back, Vary(240), ct);                                // occasional back-step
 
         int lo = Math.Max(200, _s.HuntRunMsMin), hi = Math.Max(lo + 1, _s.HuntRunMsMax);
+        if (_s.HuntTetherEnabled)
+        {
+            // Small pens need small strides: cap the forward burst so one run can't blow
+            // through the whole circle between two /loc fixes (r=20 → ~350ms strides).
+            int cap = (int)Math.Clamp(r * 14, 350, hi);
+            lo = Math.Min(lo, Math.Max(200, cap - 250));
+            hi = Math.Max(lo + 1, cap);
+        }
         await HoldKey(_fwd, _rng.Next(lo, hi), ct);
     }
 
-    /// <summary>Hold right-mouse and nudge the cursor sideways to pan the view — human-like looking around.</summary>
+    /// <summary>Hold right-mouse and nudge the cursor sideways to pan the view — human-like looking
+    /// around. Mouselook TURNS the character, so the heading estimate is nudged by the same amount.</summary>
     private async Task LookAround(CancellationToken ct, bool big)
     {
         if (!_s.HuntLookAround || !_sink.Ready) return;
         InputProbe.MouseButtonEvent(MouseBtn.Right, true);
         _rmbDown = true;
+        int sumPx = 0;
         try
         {
             int steps = big ? _rng.Next(6, 12) : _rng.Next(3, 6);
             int dir = _rng.Next(2) == 0 ? -1 : 1;
             for (int i = 0; i < steps && !ct.IsCancellationRequested && _sink.Ready; i++)
             {
-                InputProbe.MouseMoveRelative(dir * _rng.Next(16, 40), _rng.Next(-3, 4));
+                int dx = dir * _rng.Next(16, 40);
+                InputProbe.MouseMoveRelative(dx, _rng.Next(-3, 4));
+                sumPx += dx;
                 await Task.Delay(28, ct);
             }
         }
         finally { InputProbe.MouseButtonEvent(MouseBtn.Right, false); _rmbDown = false; }
+        if (_hdgValid) _hdg += sumPx / _pxPerDeg * _turnSign * Math.PI / 180.0;
     }
 
     /// <summary>Hold a keyboard key for ms, releasing immediately if EQ loses focus or we're cancelled.
@@ -307,13 +553,20 @@ public sealed class HuntRole
     {
         if (key.IsNone || key.IsMouse || !_sink.Ready) return;
         InputProbe.KeyDown(key.Vk);
+        DateTime began = DateTime.Now;
         try
         {
-            DateTime end = DateTime.Now.AddMilliseconds(ms);
+            DateTime end = began.AddMilliseconds(ms);
             while (DateTime.Now < end && !ct.IsCancellationRequested && _sink.Ready)
                 await Task.Delay(50, ct);
         }
-        finally { InputProbe.KeyUp(key.Vk); }
+        finally
+        {
+            InputProbe.KeyUp(key.Vk);
+            double held = (DateTime.Now - began).TotalMilliseconds;
+            if (key.Vk == _fwd.Vk) _fwdMsSinceLoc += held;      // heading-quality bookkeeping
+            else _sideMsSinceLoc += held;
+        }
     }
 
     private void ReleaseKeys()

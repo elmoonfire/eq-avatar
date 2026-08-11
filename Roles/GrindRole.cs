@@ -39,6 +39,7 @@ public sealed class GrindRole
     private readonly Random _rng = new();
     private DateTime _pausedUntil = DateTime.MinValue;
     private CancellationTokenSource? _cts;
+    private volatile bool _singing;          // bard melody mode: melody believed active
 
     public GrindStats Stats { get; } = new();
     public bool Running => _cts is { IsCancellationRequested: false };
@@ -56,6 +57,7 @@ public sealed class GrindRole
     public void Start()
     {
         if (Running) return;
+        _singing = false;
         _cts = new CancellationTokenSource();
         if (_watcher != null)
         {
@@ -101,6 +103,25 @@ public sealed class GrindRole
                 }
                 if (Stats.Paused) { Stats.Paused = false; Log?.Invoke("Resumed."); }
 
+                // Bard melody mode: the first rotation line is the /melody hotkey. Press it ONCE
+                // and let it sing — it only re-fires after the log reports the melody stopped
+                // (stun, fizzled note, song end), so the bot never interrupts its own songs.
+                if (_settings.GrindBardMode)
+                {
+                    if (!_singing)
+                    {
+                        var (mk, _) = _rotation[0];
+                        if (_sink.Send(mk))
+                        {
+                            Stats.KeysSent++; Stats.Loops++;
+                            _singing = true;
+                            Log?.Invoke("Melody cast — holding until the log says it stopped.");
+                        }
+                    }
+                    await Task.Delay(_settings.Vary(600, _rng), ct);
+                    continue;
+                }
+
                 var (key, delay) = _rotation[i % _rotation.Count];
                 if (_sink.Send(key))
                 {
@@ -118,6 +139,9 @@ public sealed class GrindRole
 
     private void OnLine(string raw)
     {
+        if (_settings.GrindBardMode && _singing && LogEventParser.MelodyStopped(raw))
+        { _singing = false; Log?.Invoke("Melody stopped (log) — recasting."); }
+
         LogEvent ev = LogEventParser.Parse(raw);
         switch (ev.Kind)
         {

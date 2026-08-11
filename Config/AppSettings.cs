@@ -36,7 +36,7 @@ public sealed class AppSettings
     // --- Client Hub (centralized licensing + usage dashboard) ---
     /// <summary>App version reported on every check-in (shown on the dashboard). Also the version
     /// the in-app updater compares against the newest GitHub release tag.</summary>
-    public const string AppVersion = "0.9.14";
+    public const string AppVersion = "0.9.15";
 
     // --- Auto-update (GitHub) ---
     public const string UpdateOwner = "elmoonfire";
@@ -100,6 +100,12 @@ public sealed class AppSettings
     public int HuntTetherRadius { get; set; } = 300;
     /// <summary>Directive target list — one mob name per line (fed from the Game Data page).</summary>
     public string GrindTargetMobs { get; set; } = "";
+    /// <summary>Bard melody mode: cast the first rotation line once and let it sing; recast ONLY
+    /// when the log shows the melody stopped (stun, fizzled note, song ends).</summary>
+    public bool GrindBardMode { get; set; } = false;
+    /// <summary>Mouselook calibration: horizontal pixels of right-mouse drag per degree of turn.
+    /// Self-tunes from measured /loc headings while the tether homing runs.</summary>
+    public double HuntTurnPxPerDegree { get; set; } = 3.5;
     /// <summary>Licensing panel: keep scanning for the open inventory and read it automatically.</summary>
     public bool OcrAutoScan { get; set; } = false;
 

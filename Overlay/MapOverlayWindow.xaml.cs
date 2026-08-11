@@ -67,6 +67,9 @@ public partial class MapOverlayWindow : Window
 
     public void SetHeat(IReadOnlyList<Point> mapSpacePoints) => OverlayMap.SetHeat(mapSpacePoints);
 
+    public void SetTether(double mapX, double mapY, double radiusUnits, bool on)
+        => OverlayMap.SetTether(mapX, mapY, radiusUnits, on);
+
     public void PushLoc(double mapX, double mapY)
     {
         OverlayMap.PushLoc(mapX, mapY);

@@ -595,6 +595,26 @@ public partial class MainWindow : Window
         _overlay.ShowMap(data, ZoneTable.NameFor(_mapZone));
         _overlay.SetLayers(showHeat: MapsHeatBox.IsChecked == true, showTrail: MapsTrailBox.IsChecked == true);
         _overlay.SetHeat(MapsView.HeatPoints);
+        PushTetherToMaps();
+    }
+
+    /// <summary>Paint (or clear) the live tether circle on the Maps page + in-game overlay while a
+    /// tethered Hunt is running — the pen the bot has drawn itself.</summary>
+    private void PushTetherToMaps()
+    {
+        if (_settings.HuntTetherEnabled && _hunt is { Running: true } h
+            && h.AnchorEw is double ew && h.AnchorNs is double ns)
+        {
+            (double mx, double my) = EqMapParser.MapFromLoc(ns: ns, ew: ew);
+            double r = Math.Max(10, _settings.HuntTetherRadius);
+            MapsView.SetTether(mx, my, r, true);
+            _overlay?.SetTether(mx, my, r, true);
+        }
+        else
+        {
+            MapsView.SetTether(0, 0, 0, false);
+            _overlay?.SetTether(0, 0, 0, false);
+        }
     }
 
     private void MapsExport_Click(object sender, RoutedEventArgs e)
@@ -676,11 +696,19 @@ public partial class MainWindow : Window
         _settings.HuntTetherEnabled = TetherBox.IsChecked == true;
         _settings.HuntTetherRadius = (int)TetherSlider.Value;
         _settings.GrindTargetMobs = TargetMobsBox.Text;
+        _settings.GrindBardMode = BardBox.IsChecked == true;
     }
 
     private void TetherSlider_Changed(object sender, RoutedPropertyChangedEventArgs<double> e)
     {
-        if (TetherLabel != null) TetherLabel.Text = $"{(int)TetherSlider.Value} units";
+        if (TetherLabel is null) return;
+        // 10-unit steps for tight little camps below 50; the familiar 50-unit steps above.
+        double v = TetherSlider.Value;
+        double snapped = Math.Clamp(v < 50 ? Math.Round(v / 10) * 10 : Math.Round(v / 50) * 50, 10, 1500);
+        if (Math.Abs(snapped - v) > 0.01) { TetherSlider.Value = snapped; return; }   // re-enters once
+        TetherLabel.Text = $"{(int)snapped} units";
+        _settings.HuntTetherRadius = (int)snapped;
+        PushTetherToMaps();
     }
 
     /// <summary>Fill the Grind keybind boxes from saved settings on load.</summary>
@@ -698,9 +726,10 @@ public partial class MainWindow : Window
         (_settings.GrindStance switch { "defensive" => StanceDef, "directive" => StanceDir, _ => StanceAggro }).IsChecked = true;
         HostileOnlyBox.IsChecked = _settings.HuntHostileOnly;
         TetherBox.IsChecked = _settings.HuntTetherEnabled;
-        TetherSlider.Value = Math.Clamp(_settings.HuntTetherRadius, 50, 1500);
+        TetherSlider.Value = Math.Clamp(_settings.HuntTetherRadius, 10, 1500);
         TetherLabel.Text = $"{(int)TetherSlider.Value} units";
         TargetMobsBox.Text = _settings.GrindTargetMobs;
+        BardBox.IsChecked = _settings.GrindBardMode;
         OcrAutoBox.IsChecked = _settings.OcrAutoScan;
         if (_settings.OcrAutoScan) StartOcrAuto();
         if (!string.IsNullOrWhiteSpace(_settings.HubServer)) LoginServerBox.Text = _settings.HubServer;
@@ -934,6 +963,7 @@ public partial class MainWindow : Window
                 (double mx, double my) = EqMapParser.MapFromLoc(ns: y, ew: x);
                 MapsView.PushLoc(mx, my);
                 _overlay?.PushLoc(mx, my);
+                PushTetherToMaps();                          // circle appears once the anchor locks
             }
             if (MapsHeatBox.IsChecked == true && ++_mapsHeatTick % 12 == 0) RefreshMapsHeat();
         }
@@ -1219,6 +1249,7 @@ public partial class MainWindow : Window
             SetGrindBanner(paused ? 1 : 2, paused ? "PAUSED — EQ not focused" : "RUNNING — rotation");
         }
         else SetGrindBanner(0, "STOPPED — press Start grind");
+        PushTetherToMaps();                                  // circle tracks role state (cheap no-op when unchanged)
     }
 
     /// <summary>kind: 0 = stopped (gray), 1 = paused (amber), 2 = active (green).</summary>

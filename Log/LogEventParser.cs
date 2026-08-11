@@ -168,4 +168,23 @@ public static class LogEventParser
         if (m.Contains("as an ally")) return ConsiderAttitude.Ally;
         return ConsiderAttitude.Unknown;
     }
+
+    /// <summary>
+    /// Did this raw log line say the bard's melody/singing stopped? Used by the bard melody
+    /// mode: the rotation fires ONCE and is only re-cast when one of these prints — a stun,
+    /// a fizzled note, the song ending, or /melody stopping. Classic wording variants:
+    /// "Your song ends abruptly." · "You miss a note, bringing your song to a close!" ·
+    /// "You are stunned!" · "Your melody has ended." · "You can no longer sing." ·
+    /// "You are too distracted to sing." · "You haven't recovered yet..."
+    /// </summary>
+    public static bool MelodyStopped(string rawLine)
+    {
+        return rawLine.Contains("song ends", StringComparison.OrdinalIgnoreCase)
+            || rawLine.Contains("miss a note", StringComparison.OrdinalIgnoreCase)
+            || rawLine.Contains("You are stunned", StringComparison.OrdinalIgnoreCase)
+            || rawLine.Contains("melody has ended", StringComparison.OrdinalIgnoreCase)
+            || rawLine.Contains("no longer sing", StringComparison.OrdinalIgnoreCase)
+            || rawLine.Contains("too distracted to sing", StringComparison.OrdinalIgnoreCase)
+            || rawLine.Contains("stops singing", StringComparison.OrdinalIgnoreCase);
+    }
 }

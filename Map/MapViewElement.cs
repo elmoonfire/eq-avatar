@@ -86,6 +86,18 @@ public sealed class MapViewElement : FrameworkElement
 
     public void SetHeat(IReadOnlyList<Point> mapSpacePoints) { _heatPts = mapSpacePoints; InvalidateVisual(); }
 
+    private Point? _tether;                  // tether anchor in map space
+    private double _tetherR;                 // radius in map units
+
+    /// <summary>Show (or clear) the Grind tether circle: anchor in MAP space + radius in units.</summary>
+    public void SetTether(double mapX, double mapY, double radiusUnits, bool on)
+    {
+        Point? next = on ? new Point(mapX, mapY) : null;
+        if (next == _tether && Math.Abs(radiusUnits - _tetherR) < 0.5) return;
+        _tether = next; _tetherR = radiusUnits;
+        InvalidateVisual();
+    }
+
     /// <summary>The heat points currently loaded (map space) — lets the overlay mirror them.</summary>
     public IReadOnlyList<Point> HeatPoints => _heatPts;
 
@@ -242,8 +254,26 @@ public sealed class MapViewElement : FrameworkElement
 
         DrawHeat(dc);
         DrawTrail(dc);
+        DrawTether(dc);
         DrawLabels(dc);
         DrawMarker(dc);
+    }
+
+    /// <summary>The Grind tether: a dashed circle around the anchor — the pen the bot stays inside.</summary>
+    private void DrawTether(DrawingContext dc)
+    {
+        if (_tether is not Point tp || _tetherR <= 0) return;
+        Point s = Project(tp.X, tp.Y);
+        double r = _tetherR * _scale;
+        if (r < 3 || s.X < -r - 40 || s.Y < -r - 40 || s.X > ActualWidth + r + 40 || s.Y > ActualHeight + r + 40) return;
+        var cyan = Color.FromRgb(0x4F, 0xC3, 0xF7);
+        dc.DrawEllipse(new SolidColorBrush(Color.FromArgb(0x14, cyan.R, cyan.G, cyan.B)), null, s, r, r);
+        var ring = new Pen(new SolidColorBrush(Color.FromArgb(0xB4, cyan.R, cyan.G, cyan.B)), 1.5)
+        { DashStyle = new DashStyle(new double[] { 4, 4 }, 0) };
+        dc.DrawEllipse(null, ring, s, r, r);
+        var cross = new Pen(new SolidColorBrush(Color.FromArgb(0xB4, cyan.R, cyan.G, cyan.B)), 1.2);
+        dc.DrawLine(cross, new Point(s.X - 6, s.Y), new Point(s.X + 6, s.Y));
+        dc.DrawLine(cross, new Point(s.X, s.Y - 6), new Point(s.X, s.Y + 6));
     }
 
     private FormattedText Text(string s, double size, Color c) =>
