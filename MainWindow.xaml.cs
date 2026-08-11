@@ -60,7 +60,7 @@ public partial class MainWindow : Window
     private bool _ready;
     private static readonly string[] Panels =
     {
-        "PanelHome", "PanelLog", "PanelInput", "PanelMap", "PanelMaps", "PanelData", "PanelSessions", "PanelGrind", "PanelFollower",
+        "PanelHome", "PanelLog", "PanelInput", "PanelMap", "PanelMaps", "PanelData", "PanelSessions", "PanelCombat", "PanelGrind", "PanelFollower",
         "PanelLogin", "PanelMouse", "PanelHeat", "PanelLicensing", "PanelSettings"
     };
     private static readonly string[] EqClasses =
@@ -180,6 +180,7 @@ public partial class MainWindow : Window
         if (name == "PanelHome") RefreshHome();
         if (name == "PanelData") EnsureDataLoaded();
         if (name == "PanelSessions") RefreshSessions();
+        if (name == "PanelCombat") RefreshCombatPanel();
     }
 
     private void HomeGoGrind_Click(object sender, RoutedEventArgs e) => NavGrind.IsChecked = true;
@@ -249,6 +250,7 @@ public partial class MainWindow : Window
         HomeTarget.Text = _grindTarget == IntPtr.Zero ? "no target set" : "EverQuest targeted";
         HomeChar.Text = string.IsNullOrWhiteSpace(_settings.HubUsername) ? "—" : _settings.HubUsername;
         HomeTier.Text = (_hub.Last is { Authorized: true } l) ? (l.Tier ?? "—") : "not checked in";
+        RefreshHomeDps();
     }
 
     private void UpdateChip()
@@ -864,6 +866,7 @@ public partial class MainWindow : Window
         LogEvent ev = LogEventParser.Parse(line);
         if (_heatWatcher is null) _heat.Feed(ev);   // one shared session heat model, never double-fed
         FeedRecorder(ev);                            // active role session: trail + xp/aa/kill/death
+        FeedCombat(ev);                              // DPS meter + per-session damage totals
 
         if (ev.Kind == LogEventKind.Zone)
         {
@@ -1835,6 +1838,7 @@ public partial class MainWindow : Window
         InitGrindTab();
         InitFollowerTab();
         InitMapsTab();
+        InitCombat();
         InitSettingsTab();
         UpdateLaunchLabel();
         VersionRun.Text = "v" + AppSettings.AppVersion;
@@ -1889,6 +1893,7 @@ public partial class MainWindow : Window
         _fgTimer.Stop();
         _grindTimer.Stop();
         _followerTimer.Stop();
+        _combatTimer.Stop();
         _hubTimer.Stop();
         _grind?.Stop();
         _hunt?.Stop();

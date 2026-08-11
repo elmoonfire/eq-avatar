@@ -33,6 +33,19 @@ public sealed class SessionRecord
     /// <summary>zone display name -> [ew, ns] samples, in order.</summary>
     public Dictionary<string, List<double[]>> Trail { get; set; } = new();
 
+    // combat totals (from the log's damage lines during the session)
+    public long DmgDealt { get; set; }
+    public long DmgTaken { get; set; }
+    /// <summary>Damage dealt per minute of the session, in order — the session timeline chart.</summary>
+    public List<long> DealtPerMinute { get; set; } = new();
+    public List<long> TakenPerMinute { get; set; } = new();
+
+    // follower-specific success signals (0 for other roles)
+    public int Assists { get; set; }
+    public int Refollows { get; set; }
+    /// <summary>Seconds the follower spent actively assisting/fighting (vs. just following).</summary>
+    public int CombatSeconds { get; set; }
+
     // ---- computed, for the viewer ----
     [JsonIgnore] public double DurationSeconds => Math.Max(0, (EndedAt - StartedAt).TotalSeconds);
     [JsonIgnore] public string DateText => StartedAt.ToString("MMM d  HH:mm");
@@ -53,6 +66,16 @@ public sealed class SessionRecord
     [JsonIgnore] public string PrimaryZone =>
         Trail.Count == 0 ? "—" : Trail.OrderByDescending(kv => kv.Value.Count).First().Key;
     [JsonIgnore] public int TrailPoints => Trail.Sum(kv => kv.Value.Count);
+
+    // combat rates
+    [JsonIgnore] public double Dps => DurationSeconds >= 5 ? DmgDealt / DurationSeconds : 0;
+    [JsonIgnore] public string DpsText => Dps <= 0 ? "—" : $"{Dps:0.#}";
+    // follower success: share of the session actually spent in combat, and re-follows per hour
+    [JsonIgnore] public bool IsFollower => Role.Equals("Follower", StringComparison.OrdinalIgnoreCase);
+    [JsonIgnore] public double CombatShare => DurationSeconds >= 5 ? CombatSeconds / DurationSeconds : 0;
+    [JsonIgnore] public string CombatShareText => !IsFollower ? "—" : $"{CombatShare * 100:0}%";
+    [JsonIgnore] public string AssistsText => !IsFollower ? "—" : Assists.ToString();
+    [JsonIgnore] public string RefollowText => !IsFollower ? "—" : $"{Refollows} ({(Hours >= 0.03 ? Refollows / Hours : 0):0.#}/h)";
 }
 
 /// <summary>Disk store: one JSON file per session under %AppData%\EQAvatar\sessions.</summary>
@@ -108,6 +131,10 @@ public sealed class SessionRecorder
     private double _lastEw = double.NaN, _lastNs = double.NaN;
     private const int TrailCap = 25000;
     private int _trailCount;
+    private readonly List<long> _minuteDealt = new();
+    private readonly List<long> _minuteTaken = new();
+    private long _minDealtAcc, _minTakenAcc;
+    private DateTime _minuteStart;
 
     public bool Active => _active != null;
     public string? ActiveRole => _active?.Role;
@@ -124,6 +151,33 @@ public sealed class SessionRecorder
         };
         _lastEw = _lastNs = double.NaN;
         _trailCount = 0;
+        _minuteDealt.Clear(); _minuteTaken.Clear();
+        _minDealtAcc = _minTakenAcc = 0;
+        _minuteStart = DateTime.Now;
+    }
+
+    public void RecordDamage(int dealt, int taken)
+    {
+        if (_active is null) return;
+        _active.DmgDealt += dealt; _active.DmgTaken += taken;
+        _minDealtAcc += dealt; _minTakenAcc += taken;
+        RollMinute();
+    }
+
+    /// <summary>Follower-specific per-second flag: was it in combat (assisting) this tick?</summary>
+    public void RecordCombatSecond() { if (_active != null) _active.CombatSeconds++; }
+    public void SetFollowerCounters(int assists, int refollows)
+    { if (_active != null) { _active.Assists = assists; _active.Refollows = refollows; } }
+
+    private void RollMinute()
+    {
+        while ((DateTime.Now - _minuteStart).TotalSeconds >= 60)
+        {
+            _minuteDealt.Add(_minDealtAcc); _minuteTaken.Add(_minTakenAcc);
+            _minDealtAcc = _minTakenAcc = 0;
+            _minuteStart = _minuteStart.AddSeconds(60);
+            if (_minuteDealt.Count > 720) { _minuteDealt.RemoveAt(0); _minuteTaken.RemoveAt(0); }
+        }
     }
 
     public void RecordLoc(string zone, double ew, double ns)
@@ -152,6 +206,9 @@ public sealed class SessionRecorder
         _active = null;
         r.EndedAt = DateTime.Now;
         r.Actions = Math.Max(r.Actions, actions);
+        if (_minDealtAcc > 0 || _minTakenAcc > 0) { _minuteDealt.Add(_minDealtAcc); _minuteTaken.Add(_minTakenAcc); }
+        r.DealtPerMinute = _minuteDealt.ToList();
+        r.TakenPerMinute = _minuteTaken.ToList();
         if (r.DurationSeconds < 5) return null;   // a mis-click isn't a session
         SessionStore.Save(r);
         return r;

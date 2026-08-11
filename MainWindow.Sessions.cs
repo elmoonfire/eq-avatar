@@ -75,14 +75,24 @@ public partial class MainWindow
     private void SessList_Selected(object sender, SelectionChangedEventArgs e)
     {
         SessDetail.Children.Clear();
-        if (SessList.SelectedItem is not SessionRecord r) { SessDetailHint.Visibility = Visibility.Visible; return; }
+        if (SessList.SelectedItem is not SessionRecord r)
+        {
+            SessDetailHint.Visibility = Visibility.Visible;
+            SessChart.SetSeries(Array.Empty<Charts.ChartSeries>());
+            return;
+        }
         SessDetailHint.Visibility = Visibility.Collapsed;
+        RenderSessChart(r);
 
         void Line(string text, double size = 12, bool bold = false, string color = "#C6D2DE")
             => SessDetail.Children.Add(new TextBlock { Text = text, FontSize = size, TextWrapping = TextWrapping.Wrap, FontWeight = bold ? FontWeights.Bold : FontWeights.Normal, Foreground = Hex(color), Margin = new Thickness(0, 0, 0, 2) });
 
         Line($"{r.Role} — {r.DateText}  ·  {r.DurationText}", 14, bold: true, color: "#EAF6FF");
         Line($"kills {r.Kills} ({r.KillsPerHour:0.#}/h)  ·  XP ticks {r.XpTicks} ({r.XpRateText})  ·  AA {r.AaPoints} ({r.AaRateText})  ·  actions {r.Actions}  ·  deaths {r.Deaths}", 12.5, color: "#9FB6CC");
+        if (r.DmgDealt > 0 || r.DmgTaken > 0)
+            Line($"damage dealt {r.DmgDealt:n0} ({r.DpsText} dps)  ·  taken {r.DmgTaken:n0}", 12.5, color: "#9FB6CC");
+        if (r.IsFollower)
+            Line($"following {SettingVal(r, "leader")}: assists {r.Assists}  ·  in-combat {r.CombatShareText}  ·  re-follows {r.RefollowText}", 12.5, color: "#7FB2D9");
         Line($"zones: {string.Join(", ", r.Trail.Keys.DefaultIfEmpty("—"))}   ·   {r.TrailPoints} trail points", 12, color: "#9FB6CC");
         if (r.Settings.Count > 0)
         {
@@ -98,6 +108,21 @@ public partial class MainWindow
         del.Click += (_, _) => { SessionStore.Delete(r.Id); RefreshSessions(); SessDetail.Children.Clear(); SessDetailHint.Visibility = Visibility.Visible; };
         row.Children.Add(heat); row.Children.Add(del);
         SessDetail.Children.Add(row);
+    }
+
+    private static string SettingVal(SessionRecord r, string key) =>
+        r.Settings.TryGetValue(key, out string? v) && !string.IsNullOrWhiteSpace(v) ? v : "leader";
+
+    /// <summary>Draw the per-minute damage timeline for a recorded session (dealt vs taken).</summary>
+    private void RenderSessChart(SessionRecord r)
+    {
+        var dealt = r.DealtPerMinute.Select(v => (double)v).ToList();
+        var taken = r.TakenPerMinute.Select(v => (double)v).ToList();
+        var series = new List<Charts.ChartSeries>(2);
+        if (dealt.Any(v => v > 0)) series.Add(new Charts.ChartSeries("dealt/min", Color.FromRgb(0x4F, 0xC3, 0xF7), dealt, Fill: true));
+        if (taken.Any(v => v > 0)) series.Add(new Charts.ChartSeries("taken/min", Color.FromRgb(0xFF, 0x8A, 0x80), taken));
+        SessChart.SetSeries(series, "start", r.DurationText,
+            series.Count == 0 ? "no combat recorded this session" : "no data yet");
     }
 
     /// <summary>Replay a session's travel as the Maps heat layer, over the real zone map.</summary>
@@ -184,6 +209,8 @@ public partial class MainWindow
             "Follower" => (_follower?.Stats.Assists ?? 0) + (_follower?.Stats.Refollows ?? 0),
             _ => 0,
         };
+        if (Recorder.ActiveRole == "Follower" && _follower != null)
+            Recorder.SetFollowerCounters(_follower.Stats.Assists, _follower.Stats.Refollows);
         Recorder.End(actions);
         if (SessList != null && PanelSessions.Visibility == Visibility.Visible) RefreshSessions();
     }

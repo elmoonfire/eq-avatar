@@ -3,6 +3,7 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:shell="clr-namespace:System.Windows.Shell;assembly=PresentationFramework"
         xmlns:map="clr-namespace:EQAvatar.Spike.Map"
+        xmlns:charts="clr-namespace:EQAvatar.Spike.Charts"
         Title="EQ Avatar" Height="720" Width="1060" MinHeight="560" MinWidth="900"
         WindowStyle="None" Background="{StaticResource Bg}" WindowStartupLocation="CenterScreen">
 
@@ -238,6 +239,9 @@
                             </RadioButton>
 
                             <TextBlock Style="{StaticResource RailCap}" Text="INSIGHT" Margin="6,14,0,6"/>
+                            <RadioButton x:Name="NavCombat" Style="{StaticResource NavItem}" GroupName="nav" Tag="PanelCombat" Checked="Nav_Checked">
+                                <StackPanel Orientation="Horizontal"><TextBlock Style="{StaticResource NavGlyph}" Text="&#xE7C1;"/><TextBlock Text="Combat"/></StackPanel>
+                            </RadioButton>
                             <RadioButton x:Name="NavMaps" Style="{StaticResource NavItem}" GroupName="nav" Tag="PanelMaps" Checked="Nav_Checked">
                                 <StackPanel Orientation="Horizontal"><TextBlock Style="{StaticResource NavGlyph}" Text="&#xE909;"/><TextBlock Text="Maps"/></StackPanel>
                             </RadioButton>
@@ -349,6 +353,17 @@
                                             <TextBlock x:Name="HomeActions" Text="0" FontSize="24" FontWeight="Bold" Margin="0,4,0,0"/></StackPanel>
                                     </Border>
                                 </UniformGrid>
+
+                                <Border Style="{StaticResource Card}" Margin="0,6,0,0">
+                                    <StackPanel>
+                                        <Grid>
+                                            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                                            <TextBlock Text="DAMAGE — LAST 10 MIN" FontSize="11" Foreground="{StaticResource TextDim}"/>
+                                            <TextBlock x:Name="HomeDpsLabel" Grid.Column="1" Text="0 DPS" FontSize="11" Foreground="#7CE38B" FontWeight="SemiBold"/>
+                                        </Grid>
+                                        <charts:TimeSeriesChart x:Name="HomeDpsChart" Height="120" Margin="0,8,0,0"/>
+                                    </StackPanel>
+                                </Border>
 
                                 <Grid Margin="0,6,0,0">
                                     <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
@@ -596,6 +611,59 @@
                                  VerticalScrollBarVisibility="Auto" TextWrapping="Wrap"/>
                     </Grid>
 
+                    <!-- ===== COMBAT (live DPS meter + per-fight parse from the log) ===== -->
+                    <Grid x:Name="PanelCombat" Margin="18" Visibility="Collapsed">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="*"/>
+                        </Grid.RowDefinitions>
+
+                        <StackPanel Grid.Row="0" Margin="0,0,0,8">
+                            <TextBlock Text="Combat Meter" FontSize="18" FontWeight="Bold" Foreground="#EAF6FF"/>
+                            <TextBlock TextWrapping="Wrap" Foreground="{StaticResource TextDim}" FontSize="11.5" Margin="0,3,0,0"
+                                       Text="Reads your damage from the log in real time — melee, spells, DoTs, and damage shields (grammar ported from EQ Legends Companion). The chart is dealt vs. taken DPS over the last 10 minutes; below it, each fight is parsed out with its DPS, duration, max hit, and crits. Needs the log folder set on Log Reader."/>
+                        </StackPanel>
+
+                        <Border Grid.Row="1" Style="{StaticResource Card}" Margin="0,0,0,8">
+                            <StackPanel>
+                                <Grid>
+                                    <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                                    <TextBlock x:Name="CombatLiveLabel" Text="DPS — dealt vs taken" FontSize="11" Foreground="{StaticResource TextDim}"/>
+                                    <TextBlock x:Name="CombatTotals" Grid.Column="1" Text="" FontSize="11" Foreground="#9FB6CC" FontFamily="Consolas"/>
+                                </Grid>
+                                <charts:TimeSeriesChart x:Name="CombatChart" Height="150" Margin="0,8,0,0"/>
+                            </StackPanel>
+                        </Border>
+
+                        <TextBlock Grid.Row="2" Text="FIGHTS (most recent first — click one to chart it)" FontSize="11" Foreground="{StaticResource TextDim}" Margin="2,0,0,4"/>
+                        <Grid Grid.Row="3">
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="3*"/><ColumnDefinition Width="2*"/></Grid.ColumnDefinitions>
+                            <ListView x:Name="FightsList" Grid.Column="0" Margin="0,0,10,0" Background="#0C0F13" Foreground="#EAF6FF" BorderBrush="#26405A"
+                                      SelectionChanged="Fight_Selected" VirtualizingPanel.IsVirtualizing="True" FontSize="12">
+                                <ListView.View>
+                                    <GridView>
+                                        <GridViewColumn Header="Time" Width="74" DisplayMemberBinding="{Binding TimeText}"/>
+                                        <GridViewColumn Header="Target" Width="170" DisplayMemberBinding="{Binding Target}"/>
+                                        <GridViewColumn Header="Dur" Width="46" DisplayMemberBinding="{Binding DurText}"/>
+                                        <GridViewColumn Header="Dmg" Width="70" DisplayMemberBinding="{Binding DmgDealt}"/>
+                                        <GridViewColumn Header="DPS" Width="60" DisplayMemberBinding="{Binding DpsText}"/>
+                                        <GridViewColumn Header="Max" Width="54" DisplayMemberBinding="{Binding MaxHit}"/>
+                                        <GridViewColumn Header="Crit" Width="42" DisplayMemberBinding="{Binding Crits}"/>
+                                    </GridView>
+                                </ListView.View>
+                            </ListView>
+                            <Border Grid.Column="1" Style="{StaticResource Card}">
+                                <StackPanel>
+                                    <TextBlock x:Name="FightTitle" Text="Pick a fight" FontSize="13" FontWeight="Bold" Foreground="#EAF6FF"/>
+                                    <TextBlock x:Name="FightSub" Text="its damage-per-second is charted here" FontSize="11" Foreground="{StaticResource TextDim}" Margin="0,2,0,6"/>
+                                    <charts:TimeSeriesChart x:Name="FightChart" Height="150"/>
+                                </StackPanel>
+                            </Border>
+                        </Grid>
+                    </Grid>
+
                     <!-- ===== SESSIONS (recorded role runs: stats, rates, settings, heatmap replay) ===== -->
                     <Grid x:Name="PanelSessions" Margin="18" Visibility="Collapsed">
                         <Grid.Resources>
@@ -648,8 +716,11 @@
                                     <GridViewColumn Width="70" DisplayMemberBinding="{Binding XpRateText}"><GridViewColumn.Header><GridViewColumnHeader Content="XP/h" Tag="XpPerHour"/></GridViewColumn.Header></GridViewColumn>
                                     <GridViewColumn Width="50" DisplayMemberBinding="{Binding AaPoints}"><GridViewColumn.Header><GridViewColumnHeader Content="AA" Tag="AaPoints"/></GridViewColumn.Header></GridViewColumn>
                                     <GridViewColumn Width="70" DisplayMemberBinding="{Binding AaRateText}"><GridViewColumn.Header><GridViewColumnHeader Content="AA/h" Tag="AaPerHour"/></GridViewColumn.Header></GridViewColumn>
-                                    <GridViewColumn Width="60" DisplayMemberBinding="{Binding Deaths}"><GridViewColumn.Header><GridViewColumnHeader Content="Deaths" Tag="Deaths"/></GridViewColumn.Header></GridViewColumn>
-                                    <GridViewColumn Width="170" DisplayMemberBinding="{Binding PrimaryZone}"><GridViewColumn.Header><GridViewColumnHeader Content="Zone" Tag="PrimaryZone"/></GridViewColumn.Header></GridViewColumn>
+                                    <GridViewColumn Width="66" DisplayMemberBinding="{Binding DpsText}"><GridViewColumn.Header><GridViewColumnHeader Content="DPS" Tag="Dps"/></GridViewColumn.Header></GridViewColumn>
+                                    <GridViewColumn Width="70" DisplayMemberBinding="{Binding AssistsText}"><GridViewColumn.Header><GridViewColumnHeader Content="Assists" Tag="Assists"/></GridViewColumn.Header></GridViewColumn>
+                                    <GridViewColumn Width="82" DisplayMemberBinding="{Binding CombatShareText}"><GridViewColumn.Header><GridViewColumnHeader Content="In combat" Tag="CombatShare"/></GridViewColumn.Header></GridViewColumn>
+                                    <GridViewColumn Width="50" DisplayMemberBinding="{Binding Deaths}"><GridViewColumn.Header><GridViewColumnHeader Content="Deaths" Tag="Deaths"/></GridViewColumn.Header></GridViewColumn>
+                                    <GridViewColumn Width="150" DisplayMemberBinding="{Binding PrimaryZone}"><GridViewColumn.Header><GridViewColumnHeader Content="Zone" Tag="PrimaryZone"/></GridViewColumn.Header></GridViewColumn>
                                 </GridView>
                             </ListView.View>
                         </ListView>
@@ -657,8 +728,12 @@
                         <Border Grid.Row="3" Background="#0C0F13" BorderBrush="#26405A" BorderThickness="1" CornerRadius="8" Padding="12" Margin="0,8,0,0" MaxHeight="210">
                             <ScrollViewer VerticalScrollBarVisibility="Auto">
                                 <StackPanel>
-                                    <TextBlock x:Name="SessDetailHint" Text="Select a session to see its settings and heatmap." Foreground="{StaticResource TextDim}" FontSize="12"/>
-                                    <StackPanel x:Name="SessDetail"/>
+                                    <TextBlock x:Name="SessDetailHint" Text="Select a session to see its settings, timeline chart, and heatmap." Foreground="{StaticResource TextDim}" FontSize="12"/>
+                                    <Grid>
+                                        <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="260"/></Grid.ColumnDefinitions>
+                                        <StackPanel x:Name="SessDetail" Grid.Column="0"/>
+                                        <charts:TimeSeriesChart x:Name="SessChart" Grid.Column="1" Height="150" VerticalAlignment="Top" Margin="8,4,0,0"/>
+                                    </Grid>
                                 </StackPanel>
                             </ScrollViewer>
                         </Border>
