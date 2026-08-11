@@ -36,7 +36,7 @@ public sealed class AppSettings
     // --- Client Hub (centralized licensing + usage dashboard) ---
     /// <summary>App version reported on every check-in (shown on the dashboard). Also the version
     /// the in-app updater compares against the newest GitHub release tag.</summary>
-    public const string AppVersion = "0.9.11";
+    public const string AppVersion = "0.9.12";
 
     // --- Auto-update (GitHub) ---
     public const string UpdateOwner = "elmoonfire";
@@ -46,6 +46,10 @@ public sealed class AppSettings
     public const string UpdateManifestUrl = "https://raw.githubusercontent.com/elmoonfire/eq-avatar/main/latest.json";
 
     public bool HubEnabled { get; set; } = true;
+
+    /// <summary>Phone/web remote control: poll the hub for commands, post live status, and sync
+    /// session history. Rides the same hub credentials; inert until a username is set.</summary>
+    public bool RemoteControlEnabled { get; set; } = true;
     public string HubUrl { get; set; } = "https://eqavatar.ldtlan.com/hub/api.php";
     public string HubApiKey { get; set; } = "eqavatar-ldt-hub-7Yx2Qz";
     /// <summary>Character/account name this install checks in as (blank until the user sets it).</summary>

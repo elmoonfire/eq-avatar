@@ -119,6 +119,7 @@ public partial class MainWindow : Window
         _heatTimer.Tick += (_, _) => { if (_heatDirty) { _heatDirty = false; RefreshZones(); RenderHeat(); } };
         _hub = new HubClient(_settings);
         _hubTimer.Tick += (_, _) => { _ = DoCheckIn(false); };
+        Loaded += (_, _) => StartRemoteControl();   // phone/web remote control + live status + session sync
     }
 
     private void OnSourceInitialized(object? sender, EventArgs e)
@@ -880,6 +881,7 @@ public partial class MainWindow : Window
         }
         if (ev.Kind == LogEventKind.Location && ev.X is double x && ev.Y is double y)
         {
+            _lastLocEw = x; _lastLocNs = y; _lastLocAt = DateTime.Now;   // live position for remote status
             // marker only when the map on screen is the zone the character is in (or unknown)
             if (_charZoneStem is null || _charZoneStem == _mapZone)
             {
@@ -1895,6 +1897,7 @@ public partial class MainWindow : Window
         _followerTimer.Stop();
         _combatTimer.Stop();
         _hubTimer.Stop();
+        _remote?.Stop();
         _grind?.Stop();
         _hunt?.Stop();
         _follower?.Stop();
