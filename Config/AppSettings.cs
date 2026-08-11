@@ -36,7 +36,7 @@ public sealed class AppSettings
     // --- Client Hub (centralized licensing + usage dashboard) ---
     /// <summary>App version reported on every check-in (shown on the dashboard). Also the version
     /// the in-app updater compares against the newest GitHub release tag.</summary>
-    public const string AppVersion = "0.9.13";
+    public const string AppVersion = "0.9.14";
 
     // --- Auto-update (GitHub) ---
     public const string UpdateOwner = "elmoonfire";
@@ -88,6 +88,20 @@ public sealed class AppSettings
     public int HuntMaxFightSeconds { get; set; } = 25;       // bail on a fight that never ends (keeps it roaming)
     /// <summary>Skip mobs whose consider reads as too hard (flee / challenge).</summary>
     public bool HuntSkipHardCons { get; set; } = true;
+
+    // --- Grind targeting suite (0.9.14) ---
+    /// <summary>Pet-style stance: "aggressive" (attack anything it finds), "defensive" (only
+    /// fight back when attacked), "directive" (only mobs on the target list below).</summary>
+    public string GrindStance { get; set; } = "aggressive";
+    /// <summary>Only engage mobs whose /con attitude reads scowls or threateningly.</summary>
+    public bool HuntHostileOnly { get; set; } = false;
+    /// <summary>Tether the bot to where it started; it turns back when it wanders past the radius.</summary>
+    public bool HuntTetherEnabled { get; set; } = false;
+    public int HuntTetherRadius { get; set; } = 300;
+    /// <summary>Directive target list — one mob name per line (fed from the Game Data page).</summary>
+    public string GrindTargetMobs { get; set; } = "";
+    /// <summary>Licensing panel: keep scanning for the open inventory and read it automatically.</summary>
+    public bool OcrAutoScan { get; set; } = false;
 
     // --- Follower role (second character follows + assists a leader) ---
     /// <summary>Leader character name this instance follows (exact in-game name).</summary>

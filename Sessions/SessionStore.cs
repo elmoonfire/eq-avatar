@@ -192,6 +192,24 @@ public sealed class SessionRecorder
         _trailCount++;
     }
 
+    private DateTime _lastFlush = DateTime.MinValue;
+
+    /// <summary>Write the ACTIVE session to disk as-it-stands (at most once a minute). A crash or
+    /// force-kill mid-run no longer loses the whole session — the last flush survives, and the
+    /// real End() simply overwrites it with final numbers.</summary>
+    public void Flush()
+    {
+        if (_active is null) return;
+        if ((DateTime.Now - _lastFlush).TotalSeconds < 60) return;
+        _lastFlush = DateTime.Now;
+        SessionRecord r = _active;
+        r.EndedAt = DateTime.Now;
+        if (r.DurationSeconds < 30) return;               // nothing worth keeping yet
+        r.DealtPerMinute = new List<long>(_minuteDealt);
+        r.TakenPerMinute = new List<long>(_minuteTaken);
+        SessionStore.Save(r);
+    }
+
     public void RecordXp() { if (_active != null) _active.XpTicks++; }
     public void RecordAa() { if (_active != null) _active.AaPoints++; }
     public void RecordKill() { if (_active != null) _active.Kills++; }

@@ -73,10 +73,9 @@ public partial class MainWindow
         {
             "switch_role" => RemoteSwitchRole(cmd.Str("role") ?? ""),
             "stop" => RemoteStop(),
-            "set_grind_area" or "clear_grind_area" =>
-                (false, "grind-area boundaries arrive in the next app update — command received safely"),
-            "farm_mob" =>
-                (false, "farm-a-mob arrives in the next app update — command received safely"),
+            "set_grind_area" => RemoteSetGrindArea(cmd),
+            "clear_grind_area" => RemoteClearGrindArea(),
+            "farm_mob" => RemoteFarmMob(cmd.Str("name") ?? cmd.Str("mob") ?? ""),
             _ => (false, $"unknown command kind '{cmd.Kind}'"),
         }).Task;
 
@@ -128,6 +127,35 @@ public partial class MainWindow
         UpdateGrindStats();
         UpdateFollowerStats();
         return (true, wasRunning ? "all roles stopped" : "nothing was running");
+    }
+
+    /// <summary>Phone: "keep it near where it is" — tether to the current spot with the given radius.</summary>
+    private (bool ok, string result) RemoteSetGrindArea(RemoteCommand cmd)
+    {
+        int radius = int.TryParse(cmd.Str("radius"), out int r) ? Math.Clamp(r, 50, 1500) : _settings.HuntTetherRadius;
+        TetherBox.IsChecked = true;
+        TetherSlider.Value = radius;
+        ApplyHuntFields();
+        _settings.Save();
+        // A new anchor takes effect on the next role start; if Hunt is live it re-anchors next /loc.
+        return (true, $"tether armed — radius {radius} around the {(double.IsNaN(_lastLocEw) ? "next start point" : "current spot")}");
+    }
+
+    private (bool ok, string result) RemoteClearGrindArea()
+    {
+        TetherBox.IsChecked = false;
+        ApplyHuntFields();
+        _settings.Save();
+        return (true, "tether cleared — free roam within explored bounds");
+    }
+
+    /// <summary>Phone: "go kill this" — add to the directive list and switch the stance.</summary>
+    private (bool ok, string result) RemoteFarmMob(string name)
+    {
+        name = name.Trim();
+        if (name.Length < 2) return (false, "farm_mob needs a mob name");
+        AddDirectiveTarget(name);
+        return (true, $"'{name}' added to the directive target list (stance: Directive)");
     }
 
     /// <summary>A remote start can't click "Target EverQuest" first — find the game window ourselves.</summary>

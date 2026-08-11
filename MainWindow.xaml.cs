@@ -60,8 +60,8 @@ public partial class MainWindow : Window
     private bool _ready;
     private static readonly string[] Panels =
     {
-        "PanelHome", "PanelLog", "PanelInput", "PanelMap", "PanelMaps", "PanelData", "PanelSessions", "PanelCombat", "PanelGrind", "PanelFollower",
-        "PanelLogin", "PanelMouse", "PanelHeat", "PanelLicensing", "PanelSettings"
+        "PanelHome", "PanelLog", "PanelInput", "PanelMaps", "PanelData", "PanelSessions", "PanelCombat", "PanelGrind", "PanelFollower",
+        "PanelLogin", "PanelMouse", "PanelLicensing", "PanelSettings"
     };
     private static readonly string[] EqClasses =
     {
@@ -83,13 +83,8 @@ public partial class MainWindow : Window
     private bool _mapsReady;
     private int _mapsHeatTick;
 
-    // Heatmap state
+    // Session heat model (fed from the maps log tap; drawn on the Maps page + overlay)
     private readonly HeatmapModel _heat = new();
-    private EqLogWatcher? _heatWatcher;
-    private readonly DispatcherTimer _heatTimer = new() { Interval = TimeSpan.FromMilliseconds(1200) };
-    private bool _heatDirty;
-    private bool _suppressZoneChange;
-    private const int HW = 560, HH = 420;
 
     [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetWindowText(IntPtr h, StringBuilder s, int n);
@@ -116,7 +111,6 @@ public partial class MainWindow : Window
         _fgTimer.Start();
         _grindTimer.Tick += (_, _) => UpdateGrindStats();
         _followerTimer.Tick += (_, _) => UpdateFollowerStats();
-        _heatTimer.Tick += (_, _) => { if (_heatDirty) { _heatDirty = false; RefreshZones(); RenderHeat(); } };
         _hub = new HubClient(_settings);
         _hubTimer.Tick += (_, _) => { _ = DoCheckIn(false); };
         Loaded += (_, _) => StartRemoteControl();   // phone/web remote control + live status + session sync
@@ -186,7 +180,7 @@ public partial class MainWindow : Window
     }
 
     private void HomeGoGrind_Click(object sender, RoutedEventArgs e) => NavGrind.IsChecked = true;
-    private void HomeGoHeat_Click(object sender, RoutedEventArgs e) => NavHeat.IsChecked = true;
+    private void HomeGoHeat_Click(object sender, RoutedEventArgs e) => NavMaps.IsChecked = true;
     private void HomeGoLogin_Click(object sender, RoutedEventArgs e) => NavLogin.IsChecked = true;
 
     /// <summary>Flash a "saved" pill in the title bar that fades away — shown whenever settings are saved.</summary>
@@ -579,16 +573,46 @@ public partial class MainWindow : Window
         ProbeLog.ScrollToEnd();
     }
 
-    // ---------------- Tab 3: overlay ----------------
+    // ---------------- Maps: in-game overlay + PNG export ----------------
 
-    private void ShowOverlay_Click(object sender, RoutedEventArgs e)
+    /// <summary>Float the CURRENT zone map (walls + heat + trail + live marker) over the game.
+    /// Click again to close. The overlay window's own "ghost" button toggles click-through.</summary>
+    private void MapsOverlay_Click(object sender, RoutedEventArgs e)
     {
-        if (_overlay is null) { _overlay = new MapOverlayWindow(); _overlay.Closed += (_, _) => _overlay = null; }
+        if (_overlay != null) { _overlay.Close(); _overlay = null; MapsOverlayBtn.Content = "Overlay in-game"; return; }
+        _overlay = new MapOverlayWindow();
+        _overlay.Closed += (_, _) => { _overlay = null; MapsOverlayBtn.Content = "Overlay in-game"; };
+        SyncOverlay();
         _overlay.Show();
-        _overlay.Activate();
+        MapsOverlayBtn.Content = "Close overlay";
     }
 
-    private void HideOverlay_Click(object sender, RoutedEventArgs e) { _overlay?.Close(); _overlay = null; }
+    /// <summary>Push the main Maps view's state (zone, layers, heat) into the floating overlay.</summary>
+    private void SyncOverlay()
+    {
+        if (_overlay is null || _mapLib is null || _mapZone is null) return;
+        MapData? data = _mapLib.Get(_mapZone, MapsPrefs());
+        _overlay.ShowMap(data, ZoneTable.NameFor(_mapZone));
+        _overlay.SetLayers(showHeat: MapsHeatBox.IsChecked == true, showTrail: MapsTrailBox.IsChecked == true);
+        _overlay.SetHeat(MapsView.HeatPoints);
+    }
+
+    private void MapsExport_Click(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            var dlg = new SaveFileDialog { Filter = "PNG image|*.png", FileName = $"eqavatar-map-{_mapZone ?? "zone"}.png" };
+            if (dlg.ShowDialog() != true) return;
+            var rtb = new RenderTargetBitmap((int)Math.Max(320, MapsView.ActualWidth), (int)Math.Max(240, MapsView.ActualHeight), 96, 96, PixelFormats.Pbgra32);
+            rtb.Render(MapsView);
+            var enc = new PngBitmapEncoder();
+            enc.Frames.Add(BitmapFrame.Create(rtb));
+            using var fs = File.Create(dlg.FileName);
+            enc.Save(fs);
+            MapsStatus.Text = "Exported → " + dlg.FileName;
+        }
+        catch (Exception ex) { MapsStatus.Text = "Export failed: " + ex.Message; }
+    }
 
     // ---------------- Tab 4: grind role ----------------
 
@@ -647,6 +671,16 @@ public partial class MainWindow : Window
         _settings.HuntLocKey = HuntLocKeyBox.Text.Trim();   // may be blank (optional)
         if (int.TryParse(HuntRestBox.Text.Trim(), out int r)) _settings.HuntRestSeconds = Math.Clamp(r, 0, 600);
         _settings.HuntMode = HuntBox.IsChecked == true;
+        _settings.GrindStance = StanceDef.IsChecked == true ? "defensive" : StanceDir.IsChecked == true ? "directive" : "aggressive";
+        _settings.HuntHostileOnly = HostileOnlyBox.IsChecked == true;
+        _settings.HuntTetherEnabled = TetherBox.IsChecked == true;
+        _settings.HuntTetherRadius = (int)TetherSlider.Value;
+        _settings.GrindTargetMobs = TargetMobsBox.Text;
+    }
+
+    private void TetherSlider_Changed(object sender, RoutedPropertyChangedEventArgs<double> e)
+    {
+        if (TetherLabel != null) TetherLabel.Text = $"{(int)TetherSlider.Value} units";
     }
 
     /// <summary>Fill the Grind keybind boxes from saved settings on load.</summary>
@@ -661,6 +695,14 @@ public partial class MainWindow : Window
         HuntConsiderKeyBox.Text = _settings.HuntConsiderKey;
         HuntLocKeyBox.Text = _settings.HuntLocKey;
         HuntRestBox.Text = _settings.HuntRestSeconds.ToString();
+        (_settings.GrindStance switch { "defensive" => StanceDef, "directive" => StanceDir, _ => StanceAggro }).IsChecked = true;
+        HostileOnlyBox.IsChecked = _settings.HuntHostileOnly;
+        TetherBox.IsChecked = _settings.HuntTetherEnabled;
+        TetherSlider.Value = Math.Clamp(_settings.HuntTetherRadius, 50, 1500);
+        TetherLabel.Text = $"{(int)TetherSlider.Value} units";
+        TargetMobsBox.Text = _settings.GrindTargetMobs;
+        OcrAutoBox.IsChecked = _settings.OcrAutoScan;
+        if (_settings.OcrAutoScan) StartOcrAuto();
         if (!string.IsNullOrWhiteSpace(_settings.HubServer)) LoginServerBox.Text = _settings.HubServer;
         LauncherPathBox.Text = _settings.LauncherPath;
         TopmostBox.IsChecked = _settings.AlwaysOnTop;
@@ -751,6 +793,7 @@ public partial class MainWindow : Window
         MapData? data = _mapLib.Get(stem, MapsPrefs());
         _mapZone = stem;
         MapsView.SetMap(data);
+        if (_overlay != null) { _overlay.ShowMap(data, ZoneTable.NameFor(stem)); }
         ApplyMapsLayers();
         UpdateMapsFloorChip();
         RefreshMapsHeat();
@@ -801,6 +844,7 @@ public partial class MainWindow : Window
         MapsView.ShowHeat = MapsHeatBox.IsChecked == true;
         MapsView.ShowTrail = MapsTrailBox.IsChecked == true;
         MapsView.InvalidateVisual();
+        _overlay?.SetLayers(showHeat: MapsHeatBox.IsChecked == true, showTrail: MapsTrailBox.IsChecked == true);
     }
 
     /// <summary>Push this session's /loc points for the open zone into the view, in map space.</summary>
@@ -820,6 +864,7 @@ public partial class MainWindow : Window
             mapPts.Add(new System.Windows.Point(mx, my));
         }
         MapsView.SetHeat(mapPts);
+        _overlay?.SetHeat(mapPts.ToArray());
     }
 
     private void UpdateMapsFloorChip()
@@ -866,7 +911,7 @@ public partial class MainWindow : Window
     private void OnMapsLogLine(string line)
     {
         LogEvent ev = LogEventParser.Parse(line);
-        if (_heatWatcher is null) _heat.Feed(ev);   // one shared session heat model, never double-fed
+        _heat.Feed(ev);                              // the one shared session heat model
         FeedRecorder(ev);                            // active role session: trail + xp/aa/kill/death
         FeedCombat(ev);                              // DPS meter + per-session damage totals
 
@@ -888,6 +933,7 @@ public partial class MainWindow : Window
             {
                 (double mx, double my) = EqMapParser.MapFromLoc(ns: y, ew: x);
                 MapsView.PushLoc(mx, my);
+                _overlay?.PushLoc(mx, my);
             }
             if (MapsHeatBox.IsChecked == true && ++_mapsHeatTick % 12 == 0) RefreshMapsHeat();
         }
@@ -1022,9 +1068,19 @@ public partial class MainWindow : Window
         if (hwnd == IntPtr.Zero) { OcrStatus.Text = "no game window found"; return; }
 
         Ocr.InventorySnapshot? snap = await Ocr.InventoryReader.ReadAsync(hwnd, m => LicLogLine("[ocr] " + m));
-        if (snap is null) { OcrStatus.Text = "inventory not found — open it in-game and retry"; return; }
+        if (snap is null) { OcrStatus.Text = "inventory not found — open it in-game and retry (or tick auto-scan and it catches it for you)"; return; }
         _lastSnap = snap;
+        RenderOcrSnapshot(snap);
+        OcrStatus.Text = snap.Warnings.Count == 0
+            ? $"read OK at {snap.CapturedAt:HH:mm:ss}"
+            : $"read with {snap.Warnings.Count} warning(s): {string.Join(" · ", snap.Warnings.Take(2))}";
+        LicLogLine("[ocr] parsed " + snap.Fields.Count + " rows. Raw lines below:");
+        LicLogLine(snap.RawSeen);
+    }
 
+    /// <summary>Paint one snapshot into the licensing card (shared by manual + auto reads).</summary>
+    private void RenderOcrSnapshot(Ocr.InventorySnapshot snap)
+    {
         // auto-fill the licensing character fields from the sheet (nothing entered by hand)
         if (snap.Level is int lv) LicLevelBox.Text = lv.ToString();
         if (snap.Classes is string cls)
@@ -1047,12 +1103,7 @@ public partial class MainWindow : Window
             $"WIS {Stat(snap, "wisdom")}  INT {Stat(snap, "intelligence")}  CHA {Stat(snap, "charisma")}\n" +
             $"MR {Stat(snap, "sv magic")}  FR {Stat(snap, "sv fire")}  CR {Stat(snap, "sv cold")}  " +
             $"DR {Stat(snap, "sv disease")}  PR {Stat(snap, "sv poison")}  VR {Stat(snap, "sv void")}   Coin {coins}";
-        OcrStatus.Text = snap.Warnings.Count == 0
-            ? $"read OK at {snap.CapturedAt:HH:mm:ss}"
-            : $"read with {snap.Warnings.Count} warning(s): {string.Join(" · ", snap.Warnings.Take(2))}";
         OcrSendBtn.IsEnabled = snap.Fields.ContainsKey("hp");
-        LicLogLine("[ocr] parsed " + snap.Fields.Count + " rows. Raw lines below:");
-        LicLogLine(snap.RawSeen);
     }
 
     private static string Pair(Ocr.InventorySnapshot s, string k) =>
@@ -1527,128 +1578,6 @@ public partial class MainWindow : Window
         MouseLog.ScrollToEnd();
     }
 
-    // ---------------- Tab 7: heatmap ----------------
-
-    private void ReplayHeat_Click(object sender, RoutedEventArgs e)
-    {
-        StopHeat();
-        string? log = _currentLog ?? EqLogWatcher.FindNewestLog(LogFolderBox.Text.Trim());
-        if (log is null) { HeatStatus.Text = "No log found — set the log folder on tab 1."; return; }
-        _heat.Clear();
-        try
-        {
-            foreach (string line in System.IO.File.ReadLines(log))
-                _heat.Feed(LogEventParser.Parse(line));
-        }
-        catch (Exception ex) { HeatStatus.Text = "Read error: " + ex.Message; return; }
-        RefreshZones();
-        RenderHeat();
-    }
-
-    private void LiveHeat_Click(object sender, RoutedEventArgs e)
-    {
-        StopHeat();
-        string? log = _currentLog ?? EqLogWatcher.FindNewestLog(LogFolderBox.Text.Trim());
-        if (log is null) { HeatStatus.Text = "No log found — set the log folder on tab 1."; return; }
-        _heat.Clear();
-        _heatWatcher = new EqLogWatcher(log);
-        _heatWatcher.LineRead += line => Dispatcher.Invoke(() => { _heat.Feed(LogEventParser.Parse(line)); _heatDirty = true; });
-        _heatWatcher.Start(fromStart: false);
-        _heatTimer.Start();
-        HeatStatus.Text = "Live — move around in-game (with a /loc macro running) and watch it fill in.";
-    }
-
-    private void StopHeat_Click(object sender, RoutedEventArgs e) => StopHeat();
-
-    private void StopHeat()
-    {
-        _heatWatcher?.Dispose();
-        _heatWatcher = null;
-        _heatTimer.Stop();
-    }
-
-    private void SimulateHeat_Click(object sender, RoutedEventArgs e)
-    {
-        StopHeat();
-        _heat.Clear();
-        _heat.Feed(new LogEvent(null, LogEventKind.Zone, "You have entered Demo Zone."));
-        double x = 0, y = 0, vx = 0, vy = 0;
-        for (int i = 0; i < 700; i++)
-        {
-            vx = vx * 0.9 + (_mouseRng.NextDouble() - 0.5) * 7;
-            vy = vy * 0.9 + (_mouseRng.NextDouble() - 0.5) * 7;
-            x += vx; y += vy;
-            _heat.Feed(new LogEvent(null, LogEventKind.Location, "", X: x, Y: y));
-            if (_mouseRng.NextDouble() < 0.06)            // occasional dwell → hotspot
-                for (int k = 0; k < 18; k++)
-                    _heat.Feed(new LogEvent(null, LogEventKind.Location, "", X: x + (_mouseRng.NextDouble() - 0.5) * 4, Y: y + (_mouseRng.NextDouble() - 0.5) * 4));
-        }
-        RefreshZones();
-        RenderHeat();
-    }
-
-    private void ExportHeat_Click(object sender, RoutedEventArgs e)
-    {
-        var dlg = new SaveFileDialog { Filter = "PNG image|*.png", FileName = "eqavatar-heatmap.png" };
-        if (dlg.ShowDialog() != true) return;
-        try
-        {
-            var rtb = new RenderTargetBitmap(HW, HH, 96, 96, PixelFormats.Pbgra32);
-            rtb.Render(HeatSurface);
-            var enc = new PngBitmapEncoder();
-            enc.Frames.Add(BitmapFrame.Create(rtb));
-            using var fs = System.IO.File.Create(dlg.FileName);
-            enc.Save(fs);
-            HeatStatus.Text = "Exported → " + dlg.FileName;
-        }
-        catch (Exception ex) { HeatStatus.Text = "Export failed: " + ex.Message; }
-    }
-
-    private void ZoneCombo_Changed(object sender, SelectionChangedEventArgs e)
-    {
-        if (!_suppressZoneChange) RenderHeat();
-    }
-
-    private void RefreshZones()
-    {
-        _suppressZoneChange = true;
-        string? keep = ZoneCombo.SelectedItem as string ?? _heat.Current;
-        var zones = new List<string>(_heat.Zones);
-        ZoneCombo.ItemsSource = zones;
-        if (keep != null && zones.Contains(keep)) ZoneCombo.SelectedItem = keep;
-        else if (zones.Count > 0) ZoneCombo.SelectedItem = zones[0];
-        _suppressZoneChange = false;
-    }
-
-    private void RenderHeat()
-    {
-        string? zone = ZoneCombo.SelectedItem as string ?? _heat.Current;
-        var pts = _heat.PointsFor(zone);
-        HeatmapRenderer.Result r = HeatmapRenderer.Render(pts, HW, HH);
-        HeatImage.Source = r.Bitmap;
-
-        PathCanvas.Children.Clear();
-        if (r.PixelPoints.Count > 1)
-        {
-            var poly = new Polyline { Stroke = Hex("#4FC3F7"), StrokeThickness = 1.4, Opacity = 0.65 };
-            var pc = new PointCollection();
-            foreach (var p in r.PixelPoints) pc.Add(p);
-            poly.Points = pc;
-            PathCanvas.Children.Add(poly);
-        }
-        if (r.PixelPoints.Count > 0)
-        {
-            var last = r.PixelPoints[^1];
-            var orb = new Ellipse { Width = 12, Height = 12, Fill = Hex("#EAF8FF"), Effect = new DropShadowEffect { Color = Colors.Cyan, BlurRadius = 14, ShadowDepth = 0 } };
-            Canvas.SetLeft(orb, last.X - 6);
-            Canvas.SetTop(orb, last.Y - 6);
-            PathCanvas.Children.Add(orb);
-        }
-        HeatStatus.Text = pts.Count == 0
-            ? "no /loc points for this zone yet"
-            : $"zone: {zone}  ·  {pts.Count} points  ·  {_heat.Zones.Count} zone(s) this session";
-    }
-
     // ---------------- Tab 8: licensing / hub ----------------
 
     private void InitLicensingTab()
@@ -1907,7 +1836,6 @@ public partial class MainWindow : Window
         _login?.Stop();
         _mouseCts?.Cancel();
         _mapsWatcher?.Dispose();
-        StopHeat();
         if (_hwnd != IntPtr.Zero) { UnregisterHotKey(_hwnd, PANIC_HOTKEY_ID); UnregisterHotKey(_hwnd, PROBE_HOTKEY_ID); }
         StopWatch();
         _overlay?.Close();

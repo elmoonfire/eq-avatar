@@ -251,12 +251,6 @@
                             <RadioButton x:Name="NavSessions" Style="{StaticResource NavItem}" GroupName="nav" Tag="PanelSessions" Checked="Nav_Checked">
                                 <StackPanel Orientation="Horizontal"><TextBlock Style="{StaticResource NavGlyph}" Text="&#xE81C;"/><TextBlock Text="Sessions"/></StackPanel>
                             </RadioButton>
-                            <RadioButton x:Name="NavHeat" Style="{StaticResource NavItem}" GroupName="nav" Tag="PanelHeat" Checked="Nav_Checked">
-                                <StackPanel Orientation="Horizontal"><TextBlock Style="{StaticResource NavGlyph}" Text="&#xE9D9;"/><TextBlock Text="Heatmaps"/></StackPanel>
-                            </RadioButton>
-                            <RadioButton x:Name="NavMap" Style="{StaticResource NavItem}" GroupName="nav" Tag="PanelMap" Checked="Nav_Checked">
-                                <StackPanel Orientation="Horizontal"><TextBlock Style="{StaticResource NavGlyph}" Text="&#xE707;"/><TextBlock Text="Zone Map"/></StackPanel>
-                            </RadioButton>
                             <RadioButton x:Name="NavLog" Style="{StaticResource NavItem}" GroupName="nav" Tag="PanelLog" Checked="Nav_Checked">
                                 <StackPanel Orientation="Horizontal"><TextBlock Style="{StaticResource NavGlyph}" Text="&#xE7C3;"/><TextBlock Text="Log Reader"/></StackPanel>
                             </RadioButton>
@@ -392,8 +386,7 @@
 
                                 <WrapPanel Margin="6,12,0,0">
                                     <Button Content="Go to Grind" Click="HomeGoGrind_Click"/>
-                                    <Button Content="Heatmaps" Click="HomeGoHeat_Click"/>
-                                    <Button Content="Show map overlay" Click="ShowOverlay_Click"/>
+                                    <Button Content="Maps &amp; heat" Click="HomeGoHeat_Click"/>
                                 </WrapPanel>
                             </StackPanel>
                         </ScrollViewer>
@@ -522,19 +515,6 @@
                                  VerticalScrollBarVisibility="Auto" TextWrapping="Wrap"/>
                     </Grid>
 
-                    <!-- ===== MAP OVERLAY ===== -->
-                    <StackPanel x:Name="PanelMap" Margin="22" Visibility="Collapsed">
-                        <TextBlock Text="Zone Map Overlay" FontSize="19" FontWeight="Bold" Margin="0,0,0,10"/>
-                        <TextBlock TextWrapping="Wrap" Foreground="{StaticResource TextDim}" Margin="0,0,0,12"
-                                   Text="Floats a transparent, always-on-top map with a glowing player orb and a breadcrumb trail. It starts interactive — drag it by the header anywhere, including a second monitor. The 'ghost' button toggles click-through for floating it over the game on one screen."/>
-                        <WrapPanel>
-                            <Button Content="Show overlay" Click="ShowOverlay_Click"/>
-                            <Button Content="Hide overlay" Click="HideOverlay_Click"/>
-                        </WrapPanel>
-                        <TextBlock Margin="0,14,0,0" Foreground="{StaticResource TextDim}" TextWrapping="Wrap"
-                                   Text="What to judge: does it look good, stay on top, read clearly, and survive the game going windowed/resized? The real map keeps your full session path per zone."/>
-                    </StackPanel>
-
                     <!-- ===== GRIND ===== -->
                     <Grid x:Name="PanelGrind" Margin="18" Visibility="Collapsed">
                         <Grid.RowDefinitions>
@@ -542,6 +522,7 @@
                             <RowDefinition Height="Auto"/>
                             <RowDefinition Height="Auto"/>
                             <RowDefinition Height="*"/>
+                            <RowDefinition Height="Auto"/>
                             <RowDefinition Height="Auto"/>
                             <RowDefinition Height="Auto"/>
                             <RowDefinition Height="Auto"/>
@@ -603,10 +584,49 @@
                             <TextBox x:Name="HuntRestBox" Text="8" Width="40" VerticalAlignment="Center" Margin="0,0,8,8"/>
                         </WrapPanel>
 
-                        <TextBlock x:Name="GrindStatsLabel" Grid.Row="5" Margin="0,4,0,4" FontFamily="Consolas"
+                        <!-- Targeting suite: stance, hostile-only, tether, directive list (0.9.14) -->
+                        <Border Grid.Row="5" Background="#121A28" BorderBrush="#26405A" BorderThickness="1"
+                                CornerRadius="8" Padding="12,10" Margin="0,2,0,6" VerticalAlignment="Top">
+                            <StackPanel>
+                                <TextBlock Text="TARGETING" FontSize="11" Foreground="{StaticResource TextDim}" Margin="0,0,0,6"/>
+                                <WrapPanel>
+                                    <TextBlock Text="Stance:" VerticalAlignment="Center" Margin="0,0,8,6"
+                                               ToolTip="Behaves like a pet: how eager is the bot to start fights?"/>
+                                    <RadioButton x:Name="StanceAggro" GroupName="stance" Content="Aggressive" IsChecked="True" Margin="0,0,12,6"
+                                                 Foreground="{StaticResource Text}" VerticalAlignment="Center"
+                                                 ToolTip="Attacks anything it finds while roaming (today's behavior)."/>
+                                    <RadioButton x:Name="StanceDef" GroupName="stance" Content="Defensive" Margin="0,0,12,6"
+                                                 Foreground="{StaticResource Text}" VerticalAlignment="Center"
+                                                 ToolTip="Holds position and only fights back when something attacks first."/>
+                                    <RadioButton x:Name="StanceDir" GroupName="stance" Content="Directive" Margin="0,0,12,6"
+                                                 Foreground="{StaticResource Text}" VerticalAlignment="Center"
+                                                 ToolTip="Only engages mobs on the target list — feed it from the Game Data page."/>
+                                    <CheckBox x:Name="HostileOnlyBox" Content="only scowls / threatening" Margin="0,0,12,6"
+                                              Foreground="{StaticResource Warn}" VerticalAlignment="Center"
+                                              ToolTip="Skip anything whose /con attitude isn't scowls or glares threateningly — no faction accidents."/>
+                                </WrapPanel>
+                                <WrapPanel>
+                                    <CheckBox x:Name="TetherBox" Content="tether to start point" VerticalAlignment="Center" Margin="0,0,10,4"
+                                              Foreground="{StaticResource Text}"
+                                              ToolTip="Anchors where the run starts (first /loc). Wander past the radius and it turns back."/>
+                                    <Slider x:Name="TetherSlider" Width="180" Minimum="50" Maximum="1500" Value="300"
+                                            TickFrequency="50" IsSnapToTickEnabled="True" VerticalAlignment="Center" Margin="0,0,8,4"
+                                            ValueChanged="TetherSlider_Changed"/>
+                                    <TextBlock x:Name="TetherLabel" Text="300 units" VerticalAlignment="Center"
+                                               Foreground="{StaticResource TextDim}" Margin="0,0,16,4" MinWidth="70"/>
+                                    <TextBlock Text="Directive targets:" VerticalAlignment="Center" Margin="0,0,6,4"
+                                               Foreground="{StaticResource TextDim}"/>
+                                    <TextBox x:Name="TargetMobsBox" Width="240" Height="44" AcceptsReturn="True" FontSize="11"
+                                             FontFamily="Consolas" VerticalScrollBarVisibility="Auto" VerticalAlignment="Center" Margin="0,0,6,4"
+                                             ToolTip="One mob name per line. Add from Game Data → pick a mob → 'Target with Grind'."/>
+                                </WrapPanel>
+                            </StackPanel>
+                        </Border>
+
+                        <TextBlock x:Name="GrindStatsLabel" Grid.Row="6" Margin="0,4,0,4" FontFamily="Consolas"
                                    Foreground="{StaticResource Text}" Text="idle — keys 0 · kills 0 · xp 0 · loops 0"/>
 
-                        <TextBox x:Name="GrindLog" Grid.Row="6" Height="96" IsReadOnly="True"
+                        <TextBox x:Name="GrindLog" Grid.Row="7" Height="96" IsReadOnly="True"
                                  Background="#0C0F13" Foreground="{StaticResource Good}" FontFamily="Consolas" FontSize="11"
                                  VerticalScrollBarVisibility="Auto" TextWrapping="Wrap"/>
                     </Grid>
@@ -900,7 +920,11 @@
                                     ToolTip="Step one floor up."/>
                             <Button Content="−" Padding="10,3" Click="MapsZoomOut_Click" Margin="0,0,2,4"/>
                             <Button Content="+" Padding="10,3" Click="MapsZoomIn_Click" Margin="0,0,2,4"/>
-                            <Button Content="Fit" Click="MapsFit_Click" Margin="0,0,0,4"/>
+                            <Button Content="Fit" Click="MapsFit_Click" Margin="0,0,14,4"/>
+                            <Button x:Name="MapsOverlayBtn" Content="Overlay in-game" Click="MapsOverlay_Click" Margin="0,0,2,4"
+                                    ToolTip="Float THIS map (with heat/trail as toggled) over the game — transparent, always on top. The overlay's 'ghost' button makes it click-through."/>
+                            <Button Content="Export PNG" Click="MapsExport_Click" Margin="0,0,0,4"
+                                    ToolTip="Save the current map view (including the heat overlay) as a PNG to share."/>
                         </WrapPanel>
 
                         <Border Grid.Row="2" CornerRadius="10" BorderBrush="#26405A" BorderThickness="1" ClipToBounds="True" Background="#0B121E">
@@ -1040,42 +1064,6 @@
                                  VerticalScrollBarVisibility="Auto" TextWrapping="Wrap"/>
                     </Grid>
 
-                    <!-- ===== HEATMAP ===== -->
-                    <Grid x:Name="PanelHeat" Margin="18" Visibility="Collapsed">
-                        <Grid.RowDefinitions>
-                            <RowDefinition Height="Auto"/>
-                            <RowDefinition Height="Auto"/>
-                            <RowDefinition Height="*"/>
-                            <RowDefinition Height="Auto"/>
-                        </Grid.RowDefinitions>
-
-                        <TextBlock Grid.Row="0" TextWrapping="Wrap" Foreground="{StaticResource TextDim}" Margin="0,0,0,8"
-                                   Text="Charts where your character has been from the /loc lines in the log — a density heatmap plus the travel path, per zone. Replay the current log, watch it build Live, or hit Simulate to see it with demo data. Export a PNG to share your session map with friends. (Continent and world roll-ups come next, once we add a zone→continent table.)"/>
-
-                        <WrapPanel Grid.Row="1" Margin="0,0,0,8">
-                            <TextBlock Text="Zone:" VerticalAlignment="Center" Margin="0,0,6,8"/>
-                            <ComboBox x:Name="ZoneCombo" Width="220" VerticalAlignment="Center" Margin="0,0,12,8"
-                                      SelectionChanged="ZoneCombo_Changed"/>
-                            <Button Content="Replay log" Click="ReplayHeat_Click"/>
-                            <Button Content="Live" Click="LiveHeat_Click"/>
-                            <Button Content="Stop" Click="StopHeat_Click"/>
-                            <Button Content="Simulate" Click="SimulateHeat_Click"/>
-                            <Button Content="Export PNG" Click="ExportHeat_Click"/>
-                        </WrapPanel>
-
-                        <Border Grid.Row="2" BorderBrush="{StaticResource AccentDim}" BorderThickness="1" Background="#0A0E14">
-                            <Viewbox Stretch="Uniform" Margin="6">
-                                <Grid x:Name="HeatSurface" Width="560" Height="420" Background="#0A0E14">
-                                    <Image x:Name="HeatImage" Stretch="Fill"/>
-                                    <Canvas x:Name="PathCanvas" Width="560" Height="420"/>
-                                </Grid>
-                            </Viewbox>
-                        </Border>
-
-                        <TextBlock x:Name="HeatStatus" Grid.Row="3" Margin="0,8,0,0" FontFamily="Consolas"
-                                   Foreground="{StaticResource TextDim}" Text="no data yet — Replay the log or Simulate."/>
-                    </Grid>
-
                     <!-- ===== LICENSING ===== -->
                     <Grid x:Name="PanelLicensing" Margin="18" Visibility="Collapsed">
                         <Grid.RowDefinitions>
@@ -1178,6 +1166,9 @@
                                            Text="Open your Inventory in-game (Equipment tab), leave it visible, and press Read. The app captures the game window, finds the sheet by its own labels, and reads vitals, attributes, resists, regens, weight, coin, and your name/level/class — the real numbers, straight off the screen. Then send them to your web profile."/>
                                 <WrapPanel>
                                     <Button Content="Read inventory now" Click="OcrRead_Click" FontWeight="SemiBold" Margin="0,0,8,6"/>
+                                    <CheckBox x:Name="OcrAutoBox" Content="auto-scan" Click="OcrAuto_Click" VerticalAlignment="Center" Margin="0,0,8,6"
+                                              Foreground="{StaticResource Text}"
+                                              ToolTip="Keeps watching the game every few seconds and reads the sheet automatically whenever the inventory is open — no button pressing. Sends to your profile at most every 10 minutes."/>
                                     <Button x:Name="OcrSendBtn" Content="Send to profile" Click="OcrSend_Click" IsEnabled="False" Margin="0,0,8,6"/>
                                     <TextBlock x:Name="OcrStatus" Text="no read yet" VerticalAlignment="Center"
                                                Foreground="{StaticResource TextDim}" FontSize="11.5" Margin="0,0,0,6"/>

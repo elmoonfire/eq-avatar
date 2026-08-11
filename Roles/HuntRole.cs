@@ -46,10 +46,14 @@ public sealed class HuntRole
     private readonly Random _rng = new();
     private CancellationTokenSource? _cts;
 
-    private volatile bool _mobDead, _selfDead, _rmbDown;
+    private volatile bool _mobDead, _selfDead, _rmbDown, _attacked;
     private ConsiderDifficulty _lastCon = ConsiderDifficulty.Unknown;
+    private ConsiderAttitude _lastAttitude = ConsiderAttitude.Unknown;
+    private string _lastConText = "";
     private double? _x, _y;
+    private double? _startX, _startY;                       // tether anchor: first /loc after start
     private DateTime _lastLoc = DateTime.MinValue;
+    private readonly List<string> _targets = new();          // directive mode: lowercase mob names
 
     // resolved binds
     private readonly InputKey _fwd, _left, _right, _back, _target, _con, _loc;
@@ -67,7 +71,14 @@ public sealed class HuntRole
         _target = InputKey.Parse(s.HuntTargetKey);
         _con = InputKey.Parse(s.HuntConsiderKey);
         _loc = InputKey.Parse(s.HuntLocKey);
+        foreach (string line in (s.GrindTargetMobs ?? "").Split('\n'))
+        {
+            string t = line.Trim().ToLowerInvariant();
+            if (t.Length > 1 && !_targets.Contains(t)) _targets.Add(t);
+        }
     }
+
+    private string Stance => (_s.GrindStance ?? "aggressive").Trim().ToLowerInvariant();
 
     public void Start()
     {
@@ -95,15 +106,44 @@ public sealed class HuntRole
         LogEvent ev = LogEventParser.Parse(raw);
         switch (ev.Kind)
         {
-            case LogEventKind.Location: _x = ev.X; _y = ev.Y; break;
+            case LogEventKind.Location:
+                _x = ev.X; _y = ev.Y;
+                if (_startX is null && ev.X is double sx && ev.Y is double sy)
+                { _startX = sx; _startY = sy; if (_s.HuntTetherEnabled) Log?.Invoke($"Tether anchored at /loc {sy:0}, {sx:0} — radius {_s.HuntTetherRadius}."); }
+                break;
             case LogEventKind.Consider:
                 _lastCon = LogEventParser.ConsiderReading(ev.Text);
+                _lastAttitude = LogEventParser.AttitudeReading(ev.Text);
+                _lastConText = ev.Text;
                 Stats.LastCon = ev.Text; Stats.MobsConsidered++;
-                Log?.Invoke($"con: {_lastCon} — {ev.Text}");
+                Log?.Invoke($"con: {_lastCon}/{_lastAttitude} — {ev.Text}");
+                break;
+            case LogEventKind.Combat:
+                // Something swinging at US wakes the defensive stance.
+                if (ev.Text.Contains(" YOU ", StringComparison.Ordinal) || ev.Text.Contains(" YOU!", StringComparison.Ordinal)
+                    || ev.Text.Contains(" YOU for ", StringComparison.Ordinal))
+                    _attacked = true;
                 break;
             case LogEventKind.Kill: _mobDead = true; break;
             case LogEventKind.Death: _selfDead = true; break;
         }
+    }
+
+    /// <summary>Does the last con line name a mob on the directive target list?</summary>
+    private bool ConMatchesTargets()
+    {
+        if (_targets.Count == 0) return false;
+        string con = _lastConText.ToLowerInvariant();
+        foreach (string t in _targets) if (con.Contains(t)) return true;
+        return false;
+    }
+
+    /// <summary>Distance from the tether anchor, or 0 when unknown.</summary>
+    private double TetherDistance()
+    {
+        if (_startX is not double sx || _startY is not double sy || _x is not double x || _y is not double y) return 0;
+        double dx = x - sx, dy = y - sy;
+        return Math.Sqrt(dx * dx + dy * dy);
     }
 
     private async Task Loop(CancellationToken ct)
@@ -115,23 +155,52 @@ public sealed class HuntRole
                 if (_selfDead) { Log?.Invoke("Death detected — stopping hunt for safety."); Stats.Deaths++; break; }
                 if (!_sink.Ready) { Stats.State = "paused (EQ not focused)"; await Task.Delay(400, ct); continue; }
 
-                // 1) SEEK — wander within explored bounds, then target + consider
-                Stats.State = "seeking";
-                await MaybeLoc(ct);
-                await Wander(ct);
-                if (!_sink.Ready) continue;
-                _sink.Send(_target);                        // target nearest NPC (Tab by default)
-                await Task.Delay(Vary(350), ct);
-                _lastCon = ConsiderDifficulty.Unknown;
-                _sink.Send(_con);                           // /consider the target (key or mouse5)
-                await Task.Delay(Vary(750), ct);            // wait for the con line to land
+                // DEFENSIVE stance: hold position like a defensive pet — no roaming, no pulling.
+                // The rotation only fires once something swings at us.
+                if (Stance == "defensive")
+                {
+                    if (!_attacked)
+                    {
+                        Stats.State = "on guard (defensive)";
+                        await MaybeLoc(ct);
+                        await Task.Delay(400, ct);
+                        continue;
+                    }
+                    _attacked = false;
+                    Log?.Invoke("Attacked — fighting back (defensive stance).");
+                    _sink.Send(_target);                    // target whatever is on us
+                    await Task.Delay(Vary(300), ct);
+                }
+                else
+                {
+                    // 1) SEEK — wander within explored bounds (and the tether), then target + consider
+                    Stats.State = "seeking";
+                    await MaybeLoc(ct);
+                    await Wander(ct);
+                    if (!_sink.Ready) continue;
+                    _sink.Send(_target);                    // target nearest NPC (Tab by default)
+                    await Task.Delay(Vary(350), ct);
+                    _lastCon = ConsiderDifficulty.Unknown;
+                    _lastAttitude = ConsiderAttitude.Unknown;
+                    _lastConText = "";
+                    _sink.Send(_con);                       // /consider the target (key or mouse5)
+                    await Task.Delay(Vary(750), ct);        // wait for the con line to land
 
-                // No con line came back → nothing was targeted. Don't flail at empty air: roam again.
-                if (_lastCon == ConsiderDifficulty.Unknown)
-                { Stats.State = "no target — roaming"; Log?.Invoke("No target — roaming for a mob."); continue; }
+                    // No con line came back → nothing was targeted. Don't flail at empty air: roam again.
+                    if (_lastCon == ConsiderDifficulty.Unknown && _lastAttitude == ConsiderAttitude.Unknown)
+                    { Stats.State = "no target — roaming"; Log?.Invoke("No target — roaming for a mob."); continue; }
 
-                if (_s.HuntSkipHardCons && _lastCon == ConsiderDifficulty.Suicidal)
-                { Stats.Skipped++; Log?.Invoke("Skipping a too-hard target."); continue; }
+                    if (_s.HuntSkipHardCons && _lastCon == ConsiderDifficulty.Suicidal)
+                    { Stats.Skipped++; Log?.Invoke("Skipping a too-hard target."); continue; }
+
+                    // Hostile-only: only mobs that scowl or glare threateningly are fair game.
+                    if (_s.HuntHostileOnly && _lastAttitude != ConsiderAttitude.Scowls && _lastAttitude != ConsiderAttitude.Threatening)
+                    { Stats.Skipped++; Log?.Invoke($"Skipping — con reads {_lastAttitude}, not hostile."); continue; }
+
+                    // DIRECTIVE stance: only mobs on the target list get engaged.
+                    if (Stance == "directive" && !ConMatchesTargets())
+                    { Stats.Skipped++; Log?.Invoke("Skipping — not on the directive target list."); continue; }
+                }
 
                 // 2) FIGHT — run the rotation until the mob dies / we die / timeout
                 Stats.State = "fighting"; Stats.Fights++;
@@ -149,6 +218,7 @@ public sealed class HuntRole
                     await Task.Delay(Vary(Math.Max(50, delay)), ct);
                 }
                 if (_mobDead) { Stats.Kills++; Log?.Invoke($"Kill #{Stats.Kills}."); }
+                _attacked = false;                          // a fight resolves the defensive trigger
 
                 // 3) REST — time-based (no HP/mana in the log; see class notes)
                 Stats.State = "resting";
@@ -176,6 +246,17 @@ public sealed class HuntRole
     private async Task Wander(CancellationToken ct)
     {
         if (!_sink.Ready) return;
+
+        // Tether: past the leash radius → turn hard and burst back toward the anchor's side.
+        if (_s.HuntTetherEnabled && TetherDistance() > Math.Max(50, _s.HuntTetherRadius))
+        {
+            Stats.State = "tether — heading home";
+            Log?.Invoke($"Past the tether radius ({TetherDistance():0} > {_s.HuntTetherRadius}) — turning back.");
+            await LookAround(ct, big: true);                // reorient the camera
+            await HoldKey(_rng.Next(2) == 0 ? _left : _right, Vary(700), ct);
+            await HoldKey(_fwd, Vary(900), ct);             // stride back before hunting again
+            return;
+        }
 
         var bounds = _heat.BoundsFor(_heat.Current);
         if (bounds is { } b && _x is double x && _y is double y)

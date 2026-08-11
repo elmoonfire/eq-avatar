@@ -86,6 +86,9 @@ public sealed class MapViewElement : FrameworkElement
 
     public void SetHeat(IReadOnlyList<Point> mapSpacePoints) { _heatPts = mapSpacePoints; InvalidateVisual(); }
 
+    /// <summary>The heat points currently loaded (map space) — lets the overlay mirror them.</summary>
+    public IReadOnlyList<Point> HeatPoints => _heatPts;
+
     /// <summary>Live /loc in map space. Appends to the trail and moves the marker.</summary>
     public void PushLoc(double mapX, double mapY)
     {

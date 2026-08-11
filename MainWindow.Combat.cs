@@ -50,6 +50,8 @@ public partial class MainWindow
                 Recorder.RecordCombatSecond();
         }
 
+        Recorder.Flush();                                  // crash-proof the active session (1/min)
+
         if (!_ready) return;
         if (PanelCombat.Visibility == Visibility.Visible) RefreshCombatPanel();
         // the Command Center's small chart is driven by RefreshHome (300ms), but nudge it here too

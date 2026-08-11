@@ -110,6 +110,25 @@ public static class InventoryReader
         OcrResult pass2 = await Recognize(crop);
         var snap = new InventorySnapshot();
         Parse(pass2, snap);
+
+        // The vitals column is the one that matters — if HP didn't land, try once more at 4×.
+        if (!snap.Fields.ContainsKey("hp"))
+        {
+            log?.Invoke("hp row missed at 3× — retrying the read at 4× upscale…");
+            using var crop4 = new Bitmap((cx1 - cx0) * 4, (cy1 - cy0) * 4, PixelFormat.Format32bppArgb);
+            using (Graphics g = Graphics.FromImage(crop4))
+            {
+                g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                g.DrawImage(frame, new Rectangle(0, 0, crop4.Width, crop4.Height),
+                            new Rectangle(cx0, cy0, cx1 - cx0, cy1 - cy0), GraphicsUnit.Pixel);
+            }
+            var snap4 = new InventorySnapshot();
+            Parse(await Recognize(crop4), snap4);
+            foreach ((string k2, List<double> v2) in snap4.Fields)
+                if (!snap.Fields.ContainsKey(k2)) snap.Fields[k2] = v2;
+            snap.Level ??= snap4.Level; snap.Classes ??= snap4.Classes; snap.Name ??= snap4.Name;
+            snap.Plat ??= snap4.Plat; snap.Gold ??= snap4.Gold; snap.Silver ??= snap4.Silver; snap.Copper ??= snap4.Copper;
+        }
         if (snap.Fields.Count < 6)
             snap.Warnings.Add($"Only {snap.Fields.Count} stat rows parsed — OCR may have struggled at this resolution.");
         foreach (string need in new[] { "hp", "mana", "ac", "strength", "sv magic" })
@@ -157,6 +176,15 @@ public static class InventoryReader
     private static bool IsNumericish(string norm) =>
         norm.Length > 0 && norm.All(c => char.IsDigit(c) || c is '/' or ',' or '.' or '+' or '-' or '%' or '|');
 
+    /// <summary>Same length, at most one differing character — catches single OCR misreads.</summary>
+    private static bool OneOff(string a, string b)
+    {
+        if (a.Length != b.Length) return false;
+        int diff = 0;
+        for (int i = 0; i < a.Length; i++) if (a[i] != b[i] && ++diff > 1) return false;
+        return diff <= 1;
+    }
+
     private static IEnumerable<double> NumbersIn(string norm)
     {
         foreach (string piece in norm.Split('/', '|', '+'))
@@ -189,9 +217,30 @@ public static class InventoryReader
                     for (int k = 0; k < lab.Length; k++) if (words[i + k].norm != lab[k]) { ok = false; break; }
                     if (ok) { matched = lab; break; }
                 }
+                string mergedRest = "";
+                if (matched is null)
+                {
+                    // OCR sometimes glues the label to its number ("hp5263/5263") — peel it apart.
+                    foreach (string[] lab in Labels)
+                    {
+                        if (lab.Length != 1) continue;
+                        string wn = words[i].norm;
+                        if (wn.Length > lab[0].Length && wn.StartsWith(lab[0], StringComparison.Ordinal)
+                            && IsNumericish(wn[lab[0].Length..]))
+                        { matched = lab; mergedRest = wn[lab[0].Length..]; break; }
+                    }
+                    // Light fuzz for LONG labels only (strength/stamina/…): one wrong character.
+                    if (matched is null)
+                        foreach (string[] lab in Labels)
+                        {
+                            if (lab.Length != 1 || lab[0].Length < 5) continue;
+                            if (OneOff(words[i].norm, lab[0])) { matched = lab; break; }
+                        }
+                }
                 if (matched is null) { i++; continue; }
-                i += matched.Length;
+                if (mergedRest.Length == 0) i += matched.Length; else i++;
                 var nums = new List<double>();
+                if (mergedRest.Length > 0) nums.AddRange(NumbersIn(mergedRest));
                 while (i < words.Count && IsNumericish(words[i].norm))
                 {
                     nums.AddRange(NumbersIn(words[i].norm));

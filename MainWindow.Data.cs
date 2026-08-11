@@ -83,12 +83,30 @@ public partial class MainWindow
             foreach (string d in m.Drops) Line("  • " + d, 12);
         }
         string? stem = m.Zones.Select(ZoneTable.ShortFor).FirstOrDefault(s => s != null);
+        var btnRow = new WrapPanel { Margin = new Thickness(0, 8, 0, 0) };
         if (stem != null)
         {
-            var btn = new Button { Content = "Show zone on map →", Margin = new Thickness(0, 8, 0, 0), HorizontalAlignment = HorizontalAlignment.Left };
+            var btn = new Button { Content = "Show zone on map →", HorizontalAlignment = HorizontalAlignment.Left };
             btn.Click += (_, _) => { LoadMapZone(stem); NavMaps.IsChecked = true; };
-            MobDetail.Children.Add(btn);
+            btnRow.Children.Add(btn);
         }
+        var hunt = new Button { Content = "☠ Target with Grind", HorizontalAlignment = HorizontalAlignment.Left,
+                                ToolTip = "Adds this mob to the Grind role's directive target list (and switches the stance to Directive)." };
+        hunt.Click += (_, _) => AddDirectiveTarget(m.Name);
+        btnRow.Children.Add(hunt);
+        MobDetail.Children.Add(btnRow);
+    }
+
+    /// <summary>Feed a mob from the bestiary into the Grind role's directive list.</summary>
+    private void AddDirectiveTarget(string mobName)
+    {
+        string cur = TargetMobsBox.Text.TrimEnd();
+        bool dup = cur.Split('\n').Any(l => l.Trim().Equals(mobName, StringComparison.OrdinalIgnoreCase));
+        if (!dup) TargetMobsBox.Text = (cur.Length > 0 ? cur + Environment.NewLine : "") + mobName;
+        StanceDir.IsChecked = true;
+        ApplyHuntFields();
+        _settings.Save();
+        ShowToast($"Grind directive: {mobName}");
     }
 
     // ---------------- Raid Targets tab ----------------

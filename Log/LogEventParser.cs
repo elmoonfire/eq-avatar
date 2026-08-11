@@ -21,6 +21,10 @@ public enum LogEventKind
 /// <summary>How a /consider reads, roughly, from the difficulty tail of the con message.</summary>
 public enum ConsiderDifficulty { Unknown, Trivial, Easy, Even, Hard, Suicidal }
 
+/// <summary>The mob's ATTITUDE from the front of the con line ("scowls at you…", "regards you
+/// indifferently…"). Separate from difficulty: attitude is faction, difficulty is level.</summary>
+public enum ConsiderAttitude { Unknown, Scowls, Threatening, Dubious, Apprehensive, Indifferent, Amiable, Kindly, Warmly, Ally }
+
 public sealed record LogEvent(
     DateTime? Stamp,
     LogEventKind Kind,
@@ -94,8 +98,9 @@ public static class LogEventParser
         if (msg.Contains(" tells you,", StringComparison.OrdinalIgnoreCase))
             return new LogEvent(stamp, LogEventKind.Tell, msg);
 
-        // /consider difficulty tail (before combat, since con lines carry no damage words).
-        if (ConsiderReading(msg) != ConsiderDifficulty.Unknown)
+        // /consider lines (before combat, since con lines carry no damage words) — either the
+        // difficulty tail or the faction-attitude phrasing marks one.
+        if (ConsiderReading(msg) != ConsiderDifficulty.Unknown || AttitudeReading(msg) != ConsiderAttitude.Unknown)
             return new LogEvent(stamp, LogEventKind.Consider, msg);
 
         if (Zone.IsMatch(msg)) return new LogEvent(stamp, LogEventKind.Zone, msg);
@@ -140,5 +145,27 @@ public static class LogEventParser
             m.Contains("extremely easy") || m.Contains("decide whether to attack you or run"))
             return ConsiderDifficulty.Trivial;
         return ConsiderDifficulty.Unknown;
+    }
+
+    /// <summary>
+    /// Read the FACTION attitude off the front of a /con line. Classic wording:
+    /// "scowls at you, ready to attack" · "glares at you threateningly" · "glowers at you
+    /// dubiously" · "looks your way apprehensively" · "regards you indifferently" ·
+    /// "judges you amiably" · "kindly considers you" · "looks upon you warmly" ·
+    /// "regards you as an ally".
+    /// </summary>
+    public static ConsiderAttitude AttitudeReading(string msg)
+    {
+        string m = msg.ToLowerInvariant();
+        if (m.Contains("scowls at you") || m.Contains("ready to attack")) return ConsiderAttitude.Scowls;
+        if (m.Contains("threateningly")) return ConsiderAttitude.Threatening;
+        if (m.Contains("dubious")) return ConsiderAttitude.Dubious;
+        if (m.Contains("apprehensive")) return ConsiderAttitude.Apprehensive;
+        if (m.Contains("indifferent")) return ConsiderAttitude.Indifferent;
+        if (m.Contains("amiabl")) return ConsiderAttitude.Amiable;
+        if (m.Contains("kindly")) return ConsiderAttitude.Kindly;
+        if (m.Contains("warmly")) return ConsiderAttitude.Warmly;
+        if (m.Contains("as an ally")) return ConsiderAttitude.Ally;
+        return ConsiderAttitude.Unknown;
     }
 }
