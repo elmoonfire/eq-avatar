@@ -36,7 +36,7 @@ public sealed class AppSettings
     // --- Client Hub (centralized licensing + usage dashboard) ---
     /// <summary>App version reported on every check-in (shown on the dashboard). Also the version
     /// the in-app updater compares against the newest GitHub release tag.</summary>
-    public const string AppVersion = "0.9.5";
+    public const string AppVersion = "0.9.6";
 
     // --- Auto-update (GitHub) ---
     public const string UpdateOwner = "elmoonfire";
@@ -84,6 +84,20 @@ public sealed class AppSettings
     public int HuntMaxFightSeconds { get; set; } = 25;       // bail on a fight that never ends (keeps it roaming)
     /// <summary>Skip mobs whose consider reads as too hard (flee / challenge).</summary>
     public bool HuntSkipHardCons { get; set; } = true;
+
+    // --- Follower role (second character follows + assists a leader) ---
+    /// <summary>Leader character name this instance follows (exact in-game name).</summary>
+    public string FollowerLeader { get; set; } = "";
+    /// <summary>Re-issue /target + /follow this often while idle, so a lost follow self-heals.</summary>
+    public int FollowerRefollowSeconds { get; set; } = 40;
+    /// <summary>Join in automatically when the leader's swings/casts appear in the log.</summary>
+    public bool FollowerAutoAssist { get; set; } = true;
+    /// <summary>Human-ish pause before assisting once the leader engages.</summary>
+    public int FollowerAssistDelayMs { get; set; } = 900;
+    public int FollowerMaxFightSeconds { get; set; } = 30;
+    /// <summary>No combat lines for this long = the fight is over; break off and re-follow.</summary>
+    public int FollowerCombatLingerSeconds { get; set; } = 6;
+    public int FollowerRestSeconds { get; set; } = 4;
 
     // --- Launch (Command Center one-click launch) ---
     /// <summary>Path to the EQL launcher/LaunchPad exe. If set, the Launch button starts it before auto-login.</summary>
