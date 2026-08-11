@@ -45,6 +45,12 @@ public readonly struct InputKey
             case "down": return FromVk(0x28);
             case "left": return FromVk(0x25);
             case "right": return FromVk(0x27);
+            case "home": return FromVk(0x24);
+            case "end": return FromVk(0x23);
+            case "pgup": case "pageup": case "prior": return FromVk(0x21);
+            case "pgdn": case "pagedown": case "next": return FromVk(0x22);
+            case "ins": case "insert": return FromVk(0x2D);
+            case "del": case "delete": return FromVk(0x2E);
             case "mouse1": case "lmb": case "leftmouse": case "m1": return FromMouse(MouseBtn.Left);
             case "mouse2": case "rmb": case "rightmouse": case "m2": return FromMouse(MouseBtn.Right);
             case "mouse3": case "mmb": case "middlemouse": case "m3": return FromMouse(MouseBtn.Middle);
@@ -69,6 +75,8 @@ public readonly struct InputKey
         _ => Vk switch
         {
             0x09 => "Tab", 0x20 => "Space", 0x0D => "Enter", 0x1B => "Esc",
+            0x24 => "Home", 0x23 => "End", 0x21 => "PgUp", 0x22 => "PgDn",
+            0x2D => "Ins", 0x2E => "Del",
             >= 0x70 and <= 0x87 => "F" + (Vk - 0x6F),
             _ => ((char)Vk).ToString()
         }

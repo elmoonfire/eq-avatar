@@ -6,6 +6,7 @@ using EQAvatar.Spike.Config;
 using EQAvatar.Spike.Input;
 using EQAvatar.Spike.Log;
 using EQAvatar.Spike.Map;
+using EQAvatar.Spike.Ocr;
 
 namespace EQAvatar.Spike.Roles;
 
@@ -78,14 +79,22 @@ public sealed class HuntRole
     private volatile bool _singing;                          // bard melody believed active
     private DateTime _melodyAt = DateTime.MinValue;
 
+    // --- compass, levitation + fall recovery (0.9.16) --------------------------------------
+    private readonly CompassReader? _compass;                // real heading reads off the game UI
+    private DateTime _levAt = DateTime.MinValue;
+    private volatile bool _levNeeded;
+    private DateTime _lastPitchFix = DateTime.MinValue;
+    private double? _z, _zGood, _goodX, _goodY;              // last altitude that counted as "ground"
+    private volatile bool _fell, _dip;
+
     // resolved binds
     private readonly InputKey _fwd, _left, _right, _back, _target, _con, _loc;
 
     public bool Running => _cts is { IsCancellationRequested: false };
 
-    public HuntRole(IInputSink sink, List<(InputKey, int)> rotation, string? logPath, AppSettings s, HeatmapModel heat)
+    public HuntRole(IInputSink sink, List<(InputKey, int)> rotation, string? logPath, AppSettings s, HeatmapModel heat, CompassReader? compass = null)
     {
-        _sink = sink; _rotation = rotation; _s = s; _heat = heat;
+        _sink = sink; _rotation = rotation; _s = s; _heat = heat; _compass = compass;
         if (!string.IsNullOrEmpty(logPath)) _watcher = new EqLogWatcher(logPath);
         _fwd = InputKey.Parse(s.HuntForwardKey);
         _left = InputKey.Parse(s.HuntLeftKey);
@@ -138,6 +147,10 @@ public sealed class HuntRole
         else if (raw.Contains("too far away", StringComparison.OrdinalIgnoreCase)) _tooFar = true;
         if (_s.GrindBardMode && _singing && LogEventParser.MelodyStopped(raw))
         { _singing = false; Log?.Invoke("Melody stopped (log) — will recast."); }
+        if (_s.LevEnabled && (raw.Contains("float gently to the ground", StringComparison.OrdinalIgnoreCase)
+            || (raw.Contains("has worn off", StringComparison.OrdinalIgnoreCase)
+                && _s.LevBuffName is { Length: > 1 } lb && raw.Contains(lb, StringComparison.OrdinalIgnoreCase))))
+            _levNeeded = true;
 
         LogEvent ev = LogEventParser.Parse(raw);
         switch (ev.Kind)
@@ -158,6 +171,7 @@ public sealed class HuntRole
                             double measured = Math.Atan2(dy, dx);
                             CalibrateTurn(measured);
                             _hdg = measured; _hdgValid = true;
+                            _compass?.LearnFromMovement(Deg(measured));   // teaches the compass→loc mapping
                             double dt = (now - Interlocked.Read(ref _prevSegTicks)) / (double)TimeSpan.TicksPerSecond;
                             if (dt > 0.4 && dt < 30)
                                 _speed = Math.Clamp(0.7 * _speed + 0.3 * (seg / dt), 20, 130);
@@ -169,6 +183,21 @@ public sealed class HuntRole
                     _x = nx; _y = ny;
                     if (_startX is null)
                     { _startX = nx; _startY = ny; if (_s.HuntTetherEnabled) Log?.Invoke($"Tether anchored at /loc {ny:0}, {nx:0} — radius {_s.HuntTetherRadius}."); }
+
+                    // Altitude watch: a sharp Z drop = fell into a pit or water → recovery mode.
+                    if (ev.Z is double nz)
+                    {
+                        _z = nz;
+                        if (_zGood is not double zg) { _zGood = nz; _goodX = nx; _goodY = ny; }
+                        else
+                        {
+                            double drop = zg - nz;
+                            if (drop > 18)
+                            { if (!_fell) Log?.Invoke($"Dropped {drop:0} units (z {zg:0} → {nz:0}) — pit/water recovery mode."); _fell = true; }
+                            else if (drop > 8) _dip = true;               // shallow dip → steer away
+                            else { _zGood = nz; _goodX = nx; _goodY = ny; }   // normal ground tracks us
+                        }
+                    }
                 }
                 break;
             case LogEventKind.Consider:
@@ -220,31 +249,146 @@ public sealed class HuntRole
     /// <summary>Turn the character by ~degrees using a right-mouse mouselook drag (positive =
     /// toward increasing loc-space angle once calibrated). Optimistically updates the heading;
     /// the next measured /loc segment corrects and calibrates.</summary>
+    /// <summary>Raw mouselook drag of |px| horizontal pixels in the sign's direction.</summary>
+    private async Task DragTurn(int signedPx, CancellationToken ct)
+    {
+        if (signedPx == 0 || !_sink.Ready) return;
+        int dir = Math.Sign(signedPx), left = Math.Abs(signedPx);
+        InputProbe.MouseButtonEvent(MouseBtn.Right, true);
+        _rmbDown = true;
+        try
+        {
+            while (left > 0 && !ct.IsCancellationRequested && _sink.Ready)
+            {
+                int step = Math.Min(left, _rng.Next(14, 27));
+                InputProbe.MouseMoveRelative(dir * step, _rng.Next(-2, 3));
+                left -= step;
+                await Task.Delay(16, ct);
+            }
+        }
+        finally { InputProbe.MouseButtonEvent(MouseBtn.Right, false); _rmbDown = false; }
+    }
+
     private async Task TurnBy(double degrees, CancellationToken ct)
     {
         degrees = NormDeg(degrees);
         if (Math.Abs(degrees) < 5 || !_sink.Ready) return;
+
+        // Compass available → feedback turn: drag, read the needle, correct. Exact and immune
+        // to sensitivity drift; also self-fixes an inverted drag direction on the first try.
+        if (_compass is { Ready: true } && await TurnByCompass(degrees, ct)) return;
+
         int totalPx = (int)Math.Round(Math.Abs(degrees) * _pxPerDeg);
         int dir = (degrees >= 0 ? 1 : -1) * _turnSign;
         if (_turnsSinceMeasure == 0 && _hdgValid) _preTurnHdg = _hdg;
         _turnsSinceMeasure++;
         _cmdTurnDeg += degrees;
+        await DragTurn(dir * totalPx, ct);
+        if (_hdgValid) _hdg += degrees * Math.PI / 180.0;    // optimistic; measurement corrects
+        await Task.Delay(Vary(90), ct);
+    }
+
+    /// <summary>Closed-loop turn against the live compass. Returns false if the needle can't be
+    /// read right now (occluded, bad light) so the caller falls back to the open-loop turn.</summary>
+    private async Task<bool> TurnByCompass(double degrees, CancellationToken ct)
+    {
+        if (_compass!.ReadLocDeg() is not double cur) return false;
+        double target = cur + degrees;
+        double px = _compass.PxPerDeg > 0.5 ? _compass.PxPerDeg : _pxPerDeg;
+        int dir = _turnSign;
+        for (int it = 0; it < 4 && !ct.IsCancellationRequested && _sink.Ready; it++)
+        {
+            double err = NormDeg(target - cur);
+            if (Math.Abs(err) < 4) break;
+            await DragTurn(Math.Sign(err) * dir * (int)Math.Round(Math.Abs(err) * px), ct);
+            await Task.Delay(80, ct);
+            if (_compass.ReadLocDeg() is not double now) break;
+            if (it == 0 && Math.Abs(NormDeg(target - now)) > Math.Abs(err) + 10)
+            { dir = -dir; _turnSign = dir; Log?.Invoke("Compass shows the drag turned the wrong way — flipped direction."); }
+            cur = now;
+        }
+        if (_compass.ReadLocDeg() is double fin) { _hdg = fin * Math.PI / 180.0; _hdgValid = true; }
+        return true;
+    }
+
+    /// <summary>Refresh the heading straight off the compass; true when a read landed.</summary>
+    private bool RefreshHeadingFromCompass()
+    {
+        if (_compass is not { Ready: true } || _compass.ReadLocDeg() is not double d) return false;
+        _hdg = d * Math.PI / 180.0;
+        _hdgValid = true;
+        return true;
+    }
+
+    /// <summary>Set an ABSOLUTE view pitch without any keybind: pin the mouselook pitch at the
+    /// top (it clamps there), then come down to (90° − wanted). Levitation riders sit ~10° above
+    /// the horizon so they float over pits and water instead of steering down into them.</summary>
+    private async Task PitchTo(double aboveHorizonDeg, CancellationToken ct)
+    {
+        if (!_sink.Ready) return;
+        double px = _compass is { Ready: true, PxPerDeg: > 0.5 } ? _compass.PxPerDeg : _pxPerDeg;
+        int up = (int)(120 * px);
+        int down = (int)Math.Max(0, (90 - Math.Clamp(aboveHorizonDeg, -20, 88)) * px);
         InputProbe.MouseButtonEvent(MouseBtn.Right, true);
         _rmbDown = true;
         try
         {
-            int moved = 0;
-            while (moved < totalPx && !ct.IsCancellationRequested && _sink.Ready)
-            {
-                int step = Math.Min(totalPx - moved, _rng.Next(14, 27));
-                InputProbe.MouseMoveRelative(dir * step, _rng.Next(-2, 3));
-                moved += step;
-                await Task.Delay(16, ct);
-            }
+            for (int left = up; left > 0 && !ct.IsCancellationRequested && _sink.Ready; left -= 24)
+            { InputProbe.MouseMoveRelative(0, -Math.Min(left, 24)); await Task.Delay(12, ct); }
+            for (int left = down; left > 0 && !ct.IsCancellationRequested && _sink.Ready; left -= 24)
+            { InputProbe.MouseMoveRelative(0, Math.Min(left, 24)); await Task.Delay(12, ct); }
         }
         finally { InputProbe.MouseButtonEvent(MouseBtn.Right, false); _rmbDown = false; }
-        if (_hdgValid) _hdg += degrees * Math.PI / 180.0;    // optimistic; measurement corrects
-        await Task.Delay(Vary(90), ct);
+    }
+
+    /// <summary>Keep Levitate up: cast at the start of a run, when the log says it wore off, and
+    /// on the safety timer — then settle the view just above the horizon.</summary>
+    private async Task MaybeLev(CancellationToken ct)
+    {
+        if (!_s.LevEnabled || !_sink.Ready) return;
+        InputKey k = InputKey.Parse(_s.LevCastKey);
+        if (k.IsNone) return;
+        bool timer = _s.LevRecastMinutes > 0 && _levAt != DateTime.MinValue
+                     && (DateTime.Now - _levAt).TotalMinutes >= _s.LevRecastMinutes;
+        if (_levAt != DateTime.MinValue && !_levNeeded && !timer) return;
+        Log?.Invoke(_levAt == DateTime.MinValue ? "Casting Levitate (start of run)."
+                  : _levNeeded ? "Levitate dropped — recasting." : "Levitate safety recast.");
+        _sink.Send(k);
+        _levNeeded = false;
+        _levAt = DateTime.Now;
+        await Task.Delay(Vary(3200), ct);                    // cast + settle
+        await PitchTo(10, ct);
+        _lastPitchFix = DateTime.Now;
+    }
+
+    /// <summary>Pit/water recovery: look well up, turn toward the last known good ground, and
+    /// push forward — that swims up toward the coast we fell from and walks straight up any
+    /// ladder we bump while looking upward. Gives up after 45s and accepts the new floor.</summary>
+    private async Task Recover(CancellationToken ct)
+    {
+        Stats.State = "recovering — climbing out";
+        DateTime began = DateTime.Now;
+        await PitchTo(55, ct);
+        while (!ct.IsCancellationRequested && _sink.Ready && (DateTime.Now - began).TotalSeconds < 45)
+        {
+            RefreshHeadingFromCompass();
+            if (_goodX is double gx && _goodY is double gy && _hdgValid)
+                await TurnBy(BearingErrorDegTo(gx, gy), ct);
+            await HoldKey(_fwd, 1000, ct);
+            await FreshLoc(ct);
+            if (_z is double z && _zGood is double zg && z >= zg - 12)
+            {
+                Log?.Invoke("Climbed back out — resuming the hunt.");
+                _fell = false;
+                await PitchTo(_s.LevEnabled ? 10 : 2, ct);
+                Stats.State = "seeking";
+                return;
+            }
+        }
+        Log?.Invoke("Couldn't climb out the way we came — accepting this level as the new ground (watch me).");
+        if (_z is double nz) { _zGood = nz; _goodX = _x; _goodY = _y; }
+        _fell = false;
+        await PitchTo(_s.LevEnabled ? 10 : 2, ct);
     }
 
     /// <summary>Fire the /loc key and wait for a fresh position line (max ~1.4s).</summary>
@@ -262,13 +406,17 @@ public sealed class HuntRole
         return false;
     }
 
-    /// <summary>Signed degrees to turn so the current heading points at the tether anchor.</summary>
-    private double HomeErrorDeg()
+    /// <summary>Signed degrees to turn so the current heading points at (tx, ty).</summary>
+    private double BearingErrorDegTo(double tx, double ty)
     {
-        if (_startX is not double sx || _startY is not double sy || _x is not double x || _y is not double y) return 0;
-        double bearing = Math.Atan2(sy - y, sx - x);
+        if (_x is not double x || _y is not double y) return 0;
+        double bearing = Math.Atan2(ty - y, tx - x);
         return NormDeg(Deg(bearing) - Deg(_hdg));
     }
+
+    /// <summary>Signed degrees to turn so the current heading points at the tether anchor.</summary>
+    private double HomeErrorDeg()
+        => _startX is double sx && _startY is double sy ? BearingErrorDegTo(sx, sy) : 0;
 
     /// <summary>Walk STRAIGHT back inside the tether: learn heading from /loc pairs if needed,
     /// turn toward the anchor, run a distance-sized burst, re-measure, correct. Closed loop —
@@ -290,6 +438,7 @@ public sealed class HuntRole
         {
             double before = TetherDistance();
             if (before <= r * 0.55) { Log?.Invoke($"Back inside the tether ({before:0} ≤ {r:0})."); Stats.State = "seeking"; return; }
+            RefreshHeadingFromCompass();                     // the compass makes this instant + exact
             if (!_hdgValid)
             {
                 // Learn heading: a short forward stride bracketed by two fresh locs.
@@ -337,6 +486,9 @@ public sealed class HuntRole
             {
                 if (_selfDead) { Log?.Invoke("Death detected — stopping hunt for safety."); Stats.Deaths++; break; }
                 if (!_sink.Ready) { Stats.State = "paused (EQ not focused)"; await Task.Delay(400, ct); continue; }
+
+                await MaybeLev(ct);                          // keep Levitate up + view above horizon
+                if (_fell) { await Recover(ct); continue; }  // fell into a pit / water → climb out first
 
                 // DEFENSIVE stance: hold position like a defensive pet — no roaming, no pulling.
                 // The rotation only fires once something swings at us.
@@ -472,6 +624,17 @@ public sealed class HuntRole
 
         double r = Math.Max(10, _s.HuntTetherRadius);
 
+        // Shallow drop just ahead (small Z dip) → back off and pick a new line BEFORE it
+        // becomes a swim. Levitation riders mostly float over these entirely.
+        if (_dip)
+        {
+            _dip = false;
+            Stats.State = "edge — backing off";
+            Log?.Invoke("Ground fell away a little — backing up and turning.");
+            await HoldKey(_back, Vary(550), ct);
+            await TurnBy((_rng.Next(2) == 0 ? 1 : -1) * 140, ct);
+        }
+
         // Tether breached → closed-loop homing straight back to the anchor.
         if (_s.HuntTetherEnabled && TetherDistance() > r)
         {
@@ -481,13 +644,17 @@ public sealed class HuntRole
 
         // Pre-emptive containment: past ~70% of the leash, curve the wander back toward the
         // anchor BEFORE crossing the line — the circle becomes a wall, not a rubber band.
-        if (_s.HuntTetherEnabled && _hdgValid && TetherDistance() > r * 0.7)
+        if (_s.HuntTetherEnabled && TetherDistance() > r * 0.7)
         {
-            double err = HomeErrorDeg();
-            if (Math.Abs(err) > 35)
+            RefreshHeadingFromCompass();
+            if (_hdgValid)
             {
-                Stats.State = "tether — curving back";
-                await TurnBy(err * 0.8, ct);
+                double err = HomeErrorDeg();
+                if (Math.Abs(err) > 35)
+                {
+                    Stats.State = "tether — curving back";
+                    await TurnBy(err * 0.8, ct);
+                }
             }
         }
 
@@ -503,6 +670,10 @@ public sealed class HuntRole
                 return;
             }
         }
+
+        // Mouselook jitter slowly drifts the pitch — re-level periodically (above horizon on lev).
+        if (_s.LevEnabled && (DateTime.Now - _lastPitchFix).TotalSeconds > 45)
+        { await PitchTo(10, ct); _lastPitchFix = DateTime.Now; }
 
         if (_s.HuntLookAround && _rng.NextDouble() < 0.45)
             await LookAround(ct, big: false);

@@ -657,7 +657,7 @@ public partial class MainWindow : Window
         {
             ApplyHuntFields();
             _settings.Save();
-            _hunt = new HuntRole(sink, rotation, _currentLog, _settings, _heat);
+            _hunt = new HuntRole(sink, rotation, _currentLog, _settings, _heat, CompassSvc);
             _hunt.Log += m => Dispatcher.Invoke(() => GrindLogLine(m));
             _hunt.Stopped += () => Dispatcher.Invoke(() => { _grindTimer.Stop(); UpdateGrindStats(); EndRoleSession(); });
             _hunt.Start();
@@ -697,6 +697,9 @@ public partial class MainWindow : Window
         _settings.HuntTetherRadius = (int)TetherSlider.Value;
         _settings.GrindTargetMobs = TargetMobsBox.Text;
         _settings.GrindBardMode = BardBox.IsChecked == true;
+        _settings.LevEnabled = LevBox.IsChecked == true;
+        _settings.LevCastKey = LevKeyBox.Text.Trim();
+        if (!string.IsNullOrWhiteSpace(LevNameBox.Text)) _settings.LevBuffName = LevNameBox.Text.Trim();
     }
 
     private void TetherSlider_Changed(object sender, RoutedPropertyChangedEventArgs<double> e)
@@ -730,6 +733,10 @@ public partial class MainWindow : Window
         TetherLabel.Text = $"{(int)TetherSlider.Value} units";
         TargetMobsBox.Text = _settings.GrindTargetMobs;
         BardBox.IsChecked = _settings.GrindBardMode;
+        LevBox.IsChecked = _settings.LevEnabled;
+        LevKeyBox.Text = _settings.LevCastKey;
+        LevNameBox.Text = _settings.LevBuffName;
+        UpdateCompassStatus();
         OcrAutoBox.IsChecked = _settings.OcrAutoScan;
         if (_settings.OcrAutoScan) StartOcrAuto();
         if (!string.IsNullOrWhiteSpace(_settings.HubServer)) LoginServerBox.Text = _settings.HubServer;

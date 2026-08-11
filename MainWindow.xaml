@@ -624,6 +624,24 @@
                                              FontFamily="Consolas" VerticalScrollBarVisibility="Auto" VerticalAlignment="Center" Margin="0,0,6,4"
                                              ToolTip="One mob name per line. Add from Game Data → pick a mob → 'Target with Grind'."/>
                                 </WrapPanel>
+                                <WrapPanel Margin="0,4,0,0">
+                                    <TextBlock Text="Compass:" VerticalAlignment="Center" Margin="0,0,8,4" Foreground="{StaticResource TextDim}"
+                                               ToolTip="Reads your facing straight off the in-game compass strip — homing and target-facing become instant and exact. Make the compass FULLY OPAQUE in-game (transparency lets the world bleed through and muddies the read)."/>
+                                    <Button Content="Pick region" Click="CompassPick_Click" Margin="0,0,6,4" Padding="10,3"
+                                            ToolTip="Captures the game and lets you drag a box around the compass strip (just under the minimap). One-time; survives window moves/resizes."/>
+                                    <Button x:Name="CompassSpinBtn" Content="Spin-calibrate" Click="CompassSpin_Click" Margin="0,0,8,4" Padding="10,3"
+                                            ToolTip="Stand somewhere safe with EQ on screen. The bot turns one full circle (~10 s) to fingerprint the compass and measure exactly how many mouse-pixels make 360°."/>
+                                    <TextBlock x:Name="CompassStatus" Text="not set" VerticalAlignment="Center" Foreground="{StaticResource TextDim}" Margin="0,0,16,4"/>
+                                    <CheckBox x:Name="LevBox" Content="keep Levitate up" VerticalAlignment="Center" Margin="0,0,6,4"
+                                              Foreground="{StaticResource Text}"
+                                              ToolTip="Casts your Levitate hotkey at the start of a run and re-casts when the log says it wore off (plus a safety timer). While levitating the bot rides its view just above the horizon, floating over pits and water instead of steering down into them."/>
+                                    <TextBlock Text="cast key" VerticalAlignment="Center" Margin="0,0,4,4" Foreground="{StaticResource TextDim}"/>
+                                    <TextBox x:Name="LevKeyBox" Width="46" VerticalAlignment="Center" Margin="0,0,8,4"
+                                             ToolTip="The hotkey that casts Levitate (spell gem or social)."/>
+                                    <TextBlock Text="buff name" VerticalAlignment="Center" Margin="0,0,4,4" Foreground="{StaticResource TextDim}"/>
+                                    <TextBox x:Name="LevNameBox" Width="90" VerticalAlignment="Center" Margin="0,0,4,4"
+                                             ToolTip="Watched in 'Your X spell has worn off.' lines to know when to recast."/>
+                                </WrapPanel>
                             </StackPanel>
                         </Border>
 

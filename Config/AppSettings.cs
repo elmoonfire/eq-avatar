@@ -36,7 +36,7 @@ public sealed class AppSettings
     // --- Client Hub (centralized licensing + usage dashboard) ---
     /// <summary>App version reported on every check-in (shown on the dashboard). Also the version
     /// the in-app updater compares against the newest GitHub release tag.</summary>
-    public const string AppVersion = "0.9.15";
+    public const string AppVersion = "0.9.16";
 
     // --- Auto-update (GitHub) ---
     public const string UpdateOwner = "elmoonfire";
@@ -106,6 +106,17 @@ public sealed class AppSettings
     /// <summary>Mouselook calibration: horizontal pixels of right-mouse drag per degree of turn.
     /// Self-tunes from measured /loc headings while the tether homing runs.</summary>
     public double HuntTurnPxPerDegree { get; set; } = 3.5;
+
+    // --- Navigation aids (0.9.16) ---
+    /// <summary>Keep the Levitation buff up: cast on role start and re-cast when the log says
+    /// it wore off (or on the timer below). Floating clears pits, water and maze edges.</summary>
+    public bool LevEnabled { get; set; } = false;
+    /// <summary>Hotkey that casts Levitate (a spell gem or social).</summary>
+    public string LevCastKey { get; set; } = "";
+    /// <summary>Buff name to watch for in "Your X spell has worn off." lines.</summary>
+    public string LevBuffName { get; set; } = "Levitate";
+    /// <summary>Safety-net recast interval in minutes (0 = only recast on the worn-off line).</summary>
+    public int LevRecastMinutes { get; set; } = 8;
     /// <summary>Licensing panel: keep scanning for the open inventory and read it automatically.</summary>
     public bool OcrAutoScan { get; set; } = false;
 
