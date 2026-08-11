@@ -42,6 +42,10 @@ public partial class MainWindow : Window
     private IntPtr _grindTarget;
     private readonly DispatcherTimer _grindTimer = new() { Interval = TimeSpan.FromMilliseconds(250) };
 
+    // Follower role state (group play: follow + assist a leader)
+    private FollowerRole? _follower;
+    private readonly DispatcherTimer _followerTimer = new() { Interval = TimeSpan.FromMilliseconds(400) };
+
     private readonly AppSettings _settings = AppSettings.Load();
     private AutoLogin? _login;
     private CancellationTokenSource? _mouseCts;
@@ -56,7 +60,7 @@ public partial class MainWindow : Window
     private bool _ready;
     private static readonly string[] Panels =
     {
-        "PanelHome", "PanelLog", "PanelInput", "PanelMap", "PanelGrind",
+        "PanelHome", "PanelLog", "PanelInput", "PanelMap", "PanelGrind", "PanelFollower",
         "PanelLogin", "PanelMouse", "PanelHeat", "PanelLicensing", "PanelSettings"
     };
     private static readonly string[] EqClasses =
@@ -102,6 +106,7 @@ public partial class MainWindow : Window
         _fgTimer.Tick += (_, _) => TickUi();
         _fgTimer.Start();
         _grindTimer.Tick += (_, _) => UpdateGrindStats();
+        _followerTimer.Tick += (_, _) => UpdateFollowerStats();
         _heatTimer.Tick += (_, _) => { if (_heatDirty) { _heatDirty = false; RefreshZones(); RenderHeat(); } };
         _hub = new HubClient(_settings);
         _hubTimer.Tick += (_, _) => { _ = DoCheckIn(false); };
@@ -125,6 +130,7 @@ public partial class MainWindow : Window
             if (id == PANIC_HOTKEY_ID)
             {
                 StopGrind_Click(this, new RoutedEventArgs());
+                StopFollower_Click(this, new RoutedEventArgs());
                 StopMouseDemo();
                 handled = true;
             }
@@ -647,6 +653,120 @@ public partial class MainWindow : Window
         _settings.Save();
         GrindLogLine("Settings saved.");
         ShowToast("Grind settings saved");
+    }
+
+    // ---------------- Follower role (group play: follow + assist a leader) ----------------
+
+    private void FollowerTargetEq_Click(object sender, RoutedEventArgs e)
+    {
+        WindowInfo? w = WindowFinder.GuessEverQuest();
+        if (w is null) { FollowerLogLine("No EverQuest window found — start the game on this PC first."); return; }
+        _grindTarget = w.Handle;
+        FollowerTargetLabel.Text = $"target: {w.ProcessName} \"{w.Title}\"  0x{w.Handle.ToInt64():X}";
+    }
+
+    private void StartFollower_Click(object sender, RoutedEventArgs e)
+    {
+        if (_follower is { Running: true }) { FollowerLogLine("Already running."); return; }
+        ApplyFollowerFields();
+        _settings.Save();
+        if (string.IsNullOrWhiteSpace(_settings.FollowerLeader))
+        { FollowerLogLine("Enter the leader's character name first (e.g. Bryari)."); return; }
+
+        if (_grindTarget == IntPtr.Zero && WindowFinder.GuessEverQuest() is { } w)
+        {
+            _grindTarget = w.Handle;
+            FollowerTargetLabel.Text = $"target: {w.ProcessName} \"{w.Title}\"  0x{w.Handle.ToInt64():X}";
+        }
+        if (_grindTarget == IntPtr.Zero) { FollowerLogLine("Target EverQuest first (Target EverQuest)."); return; }
+
+        _currentLog ??= EqLogWatcher.FindNewestLog(LogFolderBox.Text.Trim());
+        if (_currentLog is null)
+            FollowerLogLine("No log found — auto-assist can't see the leader's fights until the log folder is set on Log Reader. Follow still works.");
+
+        var rotation = GrindRole.ParseRotation(FollowerRotation.Text);
+        var sink = new ForegroundSendInputSink(() => _grindTarget);
+        _follower = new FollowerRole(sink, rotation, _currentLog, _settings);
+        _follower.Log += m => Dispatcher.Invoke(() => FollowerLogLine(m));
+        _follower.Stopped += () => Dispatcher.Invoke(() => { _followerTimer.Stop(); UpdateFollowerStats(); });
+        _follower.Start();
+        _followerTimer.Start();
+    }
+
+    private void StopFollower_Click(object sender, RoutedEventArgs e)
+    {
+        _follower?.Stop();
+        _followerTimer.Stop();
+        UpdateFollowerStats();
+    }
+
+    private void SaveFollower_Click(object sender, RoutedEventArgs e)
+    {
+        ApplyFollowerFields();
+        _settings.Save();
+        FollowerLogLine("Settings saved.");
+        ShowToast("Follower settings saved");
+    }
+
+    /// <summary>Read the Follower boxes into settings (used before a run and by Save settings).</summary>
+    private void ApplyFollowerFields()
+    {
+        _settings.FollowerLeader = FollowerLeaderBox.Text.Trim();
+        _settings.FollowerAutoAssist = FollowerAutoAssistBox.IsChecked == true;
+        if (int.TryParse(FollowerRefollowBox.Text.Trim(), out int rf)) _settings.FollowerRefollowSeconds = Math.Clamp(rf, 10, 600);
+        if (int.TryParse(FollowerAssistDelayBox.Text.Trim(), out int ad)) _settings.FollowerAssistDelayMs = Math.Clamp(ad, 200, 10000);
+        if (int.TryParse(FollowerMaxFightBox.Text.Trim(), out int mf)) _settings.FollowerMaxFightSeconds = Math.Clamp(mf, 5, 600);
+        if (int.TryParse(FollowerRestBox.Text.Trim(), out int rs)) _settings.FollowerRestSeconds = Math.Clamp(rs, 0, 600);
+    }
+
+    /// <summary>Fill the Follower boxes from saved settings on load.</summary>
+    private void InitFollowerTab()
+    {
+        FollowerLeaderBox.Text = _settings.FollowerLeader;
+        FollowerAutoAssistBox.IsChecked = _settings.FollowerAutoAssist;
+        FollowerRefollowBox.Text = _settings.FollowerRefollowSeconds.ToString();
+        FollowerAssistDelayBox.Text = _settings.FollowerAssistDelayMs.ToString();
+        FollowerMaxFightBox.Text = _settings.FollowerMaxFightSeconds.ToString();
+        FollowerRestBox.Text = _settings.FollowerRestSeconds.ToString();
+    }
+
+    private void UpdateFollowerStats()
+    {
+        if (_follower is { Running: true })
+        {
+            string st = _follower.Stats.State;
+            bool paused = st.Contains("paused", StringComparison.OrdinalIgnoreCase);
+            SetFollowerBanner(paused ? 1 : 2, paused ? $"PAUSED — {st}" : $"FOLLOWING {_settings.FollowerLeader} — {st}");
+        }
+        else SetFollowerBanner(0, "STOPPED — press Start follower");
+
+        FollowerStats f = _follower?.Stats ?? new FollowerStats();
+        FollowerStatsLabel.Text = _follower is { Running: true }
+            ? $"[{f.State}] — assists {f.Assists} · kills {f.Kills} · re-follows {f.Refollows}"
+            : $"idle — assists {f.Assists} · kills {f.Kills} · re-follows {f.Refollows}";
+    }
+
+    /// <summary>kind: 0 = stopped (gray), 1 = paused (amber), 2 = active (green).</summary>
+    private void SetFollowerBanner(int kind, string text)
+    {
+        if (FollowerBanner is null) return;
+        FollowerBannerText.Text = text;
+        (string bg, string bd, string dot, string fg) = kind switch
+        {
+            2 => ("#12261B", "#2C8C55", "#7CE38B", "#B6F2C9"),
+            1 => ("#2A2410", "#7A6320", "#FFCB6B", "#FFE1A6"),
+            _ => ("#20303F", "#2A4A57", "#5D6878", "#C6D2DE"),
+        };
+        FollowerBanner.Background = Hex(bg);
+        FollowerBanner.BorderBrush = Hex(bd);
+        FollowerBannerDot.Fill = Hex(dot);
+        FollowerBannerText.Foreground = Hex(fg);
+    }
+
+    private void FollowerLogLine(string msg)
+    {
+        FollowerLog.AppendText(msg + Environment.NewLine);
+        FollowerLog.ScrollToEnd();
     }
 
     // ---------------- Settings panel ----------------
@@ -1388,6 +1508,7 @@ public partial class MainWindow : Window
         InitElevationBanner();
         InitLicensingTab();
         InitGrindTab();
+        InitFollowerTab();
         InitSettingsTab();
         UpdateLaunchLabel();
         VersionRun.Text = "v" + AppSettings.AppVersion;
@@ -1441,9 +1562,11 @@ public partial class MainWindow : Window
     {
         _fgTimer.Stop();
         _grindTimer.Stop();
+        _followerTimer.Stop();
         _hubTimer.Stop();
         _grind?.Stop();
         _hunt?.Stop();
+        _follower?.Stop();
         _login?.Stop();
         _mouseCts?.Cancel();
         StopHeat();

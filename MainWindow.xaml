@@ -229,6 +229,9 @@
                             <RadioButton x:Name="NavGrind" Style="{StaticResource NavItem}" GroupName="nav" Tag="PanelGrind" Checked="Nav_Checked">
                                 <StackPanel Orientation="Horizontal"><TextBlock Style="{StaticResource NavGlyph}" Text="&#xE72C;"/><TextBlock Text="Grind"/></StackPanel>
                             </RadioButton>
+                            <RadioButton x:Name="NavFollower" Style="{StaticResource NavItem}" GroupName="nav" Tag="PanelFollower" Checked="Nav_Checked">
+                                <StackPanel Orientation="Horizontal"><TextBlock Style="{StaticResource NavGlyph}" Text="&#xE716;"/><TextBlock Text="Follower"/></StackPanel>
+                            </RadioButton>
                             <RadioButton x:Name="NavMouse" Style="{StaticResource NavItem}" GroupName="nav" Tag="PanelMouse" Checked="Nav_Checked">
                                 <StackPanel Orientation="Horizontal"><TextBlock Style="{StaticResource NavGlyph}" Text="&#xE962;"/><TextBlock Text="Mouse Motion"/></StackPanel>
                             </RadioButton>
@@ -579,6 +582,72 @@
                                    Foreground="{StaticResource Text}" Text="idle — keys 0 · kills 0 · xp 0 · loops 0"/>
 
                         <TextBox x:Name="GrindLog" Grid.Row="6" Height="96" IsReadOnly="True"
+                                 Background="#0C0F13" Foreground="{StaticResource Good}" FontFamily="Consolas" FontSize="11"
+                                 VerticalScrollBarVisibility="Auto" TextWrapping="Wrap"/>
+                    </Grid>
+
+                    <!-- ===== FOLLOWER (follow + assist a leader) ===== -->
+                    <Grid x:Name="PanelFollower" Margin="18" Visibility="Collapsed">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="*"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                        </Grid.RowDefinitions>
+
+                        <StackPanel Grid.Row="0" Margin="0,0,0,8">
+                            <Border x:Name="FollowerBanner" CornerRadius="8" Padding="12,9" Margin="0,0,0,8"
+                                    Background="#20303F" BorderBrush="#2A4A57" BorderThickness="1">
+                                <StackPanel Orientation="Horizontal">
+                                    <Ellipse x:Name="FollowerBannerDot" Width="12" Height="12" Fill="#5D6878" Margin="0,0,11,0" VerticalAlignment="Center"/>
+                                    <TextBlock x:Name="FollowerBannerText" Text="STOPPED — press Start follower" FontWeight="Bold" FontSize="14" Foreground="#C6D2DE" VerticalAlignment="Center"/>
+                                </StackPanel>
+                            </Border>
+                            <TextBlock TextWrapping="Wrap" Foreground="{StaticResource TextDim}"
+                                       Text="Group play: run THIS instance where your second character plays, enter the leader's exact name, and press Start. The follower types /target + /follow into chat itself (no in-game socials needed), re-follows on a timer so a lost follow self-heals, and — when the leader's swings or casts show up in the log — waits a human-ish beat, /assists, turns attack on, and runs your rotation until the mob drops or the fight goes quiet. Then attack off, a short rest, and back on the leash. EQL must be the focused window on this PC (tab away = instant pause) and F12 stops it. If the leader name has a space or title, use just the first name."/>
+                        </StackPanel>
+
+                        <WrapPanel Grid.Row="1" Margin="0,0,0,6">
+                            <Button Content="Target EverQuest" Click="FollowerTargetEq_Click"/>
+                            <TextBlock x:Name="FollowerTargetLabel" Text="target: —" VerticalAlignment="Center"
+                                       Foreground="{StaticResource TextDim}" FontFamily="Consolas"/>
+                        </WrapPanel>
+
+                        <TextBlock Grid.Row="2" Foreground="{StaticResource TextDim}" Margin="0,0,0,3"
+                                   Text="Assist rotation — one &quot;key,delayMs&quot; per line (keys: 0-9, A-Z, F1-F12, Tab, mouse1-5). Leave empty for auto-attack only:"/>
+                        <TextBox x:Name="FollowerRotation" Grid.Row="3" AcceptsReturn="True" FontFamily="Consolas" FontSize="12"
+                                 Background="#0C0F13" BorderBrush="{StaticResource AccentDim}"
+                                 VerticalScrollBarVisibility="Auto"
+                                 Text="# key,delayMs  (e.g. your combat macro on 4)&#10;4,1400"/>
+
+                        <WrapPanel Grid.Row="4" Margin="0,8,0,0">
+                            <Button Content="Start follower" Click="StartFollower_Click" Margin="0,0,8,8"/>
+                            <Button Content="Stop (F12)" Click="StopFollower_Click" Margin="0,0,8,8"/>
+                            <Button Content="Save settings" Click="SaveFollower_Click" Margin="0,0,16,8"/>
+                            <CheckBox x:Name="FollowerAutoAssistBox" Content="auto-assist when the leader fights" IsChecked="True"
+                                      Foreground="{StaticResource Warn}" VerticalAlignment="Center" Margin="0,0,12,8"/>
+                            <TextBlock Text="leader" VerticalAlignment="Center" Foreground="{StaticResource TextDim}" Margin="0,0,3,8"/>
+                            <TextBox x:Name="FollowerLeaderBox" Text="" Width="110" VerticalAlignment="Center" Margin="0,0,8,8"
+                                     ToolTip="The character to follow — exact first name, e.g. Bryari."/>
+                            <TextBlock Text="re-follow s" VerticalAlignment="Center" Foreground="{StaticResource TextDim}" Margin="0,0,3,8"/>
+                            <TextBox x:Name="FollowerRefollowBox" Text="40" Width="40" VerticalAlignment="Center" Margin="0,0,8,8"
+                                     ToolTip="Re-issue /target + /follow this often while idle, so a lost follow self-heals."/>
+                            <TextBlock Text="assist delay ms" VerticalAlignment="Center" Foreground="{StaticResource TextDim}" Margin="0,0,3,8"/>
+                            <TextBox x:Name="FollowerAssistDelayBox" Text="900" Width="52" VerticalAlignment="Center" Margin="0,0,8,8"
+                                     ToolTip="Human-ish pause between the leader engaging and this character joining in."/>
+                            <TextBlock Text="max fight s" VerticalAlignment="Center" Foreground="{StaticResource TextDim}" Margin="0,0,3,8"/>
+                            <TextBox x:Name="FollowerMaxFightBox" Text="30" Width="40" VerticalAlignment="Center" Margin="0,0,8,8"/>
+                            <TextBlock Text="rest s" VerticalAlignment="Center" Foreground="{StaticResource TextDim}" Margin="0,0,3,8"/>
+                            <TextBox x:Name="FollowerRestBox" Text="4" Width="40" VerticalAlignment="Center" Margin="0,0,8,8"/>
+                        </WrapPanel>
+
+                        <TextBlock x:Name="FollowerStatsLabel" Grid.Row="5" Margin="0,4,0,4" FontFamily="Consolas"
+                                   Foreground="{StaticResource Text}" Text="idle — assists 0 · kills 0 · re-follows 0"/>
+
+                        <TextBox x:Name="FollowerLog" Grid.Row="6" Height="96" IsReadOnly="True"
                                  Background="#0C0F13" Foreground="{StaticResource Good}" FontFamily="Consolas" FontSize="11"
                                  VerticalScrollBarVisibility="Auto" TextWrapping="Wrap"/>
                     </Grid>
