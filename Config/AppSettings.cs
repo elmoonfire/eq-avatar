@@ -36,7 +36,7 @@ public sealed class AppSettings
     // --- Client Hub (centralized licensing + usage dashboard) ---
     /// <summary>App version reported on every check-in (shown on the dashboard). Also the version
     /// the in-app updater compares against the newest GitHub release tag.</summary>
-    public const string AppVersion = "0.9.6";
+    public const string AppVersion = "0.9.7";
 
     // --- Auto-update (GitHub) ---
     public const string UpdateOwner = "elmoonfire";
@@ -98,6 +98,10 @@ public sealed class AppSettings
     /// <summary>No combat lines for this long = the fight is over; break off and re-follow.</summary>
     public int FollowerCombatLingerSeconds { get; set; } = 6;
     public int FollowerRestSeconds { get; set; } = 4;
+
+    // --- Maps ---
+    /// <summary>The EverQuest install folder (the one containing 'maps'). Blank = derived from LauncherPath.</summary>
+    public string EqRootPath { get; set; } = "";
 
     // --- Launch (Command Center one-click launch) ---
     /// <summary>Path to the EQL launcher/LaunchPad exe. If set, the Launch button starts it before auto-login.</summary>

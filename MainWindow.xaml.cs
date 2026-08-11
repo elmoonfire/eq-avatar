@@ -60,7 +60,7 @@ public partial class MainWindow : Window
     private bool _ready;
     private static readonly string[] Panels =
     {
-        "PanelHome", "PanelLog", "PanelInput", "PanelMap", "PanelGrind", "PanelFollower",
+        "PanelHome", "PanelLog", "PanelInput", "PanelMap", "PanelMaps", "PanelGrind", "PanelFollower",
         "PanelLogin", "PanelMouse", "PanelHeat", "PanelLicensing", "PanelSettings"
     };
     private static readonly string[] EqClasses =
@@ -73,6 +73,15 @@ public partial class MainWindow : Window
         "Human","Barbarian","Erudite","Wood Elf","High Elf","Dark Elf","Half Elf","Dwarf",
         "Troll","Ogre","Halfling","Gnome","Iksar","Vah Shir","Froglok","Drakkin"
     };
+
+    // Maps (Companion-style zone maps: default + Brewall, heat overlay, live marker)
+    private MapLibrary? _mapLib;
+    private string? _mapZone;                    // stem currently on screen
+    private string? _charZoneStem;               // stem the character is actually in (from the log)
+    private readonly List<string> _mapsZoneStems = new();
+    private EqLogWatcher? _mapsWatcher;
+    private bool _mapsReady;
+    private int _mapsHeatTick;
 
     // Heatmap state
     private readonly HeatmapModel _heat = new();
@@ -653,6 +662,219 @@ public partial class MainWindow : Window
         _settings.Save();
         GrindLogLine("Settings saved.");
         ShowToast("Grind settings saved");
+    }
+
+    // ---------------- Maps (Companion-style: default + Brewall packs, heat, live marker) ----------------
+
+    private static readonly System.Text.RegularExpressions.Regex MapsZoneRe = new(
+        @"You have entered\s+(?<z>.+?)\.?\s*$",
+        System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.Compiled);
+
+    private void InitMapsTab()
+    {
+        string root = _settings.EqRootPath;
+        if (string.IsNullOrWhiteSpace(root))
+        {
+            try { root = Path.GetDirectoryName(_settings.LauncherPath) ?? ""; } catch { root = ""; }
+        }
+        MapsEqRootBox.Text = root;
+        MapsRescan();
+        StartMapsWatcher();
+        _mapsReady = true;
+    }
+
+    private void MapsRescan_Click(object sender, RoutedEventArgs e) { MapsRescan(); StartMapsWatcher(); }
+
+    private void MapsRescan()
+    {
+        string root = MapsEqRootBox.Text.Trim();
+        _settings.EqRootPath = root;
+        _settings.Save();
+        _mapLib = new MapLibrary(string.IsNullOrWhiteSpace(root) ? null : root);
+        var packs = _mapLib.Packs();
+
+        // pack pickers: Auto + every installed pack
+        foreach (ComboBox box in new[] { MapsGeoPackBox, MapsLabelPackBox })
+        {
+            box.Items.Clear();
+            box.Items.Add("Auto");
+            foreach (PackIndex p in packs) box.Items.Add(p.Pack.Id);
+            box.SelectedIndex = 0;
+        }
+
+        // zone list: table order first (nice display names), then any stems the table doesn't know
+        var stems = new HashSet<string>(_mapLib.Zones());
+        _mapsZoneStems.Clear();
+        MapsZoneBox.Items.Clear();
+        foreach (ZoneTable.Zone z in ZoneTable.Zones)
+        {
+            if (!stems.Remove(z.Short)) continue;
+            _mapsZoneStems.Add(z.Short);
+            MapsZoneBox.Items.Add($"{z.Name}  ({z.Short})");
+        }
+        foreach (string s in stems.OrderBy(s => s)) { _mapsZoneStems.Add(s); MapsZoneBox.Items.Add(s); }
+
+        if (packs.Count == 0)
+        {
+            MapsStatus.Text = "No map packs found. Point 'EQ folder' at your EverQuest install (the folder that contains 'maps') and Rescan.";
+            MapsView.SetMap(null);
+            return;
+        }
+        MapsStatus.Text = $"Found {packs.Count} pack(s): {string.Join(", ", packs.Select(p => $"{p.Pack.Id} ({p.Pack.ZoneCount} zones)"))} — pick a zone.";
+
+        // keep the open zone if it still exists, else follow the character, else Oasis-or-first
+        string? want = _mapZone ?? _charZoneStem;
+        if (want != null && _mapsZoneStems.Contains(want)) LoadMapZone(want);
+        else if (_mapsZoneStems.Count > 0) LoadMapZone(_mapsZoneStems.Contains("oasis") ? "oasis" : _mapsZoneStems[0]);
+    }
+
+    private MapPackPrefs MapsPrefs()
+    {
+        string? geo = MapsGeoPackBox.SelectedIndex > 0 ? MapsGeoPackBox.SelectedItem as string : null;
+        string? lab = MapsLabelPackBox.SelectedIndex > 0 ? MapsLabelPackBox.SelectedItem as string : null;
+        return new MapPackPrefs(geo, lab);
+    }
+
+    private void LoadMapZone(string stem)
+    {
+        if (_mapLib is null) return;
+        MapData? data = _mapLib.Get(stem, MapsPrefs());
+        _mapZone = stem;
+        MapsView.SetMap(data);
+        ApplyMapsLayers();
+        UpdateMapsFloorChip();
+        RefreshMapsHeat();
+
+        int idx = _mapsZoneStems.IndexOf(stem);
+        if (idx >= 0 && MapsZoneBox.SelectedIndex != idx) { _mapsReady = false; MapsZoneBox.SelectedIndex = idx; _mapsReady = true; }
+
+        if (data is null) { MapsStatus.Text = $"No map files for '{stem}' in the installed packs."; return; }
+        string src = string.Join(" · ", data.Sources.Select(s => $"L{s.Layer}:{s.PackId}"));
+        string credit = data.Credits.Count > 0 ? "  —  " + string.Join("; ", data.Credits.Take(2)) : "";
+        string skipped = data.Skipped > 0 ? $"  ({data.Skipped} bad lines skipped)" : "";
+        MapsStatus.Text = $"{ZoneTable.NameFor(stem)} — {data.SegmentCount:n0} segments, {data.Points.Count:n0} points [{src}]{credit}{skipped}";
+    }
+
+    private void MapsZone_Selected(object sender, SelectionChangedEventArgs e)
+    {
+        if (!_mapsReady || MapsZoneBox.SelectedIndex < 0 || MapsZoneBox.SelectedIndex >= _mapsZoneStems.Count) return;
+        LoadMapZone(_mapsZoneStems[MapsZoneBox.SelectedIndex]);
+    }
+
+    private void MapsZone_KeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key != Key.Enter) return;
+        string text = MapsZoneBox.Text.Trim();
+        if (text.Length == 0) return;
+        string? stem = ZoneTable.ShortFor(text);
+        if (stem is null && _mapsZoneStems.Contains(text.ToLowerInvariant())) stem = text.ToLowerInvariant();
+        stem ??= _mapsZoneStems.FirstOrDefault(s => s.Contains(text, StringComparison.OrdinalIgnoreCase)
+                   || ZoneTable.NameFor(s).Contains(text, StringComparison.OrdinalIgnoreCase));
+        if (stem != null && _mapsZoneStems.Contains(stem)) LoadMapZone(stem);
+        else MapsStatus.Text = $"No installed map matches '{text}'.";
+        e.Handled = true;
+    }
+
+    private void MapsPack_Changed(object sender, SelectionChangedEventArgs e)
+    {
+        if (_mapsReady && _mapZone != null) LoadMapZone(_mapZone);
+    }
+
+    private void MapsLayer_Changed(object sender, RoutedEventArgs e)
+    {
+        if (_mapsReady) { ApplyMapsLayers(); RefreshMapsHeat(); }
+    }
+
+    private void ApplyMapsLayers()
+    {
+        MapsView.SetLayers(MapsLabelsBox.IsChecked == true, MapsLegendBox.IsChecked == true, MapsExtraBox.IsChecked == true);
+        MapsView.ShowHeat = MapsHeatBox.IsChecked == true;
+        MapsView.ShowTrail = MapsTrailBox.IsChecked == true;
+        MapsView.InvalidateVisual();
+    }
+
+    /// <summary>Push this session's /loc points for the open zone into the view, in map space.</summary>
+    private void RefreshMapsHeat()
+    {
+        if (MapsHeatBox.IsChecked != true || _mapZone is null) { MapsView.SetHeat(Array.Empty<System.Windows.Point>()); return; }
+        string? heatZone = _heat.Zones.FirstOrDefault(z => ZoneTable.ShortFor(z) == _mapZone);
+        if (heatZone is null) { MapsView.SetHeat(Array.Empty<System.Windows.Point>()); return; }
+        var pts = _heat.PointsFor(heatZone);
+        var mapPts = new List<System.Windows.Point>(pts.Count);
+        foreach (System.Windows.Point p in pts)
+        {
+            (double mx, double my) = EqMapParser.MapFromLoc(ns: p.Y, ew: p.X);   // heat stores X=ew, Y=ns
+            mapPts.Add(new System.Windows.Point(mx, my));
+        }
+        MapsView.SetHeat(mapPts);
+    }
+
+    private void UpdateMapsFloorChip()
+    {
+        var bands = MapsView.Bands;
+        bool many = bands.Count > 1;
+        MapsFloorUp.IsEnabled = MapsFloorDown.IsEnabled = many;
+        MapsFloorChip.Text = MapsView.ActiveBand is int b && b < bands.Count
+            ? $"Floor {b + 1}/{bands.Count} · z {FloorSlice.BandLabel(bands[b])}"
+            : many ? $"All levels ({bands.Count} floors)" : "All levels";
+    }
+
+    private void MapsFloorUp_Click(object sender, RoutedEventArgs e) => StepMapsFloor(+1);
+    private void MapsFloorDown_Click(object sender, RoutedEventArgs e) => StepMapsFloor(-1);
+
+    private void StepMapsFloor(int dir)
+    {
+        var bands = MapsView.Bands;
+        if (bands.Count < 2) return;
+        int? next = MapsView.ActiveBand is int b
+            ? (b + dir < 0 || b + dir >= bands.Count ? null : b + dir)
+            : (dir > 0 ? 0 : bands.Count - 1);
+        MapsView.SetBand(next);
+        UpdateMapsFloorChip();
+    }
+
+    private void MapsZoomIn_Click(object sender, RoutedEventArgs e) => MapsView.ZoomStep(1.35);
+    private void MapsZoomOut_Click(object sender, RoutedEventArgs e) => MapsView.ZoomStep(1 / 1.35);
+    private void MapsFit_Click(object sender, RoutedEventArgs e) => MapsView.Fit();
+
+    /// <summary>The Maps panel's own quiet log tap: zone-follow, the live marker + trail, and
+    /// (when the Heat panel's live mode isn't already doing it) feeding the session heat model.</summary>
+    private void StartMapsWatcher()
+    {
+        _mapsWatcher?.Dispose();
+        _mapsWatcher = null;
+        _currentLog ??= EqLogWatcher.FindNewestLog(LogFolderBox.Text.Trim());
+        if (_currentLog is null) return;
+        _mapsWatcher = new EqLogWatcher(_currentLog);
+        _mapsWatcher.LineRead += line => Dispatcher.Invoke(() => OnMapsLogLine(line));
+        _mapsWatcher.Start(fromStart: false);
+    }
+
+    private void OnMapsLogLine(string line)
+    {
+        LogEvent ev = LogEventParser.Parse(line);
+        if (_heatWatcher is null) _heat.Feed(ev);   // one shared session heat model, never double-fed
+
+        if (ev.Kind == LogEventKind.Zone)
+        {
+            var m = MapsZoneRe.Match(ev.Text);
+            if (!m.Success) return;
+            _charZoneStem = ZoneTable.ShortFor(m.Groups["z"].Value.Trim());
+            if (MapsFollowBox.IsChecked == true && _charZoneStem != null
+                && _charZoneStem != _mapZone && _mapsZoneStems.Contains(_charZoneStem))
+                LoadMapZone(_charZoneStem);
+            return;
+        }
+        if (ev.Kind == LogEventKind.Location && ev.X is double x && ev.Y is double y)
+        {
+            // marker only when the map on screen is the zone the character is in (or unknown)
+            if (_charZoneStem is null || _charZoneStem == _mapZone)
+            {
+                (double mx, double my) = EqMapParser.MapFromLoc(ns: y, ew: x);
+                MapsView.PushLoc(mx, my);
+            }
+            if (MapsHeatBox.IsChecked == true && ++_mapsHeatTick % 12 == 0) RefreshMapsHeat();
+        }
     }
 
     // ---------------- Follower role (group play: follow + assist a leader) ----------------
@@ -1509,6 +1731,7 @@ public partial class MainWindow : Window
         InitLicensingTab();
         InitGrindTab();
         InitFollowerTab();
+        InitMapsTab();
         InitSettingsTab();
         UpdateLaunchLabel();
         VersionRun.Text = "v" + AppSettings.AppVersion;
@@ -1569,6 +1792,7 @@ public partial class MainWindow : Window
         _follower?.Stop();
         _login?.Stop();
         _mouseCts?.Cancel();
+        _mapsWatcher?.Dispose();
         StopHeat();
         if (_hwnd != IntPtr.Zero) { UnregisterHotKey(_hwnd, PANIC_HOTKEY_ID); UnregisterHotKey(_hwnd, PROBE_HOTKEY_ID); }
         StopWatch();
