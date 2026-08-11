@@ -47,7 +47,8 @@ public partial class MainWindow
     {
         if (!CompassSvc.HasRect) { GrindLogLine("Pick the compass region first."); return; }
         CompassSpinBtn.IsEnabled = false;
-        GrindLogLine("Spin calibration: focusing EQ and turning one full circle — hands off for ~10 seconds…");
+        GrindLogLine("Spin calibration: focusing EQ and turning up to two full circles — hands off; "
+                   + "takes ~5–25 seconds depending on your mouselook sensitivity…");
         try
         {
             string result = await CompassSvc.SpinCalibrate(CancellationToken.None);
