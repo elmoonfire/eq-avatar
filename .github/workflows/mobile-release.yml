@@ -284,6 +284,35 @@ jobs:
             -exportPath "$RUNNER_TEMP/export" \
             -exportOptionsPlist ExportOptions.plist
 
+      - name: Inspect the built app icons
+        run: |
+          set -euo pipefail
+          # App Store Connect rejected an earlier build with "Missing App Store Icon"
+          # (90471) while actool reported success, so verify what actually landed in the
+          # bundle instead of trusting the build log.
+          echo "--- ASSETCATALOG settings that reached the generated project ---"
+          grep -o 'ASSETCATALOG_COMPILER_[A-Z_]* = [^;]*;' EQAvatarTV.xcodeproj/project.pbxproj | sort -u || true
+
+          IPA="$(find "$RUNNER_TEMP/export" -name '*.ipa' | head -1)"
+          rm -rf "$RUNNER_TEMP/unz" && mkdir -p "$RUNNER_TEMP/unz"
+          unzip -q -o "$IPA" -d "$RUNNER_TEMP/unz"
+          APP="$(find "$RUNNER_TEMP/unz/Payload" -maxdepth 1 -name '*.app' | head -1)"
+          echo "--- app bundle: $APP ---"
+          ls -la "$APP" | head -20
+
+          echo "--- icon keys in Info.plist ---"
+          /usr/libexec/PlistBuddy -c 'Print' "$APP/Info.plist" | grep -i -A6 'icon' || echo '(no icon keys!)'
+
+          echo "--- app-icon entries inside Assets.car ---"
+          if [ -f "$APP/Assets.car" ]; then
+            xcrun assetutil --info "$APP/Assets.car" > "$RUNNER_TEMP/assets.json" 2>/dev/null || true
+            grep -o '"Name" : "[^"]*"' "$RUNNER_TEMP/assets.json" | sort -u | head -30
+            echo "--- roles present ---"
+            grep -o '"Role" : "[^"]*"' "$RUNNER_TEMP/assets.json" | sort | uniq -c
+          else
+            echo '(no Assets.car in the bundle!)'
+          fi
+
       - name: Upload to TestFlight
         env:
           ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
