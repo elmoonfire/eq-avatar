@@ -125,12 +125,16 @@ jobs:
           VERSION="${GITHUB_REF_NAME#mobile-v}"
           [ "$VERSION" = "$GITHUB_REF_NAME" ] && VERSION="0.1.0"
 
-          # Compile the Flutter side unsigned, then archive with xcodebuild so signing can
-          # be passed on the command line. `flutter build ipa` archives using the Xcode
+          # Archive unsigned, then sign during export.
+          #
+          # Two things forced this shape. `flutter build ipa` archives with the Xcode
           # project's own settings, and that project hardcodes CODE_SIGN_STYLE = Automatic
-          # with an "iPhone Developer" identity — which an xcconfig cannot override and
-          # which fails on CI with "No development certificates available". Command-line
-          # build settings have the highest precedence, so they win cleanly.
+          # with an "iPhone Developer" identity, so CI fails with "No development
+          # certificates available". But passing signing settings on the xcodebuild command
+          # line is not the fix either: command-line settings apply to EVERY target,
+          # including Flutter's plugin package targets, which reject a provisioning profile
+          # outright ("does not support provisioning profiles"). Archiving with signing off
+          # and letting -exportArchive apply the profile keeps signing scoped to the app.
           flutter build ios --release --no-codesign \
             --build-name "$VERSION" --build-number "$GITHUB_RUN_NUMBER"
 
@@ -140,10 +144,8 @@ jobs:
             -configuration Release \
             -destination "generic/platform=iOS" \
             -archivePath "$RUNNER_TEMP/Runner.xcarchive" \
-            DEVELOPMENT_TEAM="$TEAM_ID" \
-            PROVISIONING_PROFILE_SPECIFIER="$PROFILE_UUID" \
-            CODE_SIGN_IDENTITY="iPhone Distribution" \
-            CODE_SIGN_STYLE=Manual
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO
 
           cat > ExportOptions.plist <<PLIST
           <?xml version="1.0" encoding="UTF-8"?>
@@ -257,10 +259,8 @@ jobs:
             -archivePath "$RUNNER_TEMP/EQAvatarTV.xcarchive" \
             MARKETING_VERSION="$VERSION" \
             CURRENT_PROJECT_VERSION="$GITHUB_RUN_NUMBER" \
-            DEVELOPMENT_TEAM="$TEAM_ID" \
-            PROVISIONING_PROFILE_SPECIFIER="$PROFILE_UUID" \
-            CODE_SIGN_IDENTITY="iPhone Distribution" \
-            CODE_SIGN_STYLE=Manual
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO
 
           cat > ExportOptions.plist <<PLIST
           <?xml version="1.0" encoding="UTF-8"?>
