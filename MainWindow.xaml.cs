@@ -61,7 +61,7 @@ public partial class MainWindow : Window
     private static readonly string[] Panels =
     {
         "PanelHome", "PanelLog", "PanelInput", "PanelMaps", "PanelData", "PanelSessions", "PanelCombat", "PanelGrind", "PanelFollower",
-        "PanelLogin", "PanelMouse", "PanelSequencer", "PanelProfile", "PanelLicensing", "PanelSettings"
+        "PanelLogin", "PanelMouse", "PanelSequencer", "PanelKeymaps", "PanelProfile", "PanelLicensing", "PanelSettings"
     };
     private static readonly string[] EqClasses =
     {
@@ -187,6 +187,7 @@ public partial class MainWindow : Window
         if (name == "PanelHome") RefreshHome();
         if (name == "PanelGrind") { InitArtUi(); AutoTargetEq(); }
         if (name == "PanelSequencer") InitSequencerUi();
+        if (name == "PanelKeymaps") InitKeymapsUi();
         if (name == "PanelProfile") UpdateProfilePanel();
         if (name == "PanelData") EnsureDataLoaded();
         if (name == "PanelSessions") RefreshSessions();

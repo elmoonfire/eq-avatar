@@ -751,7 +751,12 @@ public partial class MainWindow
         switch (col)
         {
             case "action":
-                foreach (string a in _seqCatalog.Actions) yield return ("action", a);
+                // the game's own bound actions first (from the Key Mappings page), then catalog extras
+                var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (var b in Input.KeyMapStore.Current.Binds)
+                    if (b.Action.Length > 1 && seen.Add(b.Action)) yield return ("action", b.Action);
+                foreach (string a in _seqCatalog.Actions)
+                    if (seen.Add(a)) yield return ("action", a);
                 break;
             case "stance":
                 foreach (string s in _seqCatalog.Stances) yield return ("stance", s);
@@ -850,7 +855,7 @@ public partial class MainWindow
 
     private static string ChipTip(SeqChip chip) => chip.Kind switch
     {
-        "action" => "General action — fires the key your game has bound to it (the Key Mappings page will read those bindings straight from the game).",
+        "action" => ActionChipTip(chip.Value),
         "stance" => "Physical stance for this part of the sequence — one per part; adding another replaces it.",
         "invocation" => "Invocation for this part — one per part; adding another replaces it.",
         "spell" => "Cast this spell. The engine will be aware of your spell slots and what's memorized.",
@@ -859,6 +864,15 @@ public partial class MainWindow
         "revert" => "↺ Restores this aspect to its PRE-SEQUENCE value — the bot keeps short-term memory of what earlier parts changed.",
         _ => "Activated ability — abilities run AFTER spells, so Quick Buff finds the right spells already memorized.",
     } + "\nDrag to move (same column, any sequence) · Ctrl+drag to copy · right-click to duplicate or remove.";
+
+    private static string ActionChipTip(string action)
+    {
+        var kb = Input.KeyMapStore.Current.Binds.FirstOrDefault(
+            b => string.Equals(b.Action, action, StringComparison.OrdinalIgnoreCase));
+        return kb is null || (kb.Primary.Length == 0 && kb.Alternate.Length == 0)
+            ? "General action — NO key mapping yet. Capture your binds on the Key Mappings page (Information section) so the engine knows what to press."
+            : $"General action — resolves to {kb.Primary}{(kb.Alternate.Length > 0 ? " / " + kb.Alternate : "")} via your Key Mappings.";
+    }
 
     private void SeqInfo_Click(object sender, RoutedEventArgs e)
     {
