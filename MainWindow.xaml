@@ -1591,7 +1591,10 @@
                                 </Grid>
                                 <TextBlock x:Name="KmCountText" Text="" FontSize="10.5" Foreground="{StaticResource TextDim}" Margin="1,0,0,8"/>
 
-                                <Border Style="{StaticResource SectionCard}" Margin="0,0,0,10">
+                                <!-- (0.9.26) inline card style: 'SectionCard' lives in PanelGrind's LOCAL Grid.Resources
+                                     and isn't visible here — referencing it killed 0.9.25 at startup (XamlParseException). -->
+                                <Border Background="#121A28" BorderBrush="#26405A" BorderThickness="1"
+                                        CornerRadius="10" Padding="12,10" Margin="0,0,0,10">
                                     <StackPanel>
                                         <TextBlock TextWrapping="Wrap" FontSize="11.5" Foreground="#9FB6CC"
                                                    Text="① In EQL open Options → Controls → Key binds   ② keep that window fully visible (the bot reads pixels)   ③ press ◉ Capture — then scroll the in-game list and capture again until every bind is in. Passes merge; nothing duplicates."/>
