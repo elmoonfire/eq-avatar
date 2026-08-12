@@ -80,6 +80,25 @@ public static class HumanizedMouse
         MoveAbs(tx, ty);
     }
 
+    /// <summary>Jump the cursor straight to a screen point (no easing) — used by the keybind
+    /// auto-capture, which just needs the pointer parked over the list before it scrolls.</summary>
+    public static void MoveInstant(double x, double y) => MoveAbs(x, y);
+
+    /// <summary>Turn the wheel: negative = scroll down (away from you), positive = up.
+    /// One "click" is WHEEL_DELTA, exactly what a physical notch sends.</summary>
+    public static void Scroll(int clicks)
+    {
+        const uint MOUSEEVENTF_WHEEL = 0x0800;
+        int sz = Marshal.SizeOf<INPUT>();
+        int step = clicks < 0 ? -120 : 120;
+        for (int i = 0; i < Math.Abs(clicks); i++)
+        {
+            var wheel = new INPUT { mi = new MOUSEINPUT { mouseData = unchecked((uint)step), dwFlags = MOUSEEVENTF_WHEEL } };
+            SendInput(1, new[] { wheel }, sz);
+            Thread.Sleep(28);
+        }
+    }
+
     public static void Click(Random rng)
     {
         var down = new INPUT { mi = new MOUSEINPUT { dwFlags = MOUSEEVENTF_LEFTDOWN } };

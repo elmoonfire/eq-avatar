@@ -1559,7 +1559,7 @@
                                  VerticalScrollBarVisibility="Auto" TextWrapping="Wrap"/>
                     </Grid>
 
-                    <!-- ===== KEY MAPPINGS (OCR mirror of the game's Controls → Key binds) ===== -->
+                    <!-- ===== KEY MAPPINGS (OCR mirror of the game’s Controls → Key binds) ===== -->
                     <Grid x:Name="PanelKeymaps" Visibility="Collapsed">
                         <ScrollViewer VerticalScrollBarVisibility="Auto">
                             <StackPanel Margin="18,14,18,26">
@@ -1577,59 +1577,96 @@
                                         </Border>
                                         <Border Background="#16202E" BorderBrush="#2A4A57" BorderThickness="1" CornerRadius="999"
                                                 Width="22" Height="22" Cursor="Hand" MouseLeftButtonUp="KmInfo_Click" Margin="10,0,0,0"
-                                                ToolTip="How capturing, merging and fixing mappings works — the full guide.">
+                                                ToolTip="How capturing, filtering, locking and sharing key mappings works — the full guide.">
                                             <TextBlock Text="i" FontFamily="Georgia" FontStyle="Italic" FontWeight="Bold" FontSize="13"
                                                        Foreground="#7FB2D9" HorizontalAlignment="Center" VerticalAlignment="Center" Margin="0,-1,0,0"/>
                                         </Border>
                                     </StackPanel>
                                     <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
-                                        <Button Content="◉  Capture from game" Click="KmCapture_Click" Padding="14,6" FontWeight="SemiBold" Margin="0,0,8,0"
-                                                ToolTip="Reads the visible rows of the game's Controls → Key binds window with OCR. Scroll the in-game list and capture again — every pass merges."/>
+                                        <Button x:Name="KmAutoBtn" Content="⟳  Auto-capture everything" Click="KmAuto_Click" Padding="14,6" FontWeight="SemiBold" Margin="0,0,8,0"
+                                                ToolTip="Hands-free: brings EQ forward, reads the visible binds, scrolls the list itself and keeps reading until nothing new turns up. Open Controls → Key binds with category ALL first."/>
+                                        <Button x:Name="KmCaptureBtn" Content="◉  Capture page" Click="KmCapture_Click" Padding="12,6" Margin="0,0,8,0"
+                                                ToolTip="Read just what's on screen right now — handy for topping up one stubborn section."/>
+                                        <Button Content="Share ↗" Click="KmShare_Click" Padding="12,6" Margin="0,0,8,0"
+                                                ToolTip="Publish these mappings to your member page so friends can view them (and copy them) from the website."/>
                                         <Button Content="Clear all" Click="KmClear_Click" Padding="10,6" Margin="0"
                                                 ToolTip="Forget every mapping and the refresh stamp."/>
                                     </StackPanel>
                                 </Grid>
                                 <TextBlock x:Name="KmCountText" Text="" FontSize="10.5" Foreground="{StaticResource TextDim}" Margin="1,0,0,8"/>
 
-                                <!-- (0.9.26) inline card style: 'SectionCard' lives in PanelGrind's LOCAL Grid.Resources
-                                     and isn't visible here — referencing it killed 0.9.25 at startup (XamlParseException). -->
                                 <Border Background="#121A28" BorderBrush="#26405A" BorderThickness="1"
                                         CornerRadius="10" Padding="12,10" Margin="0,0,0,10">
                                     <StackPanel>
                                         <TextBlock TextWrapping="Wrap" FontSize="11.5" Foreground="#9FB6CC"
-                                                   Text="① In EQL open Options → Controls → Key binds   ② keep that window fully visible (the bot reads pixels)   ③ press ◉ Capture — then scroll the in-game list and capture again until every bind is in. Passes merge; nothing duplicates."/>
+                                                   Text="① In EQL open Options → Controls → Key binds and set the category to ALL   ② keep that window fully visible   ③ press ⟳ Auto-capture everything — the bot scrolls and reads the whole list for you."/>
                                         <TextBlock x:Name="KmStatus" Text="" TextWrapping="Wrap" FontSize="11.5" Foreground="#7CE38B" Margin="0,6,0,0"/>
                                     </StackPanel>
                                 </Border>
 
-                                <Grid Margin="0,0,0,8">
+                                <!-- column titles: a scene per column with its name underneath, then that column's own filter -->
+                                <Grid Margin="0,0,0,6">
                                     <Grid.ColumnDefinitions>
                                         <ColumnDefinition Width="*"/>
-                                        <ColumnDefinition Width="Auto"/>
+                                        <ColumnDefinition Width="176"/>
+                                        <ColumnDefinition Width="176"/>
+                                        <ColumnDefinition Width="86"/>
+                                        <ColumnDefinition Width="28"/>
                                     </Grid.ColumnDefinitions>
-                                    <TextBox x:Name="KmFilter" TextChanged="KmFilter_Changed" FontSize="12.5" Margin="0,0,10,0"
-                                             ToolTip="Filter the mappings — by action, key, or category."/>
-                                    <StackPanel Grid.Column="1" Orientation="Horizontal">
-                                        <TextBox x:Name="KmAddAction" Width="150" FontSize="11.5" Margin="0,0,6,0" ToolTip="Action name (e.g. Jump)"/>
-                                        <TextBox x:Name="KmAddPrimary" Width="70" FontSize="11.5" Margin="0,0,6,0" ToolTip="Primary key (e.g. Space)"/>
-                                        <TextBox x:Name="KmAddAlt" Width="70" FontSize="11.5" Margin="0,0,6,0" ToolTip="Alternate key (optional)"/>
-                                        <Button Content="＋ add" Click="KmAdd_Click" Padding="10,3" Margin="0"
-                                                ToolTip="Add or fix a mapping by hand — merges by action name, just like a capture."/>
+                                    <StackPanel Grid.Column="0" Margin="2,0,8,0"
+                                                ToolTip="Every action your game can bind, exactly as its Controls screen names it. Sequencer ACTION pills resolve through this list.">
+                                        <Border CornerRadius="9" ClipToBounds="True" Height="66" Margin="0,0,0,3">
+                                            <Image x:Name="ArtKmColAction" Stretch="UniformToFill"/>
+                                        </Border>
+                                        <TextBlock Text="ACTION" FontWeight="Bold" FontSize="10.5" Foreground="#4FC3F7" HorizontalAlignment="Center"/>
+                                        <TextBox x:Name="KmFilterAction" TextChanged="KmFilter_Changed" FontSize="11.5" Margin="0,4,0,0"
+                                                 ToolTip="Type any part of an action name — the list narrows instantly."/>
+                                    </StackPanel>
+                                    <StackPanel Grid.Column="1" Margin="4,0,4,0"
+                                                ToolTip="The main key or mouse button bound to each action.">
+                                        <Border CornerRadius="9" ClipToBounds="True" Height="66" Margin="0,0,0,3">
+                                            <Image x:Name="ArtKmColPrimary" Stretch="UniformToFill"/>
+                                        </Border>
+                                        <TextBlock Text="PRIMARY" FontWeight="Bold" FontSize="10.5" Foreground="#9FE0FF" HorizontalAlignment="Center"/>
+                                        <TextBox x:Name="KmFilterPrimary" TextChanged="KmFilter_Changed" FontSize="11.5" Margin="0,4,0,0"
+                                                 ToolTip="Filter by primary key — type 'mouse' to see every mouse binding, 'F' for function keys, 'shift' for modifiers. Type '—' to find unbound actions."/>
+                                    </StackPanel>
+                                    <StackPanel Grid.Column="2" Margin="4,0,4,0"
+                                                ToolTip="The secondary (alternate) key or mouse button, when the action has one.">
+                                        <Border CornerRadius="9" ClipToBounds="True" Height="66" Margin="0,0,0,3">
+                                            <Image x:Name="ArtKmColSecondary" Stretch="UniformToFill"/>
+                                        </Border>
+                                        <TextBlock Text="SECONDARY" FontWeight="Bold" FontSize="10.5" Foreground="#C792EA" HorizontalAlignment="Center"/>
+                                        <TextBox x:Name="KmFilterAlt" TextChanged="KmFilter_Changed" FontSize="11.5" Margin="0,4,0,0"
+                                                 ToolTip="Filter by secondary key. Type '—' to find actions with no secondary binding."/>
+                                    </StackPanel>
+                                    <StackPanel Grid.Column="3" Margin="4,0,4,0"
+                                                ToolTip="Locked binds are protected: importing a friend's mappings will never overwrite them.">
+                                        <Border CornerRadius="9" ClipToBounds="True" Height="66" Margin="0,0,0,3">
+                                            <Image x:Name="ArtKmColLock" Stretch="UniformToFill"/>
+                                        </Border>
+                                        <TextBlock Text="LOCK" FontWeight="Bold" FontSize="10.5" Foreground="#FFCB6B" HorizontalAlignment="Center"/>
+                                        <CheckBox x:Name="KmLockedOnly" Content="only" FontSize="10.5" Foreground="#9FB6CC" Margin="0,6,0,0"
+                                                  HorizontalAlignment="Center" Click="KmFilter_Click"
+                                                  ToolTip="Show only the binds you've locked."/>
                                     </StackPanel>
                                 </Grid>
 
-                                <Grid Margin="6,0,6,4">
-                                    <Grid.ColumnDefinitions>
-                                        <ColumnDefinition Width="*"/>
-                                        <ColumnDefinition Width="150"/>
-                                        <ColumnDefinition Width="150"/>
-                                        <ColumnDefinition Width="28"/>
-                                    </Grid.ColumnDefinitions>
-                                    <TextBlock Text="ACTION" FontSize="9.5" FontWeight="Bold" Foreground="#5E7C9A" Margin="6,0,0,0"/>
-                                    <TextBlock Grid.Column="1" Text="PRIMARY" FontSize="9.5" FontWeight="Bold" Foreground="#5E7C9A" HorizontalAlignment="Center"/>
-                                    <TextBlock Grid.Column="2" Text="ALTERNATE" FontSize="9.5" FontWeight="Bold" Foreground="#5E7C9A" HorizontalAlignment="Center"/>
-                                </Grid>
                                 <StackPanel x:Name="KmListHost"/>
+
+                                <Border Background="#121A28" BorderBrush="#26405A" BorderThickness="1"
+                                        CornerRadius="10" Padding="12,10" Margin="0,10,0,0">
+                                    <StackPanel>
+                                        <TextBlock Text="ADD OR FIX A BIND BY HAND" FontSize="9.5" FontWeight="Bold" Foreground="#5E7C9A" Margin="0,0,0,6"/>
+                                        <StackPanel Orientation="Horizontal">
+                                            <TextBox x:Name="KmAddAction" Width="220" FontSize="11.5" Margin="0,0,6,0" ToolTip="Action name (e.g. Jump)"/>
+                                            <TextBox x:Name="KmAddPrimary" Width="90" FontSize="11.5" Margin="0,0,6,0" ToolTip="Primary key (e.g. Space)"/>
+                                            <TextBox x:Name="KmAddAlt" Width="90" FontSize="11.5" Margin="0,0,6,0" ToolTip="Secondary key (optional)"/>
+                                            <Button Content="＋ add" Click="KmAdd_Click" Padding="10,3" Margin="0"
+                                                    ToolTip="Add or fix a mapping by hand — merges by action name, just like a capture."/>
+                                        </StackPanel>
+                                    </StackPanel>
+                                </Border>
                             </StackPanel>
                         </ScrollViewer>
                     </Grid>

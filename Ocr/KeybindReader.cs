@@ -33,24 +33,38 @@ public static class KeybindReader
 
     private readonly record struct Tok(string Text, double X0, double X1, double Cy, double H);
 
+    /// <summary>One capture: the binds found plus the SCREEN rectangle they occupied, so the
+    /// auto-capture loop knows exactly where to put the cursor when it scrolls the list.</summary>
+    public sealed class KeybindPage
+    {
+        public List<KeyBind> Binds { get; init; } = new();
+        public int RegionX, RegionY, RegionW, RegionH;
+        public bool HasRegion => RegionW > 20 && RegionH > 20;
+        public (int X, int Y) Center => (RegionX + RegionW / 2, RegionY + RegionH / 2);
+    }
+
+    /// <summary>Convenience wrapper kept for callers that only want the binds.</summary>
+    public static async Task<List<KeyBind>> ReadAsync(IntPtr hwnd) => (await ReadPageAsync(hwnd)).Binds;
+
     /// <summary>Words we never accept as a bind's action label (column titles, window chrome).</summary>
     private static readonly Regex Noise = new(
         @"^(primary|alternate|alt|action|command|key\s*binds?|keyboard|mouse|controls|options|search|filter|page|reset|defaults?|accept|cancel|ok|apply)$",
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
-    public static async Task<List<KeyBind>> ReadAsync(IntPtr hwnd)
+    public static async Task<KeybindPage> ReadPageAsync(IntPtr hwnd)
     {
-        var binds = new List<KeyBind>();
-        if (hwnd == IntPtr.Zero || !GetWindowRect(hwnd, out RECT r)) return binds;
+        var page = new KeybindPage();
+        var binds = page.Binds;
+        if (hwnd == IntPtr.Zero || !GetWindowRect(hwnd, out RECT r)) return page;
         int w = Math.Max(1, r.Right - r.Left), h = Math.Max(1, r.Bottom - r.Top);
-        if (w < 100 || h < 100) return binds;
+        if (w < 100 || h < 100) return page;
 
         using var bmp = new Bitmap(w, h, PixelFormat.Format32bppArgb);
         using (var g = Graphics.FromImage(bmp))
             g.CopyFromScreen(r.Left, r.Top, 0, 0, new Size(w, h), CopyPixelOperation.SourceCopy);
 
         OcrEngine? engine = Engine;
-        if (engine is null) return binds;
+        if (engine is null) return page;
 
         SoftwareBitmap sw;
         using (var ms = new MemoryStream())
@@ -73,7 +87,7 @@ public static class KeybindReader
                     toks.Add(new Tok(word.Text, b.X, b.X + b.Width, b.Y + b.Height / 2.0, b.Height));
                 }
         }
-        if (toks.Count == 0) return binds;
+        if (toks.Count == 0) return page;
 
         // ---- cluster words into visual rows (OCR often splits one row into several lines) ----
         double rowTol = Math.Max(6, toks.Average(t => t.H) * 0.62);
@@ -88,6 +102,8 @@ public static class KeybindReader
         // ---- split each row at its large horizontal gaps: label | primary | alternate ----
         double gapMin = Math.Max(34, w * 0.02);
         string category = "";
+        int accepted = 0;
+        double minY = 0, maxY = 0, minX = 0, maxX = 0;
         foreach (var row in rows)
         {
             var ts = row.OrderBy(t => t.X0).ToList();
@@ -115,6 +131,12 @@ public static class KeybindReader
             if (primary.Length == 0 && alternate.Length == 0) continue;
             if (Noise.IsMatch(primary)) continue;                       // "Primary | Alternate" title row
 
+            double rowTop = ts.Min(t => t.Cy) - ts[0].H, rowBot = ts.Max(t => t.Cy) + ts[0].H;
+            if (accepted == 0) { minY = rowTop; maxY = rowBot; minX = ts.Min(t => t.X0); maxX = ts.Max(t => t.X1); }
+            else { minY = Math.Min(minY, rowTop); maxY = Math.Max(maxY, rowBot);
+                   minX = Math.Min(minX, ts.Min(t => t.X0)); maxX = Math.Max(maxX, ts.Max(t => t.X1)); }
+            accepted++;
+
             binds.Add(new KeyBind
             {
                 Category = category,
@@ -123,6 +145,15 @@ public static class KeybindReader
                 Alternate = alternate == "-" ? "" : alternate,
             });
         }
-        return binds;
+
+        // Screen-space rectangle the rows occupied — the auto-capture loop scrolls over its centre.
+        if (accepted > 0)
+        {
+            page.RegionX = r.Left + (int)minX;
+            page.RegionY = r.Top + (int)minY;
+            page.RegionW = (int)(maxX - minX);
+            page.RegionH = (int)(maxY - minY);
+        }
+        return page;
     }
 }
