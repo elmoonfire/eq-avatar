@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <!-- Plain net8.0: no WPF, no Windows TFM — the whole point is a tiny tool with nothing to break. -->
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>EQAvatarRescue</AssemblyName>
+    <RootNamespace>EQAvatarRescue</RootNamespace>
+    <LangVersion>latest</LangVersion>
+    <!-- Same roll-forward as the app: runs on any installed .NET 8/9/10 runtime. -->
+    <RollForward>LatestMajor</RollForward>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <DebugType>none</DebugType>
+  </PropertyGroup>
+
+</Project>

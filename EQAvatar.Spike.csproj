@@ -17,6 +17,12 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <!-- The rescue tool is its own tiny project — keep its sources out of the app build. -->
+    <Compile Remove="Rescue\**" />
+    <None Remove="Rescue\**" />
+  </ItemGroup>
+
+  <ItemGroup>
     <Resource Include="assets\eqavatar-512.png" />
     <Resource Include="assets\mascot.jpg" />
     <Resource Include="assets\data\mobs.json.gz" />
