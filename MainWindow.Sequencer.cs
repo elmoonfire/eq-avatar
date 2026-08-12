@@ -4,6 +4,7 @@ using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
+using System.Windows.Documents;
 using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Effects;
@@ -15,9 +16,9 @@ namespace EQAvatar.Spike;
 /// <summary>
 /// The Action Sequencer page (partial class): a visual list of sequences that tries hard not
 /// to look like a table — art column titles, glowing ID medallions you drag to reorder
-/// (display IDs are ALWAYS position 1..N), and pill chips added through filter-as-you-type
-/// popups. Phase 1 is the editor + persistence; the engine that runs sequences ships with
-/// the Key Mappings page.
+/// (display IDs are ALWAYS position 1..N), pill chips added through filter-as-you-type popups,
+/// chips you can DRAG within a cell / between sequences (Ctrl = duplicate), and multi-part
+/// sequences with per-aspect REVERT chips. The engine that runs them ships with Key Mappings.
 /// </summary>
 public partial class MainWindow
 {
@@ -28,6 +29,14 @@ public partial class MainWindow
     private readonly List<Border> _seqLines = new();
     private int _seqDragFrom = -1, _seqDragTarget = -1;
     private Popup? _chipPopup;
+
+    // chip drag state
+    private sealed record SeqCell(Border Host, WrapPanel Wrap, ActionSequence Seq, int Part, string Col);
+    private readonly List<SeqCell> _seqCells = new();
+    private (Border pill, ActionSequence seq, int part, string col, SeqChip chip, Point start)? _chipDown;
+    private bool _chipDragging;
+    private SeqCell? _chipOver;
+    private GhostAdorner? _chipGhost;
 
     private void InitSequencerUi()
     {
@@ -54,6 +63,7 @@ public partial class MainWindow
         SeqListHost.Children.Clear();
         _seqCards.Clear();
         _seqLines.Clear();
+        _seqCells.Clear();
 
         if (_sequences.Count == 0)
         {
@@ -70,7 +80,7 @@ public partial class MainWindow
                     Foreground = Hex("#8FA3B8"),
                     FontSize = 12.5,
                     Text = "No sequences yet — press  ＋ New sequence.\n\nBuild chains like the classic buff routine: set your stance + invocation, " +
-                           "swap to the buff spell set, fire Quick Buff… and (soon) a part 2 that reverts everything back the way it was. " +
+                           "swap to the buff spell set, fire Quick Buff — then chain a part 2 with ⛓ that REVERTS everything back the way it was. " +
                            "The engine that RUNS sequences arrives with the Key Mappings page — build them now, they'll be ready.",
                 },
             });
@@ -86,7 +96,7 @@ public partial class MainWindow
             SeqListHost.Children.Add(card);
         }
         SeqListHost.Children.Add(MakeInsertLine());
-        SeqCountText.Text = $"{_sequences.Count} sequence{(_sequences.Count == 1 ? "" : "s")} — other pages reference them by number";
+        SeqCountText.Text = $"{_sequences.Count} sequence{(_sequences.Count == 1 ? "" : "s")} — other pages reference them by number · drag pills to move them, hold Ctrl to copy";
     }
 
     private Border MakeInsertLine()
@@ -106,13 +116,37 @@ public partial class MainWindow
     private Border MakeSeqCard(int idx)
     {
         var seq = _sequences[idx];
+        if (seq.Parts.Count == 0) seq.Parts.Add(new SeqSegment());
 
         var grid = new Grid();
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(72) });
         for (int c = 0; c < 4; c++) grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(34) });
-        grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-        grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+
+        // rows: 0 = name, then per part (header row for parts >= 2, cells row per part)
+        grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });   // name
+        string[] cols = { "action", "stance", "spell", "ability" };
+        int row = 1;
+        for (int p = 0; p < seq.Parts.Count; p++)
+        {
+            if (p > 0)
+            {
+                grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+                var hdr = MakePartHeader(seq, p);
+                Grid.SetColumn(hdr, 1); Grid.SetColumnSpan(hdr, 4); Grid.SetRow(hdr, row);
+                grid.Children.Add(hdr);
+                row++;
+            }
+            grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            for (int c = 0; c < cols.Length; c++)
+            {
+                var cell = MakeChipCell(seq, p, cols[c]);
+                Grid.SetColumn(cell, c + 1); Grid.SetRow(cell, row);
+                grid.Children.Add(cell);
+            }
+            row++;
+        }
+        int lastRow = row - 1;
 
         // --- the ID medallion: the number IS the position; drag it to reorder ---
         var num = new TextBlock
@@ -139,13 +173,29 @@ public partial class MainWindow
             Effect = new DropShadowEffect { Color = Color.FromRgb(0x4F, 0xC3, 0xF7), BlurRadius = 12, ShadowDepth = 0, Opacity = 0.35 },
             ToolTip = $"Sequence {idx + 1} — the ID is simply its position in this list. Drag the medallion to reorder; every sequence renumbers instantly (drag #3 to the 8th spot and it becomes #8).",
         };
-        Grid.SetColumn(med, 0); Grid.SetRow(med, 0); Grid.SetRowSpan(med, 2);
+        Grid.SetColumn(med, 0); Grid.SetRow(med, 0); Grid.SetRowSpan(med, row);
         int myIndex = idx;
         med.MouseLeftButtonDown += (_, e) => { _seqDragFrom = myIndex; _seqDragTarget = -1; med.CaptureMouse(); e.Handled = true; };
         med.MouseMove += (_, e) => { if (med.IsMouseCaptured) UpdateDragTarget(e.GetPosition(SeqListHost).Y); };
         med.MouseLeftButtonUp += (_, _) => { if (med.IsMouseCaptured) med.ReleaseMouseCapture(); FinishSeqDrag(); };
         med.LostMouseCapture += (_, _) => { foreach (var l in _seqLines) l.Visibility = Visibility.Hidden; };
         grid.Children.Add(med);
+
+        // parts badge under the medallion when chained
+        if (seq.Parts.Count > 1)
+        {
+            var badge = new TextBlock
+            {
+                Text = $"⛓ {seq.Parts.Count} parts",
+                FontSize = 9.5,
+                Foreground = Hex("#6E8CA6"),
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Top,
+                Margin = new Thickness(0, 58, 0, 0),
+            };
+            Grid.SetColumn(badge, 0); Grid.SetRow(badge, 0); Grid.SetRowSpan(badge, row);
+            grid.Children.Add(badge);
+        }
 
         // --- name row (optional label; the NUMBER is the real reference) ---
         var nameBox = new TextBox
@@ -178,7 +228,7 @@ public partial class MainWindow
         Grid.SetColumn(nameGrid, 1); Grid.SetColumnSpan(nameGrid, 4); Grid.SetRow(nameGrid, 0);
         grid.Children.Add(nameGrid);
 
-        // --- delete ---
+        // --- delete sequence ---
         var del = new TextBlock
         {
             Text = "✕",
@@ -198,28 +248,26 @@ public partial class MainWindow
         Grid.SetColumn(del, 5); Grid.SetRow(del, 0);
         grid.Children.Add(del);
 
-        // --- the four chip cells ---
-        string[] cols = { "action", "stance", "spell", "ability" };
-        for (int c = 0; c < cols.Length; c++)
+        // --- ⛓ chain a part ---
+        var addPart = new TextBlock
         {
-            var cell = MakeChipCell(seq, cols[c]);
-            Grid.SetColumn(cell, c + 1); Grid.SetRow(cell, 1);
-            grid.Children.Add(cell);
-        }
-
-        // --- multi-part teaser (the chain-a-part-2 graphic lands with the engine) ---
-        var more = new TextBlock
-        {
-            Text = "⛓",
+            Text = "⛓＋",
             FontSize = 13,
-            Foreground = Hex("#3C4C60"),
+            Foreground = Hex("#5E7C9A"),
+            Cursor = Cursors.Hand,
             HorizontalAlignment = HorizontalAlignment.Center,
             VerticalAlignment = VerticalAlignment.Bottom,
             Margin = new Thickness(0, 0, 0, 4),
-            ToolTip = "Chain a part 2 onto this sequence — multi-part sequences remember what you had before and can REVERT stances, invocation and spells afterwards. Arrives with the sequence engine.",
+            ToolTip = "Chain another part onto this sequence. Parts run in order, and the bot keeps short-term memory of what earlier parts changed — so later parts can add ↺ REVERT pills (from the stance and spell popups) that restore stances, invocation and spells to their pre-sequence values.",
         };
-        Grid.SetColumn(more, 5); Grid.SetRow(more, 1);
-        grid.Children.Add(more);
+        addPart.MouseLeftButtonUp += (_, _) =>
+        {
+            seq.Parts.Add(new SeqSegment());
+            SeqSaveRender();
+            ShowToast($"Part {seq.Parts.Count} chained — add ↺ revert pills from its popups");
+        };
+        Grid.SetColumn(addPart, 5); Grid.SetRow(addPart, lastRow);
+        grid.Children.Add(addPart);
 
         return new Border
         {
@@ -233,11 +281,52 @@ public partial class MainWindow
         };
     }
 
-    private FrameworkElement MakeChipCell(ActionSequence seq, string col)
+    private FrameworkElement MakePartHeader(ActionSequence seq, int part)
     {
-        var wrap = new WrapPanel { Margin = new Thickness(6, 2, 6, 0) };
-        foreach (var chip in seq.Main.Cell(col))
-            wrap.Children.Add(MakeChip(seq, col, chip));
+        var grid = new Grid { Margin = new Thickness(6, 4, 6, 2) };
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+
+        var label = new TextBlock
+        {
+            Text = $"⛓  PART {part + 1}",
+            FontSize = 10,
+            FontWeight = FontWeights.Bold,
+            Foreground = Hex("#7FB2D9"),
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+        Grid.SetColumn(label, 0);
+        grid.Children.Add(label);
+
+        var line = new Border { Height = 1, Background = Hex("#22364A"), Margin = new Thickness(8, 1, 8, 0), VerticalAlignment = VerticalAlignment.Center };
+        Grid.SetColumn(line, 1);
+        grid.Children.Add(line);
+
+        var remove = new TextBlock
+        {
+            Text = "unchain ✕",
+            FontSize = 9.5,
+            Foreground = Hex("#4E6076"),
+            Cursor = Cursors.Hand,
+            VerticalAlignment = VerticalAlignment.Center,
+            ToolTip = "Remove this part (its pills go with it)",
+        };
+        remove.MouseLeftButtonUp += (_, _) =>
+        {
+            if (part < seq.Parts.Count) seq.Parts.RemoveAt(part);
+            SeqSaveRender();
+        };
+        Grid.SetColumn(remove, 2);
+        grid.Children.Add(remove);
+        return grid;
+    }
+
+    private FrameworkElement MakeChipCell(ActionSequence seq, int part, string col)
+    {
+        var wrap = new WrapPanel { Margin = new Thickness(2, 0, 2, 0) };
+        foreach (var chip in seq.Parts[part].Cell(col))
+            wrap.Children.Add(MakeChip(seq, part, col, chip));
 
         string hue = ColumnHue(col, col == "stance" ? "stance" : col);
         var plus = new Border
@@ -252,15 +341,28 @@ public partial class MainWindow
             Child = new TextBlock { Text = "＋", FontSize = 12, Foreground = Tint(hue, 0xC0) },
             ToolTip = "Add — a filter popup opens: type to narrow instantly, tick several, Enter adds exactly what you typed (even if it isn't listed yet).",
         };
-        plus.MouseLeftButtonUp += (_, _) => OpenChipPopup(seq, col, plus);
+        plus.MouseLeftButtonUp += (_, _) => OpenChipPopup(seq, part, col, plus);
         wrap.Children.Add(plus);
-        return wrap;
+
+        var host = new Border
+        {
+            CornerRadius = new CornerRadius(8),
+            Background = Brushes.Transparent,
+            BorderBrush = Brushes.Transparent,
+            BorderThickness = new Thickness(1),
+            Padding = new Thickness(4, 2, 2, 0),
+            Margin = new Thickness(2, 0, 2, 0),
+            Child = wrap,
+        };
+        _seqCells.Add(new SeqCell(host, wrap, seq, part, col));
+        return host;
     }
 
-    private FrameworkElement MakeChip(ActionSequence seq, string col, SeqChip chip)
+    private FrameworkElement MakeChip(ActionSequence seq, int part, string col, SeqChip chip)
     {
         string hue = ColumnHue(col, chip.Kind);
         var lbl = new TextBlock { Text = chip.Label, Foreground = Hex("#E6EDF3"), FontSize = 11.5, VerticalAlignment = VerticalAlignment.Center };
+        if (chip.Kind == "revert") lbl.FontStyle = FontStyles.Italic;
         var x = new TextBlock
         {
             Text = "✕", FontSize = 8.5, Foreground = Hex("#617792"),
@@ -274,33 +376,197 @@ public partial class MainWindow
             CornerRadius = new CornerRadius(999),
             Padding = new Thickness(10, 3, 8, 4),
             Margin = new Thickness(0, 0, 6, 6),
-            Background = Tint(hue, 0x2E),
+            Background = Tint(hue, chip.Kind == "revert" ? (byte)0x1C : (byte)0x2E),
             BorderBrush = Tint(hue, 0x78),
             BorderThickness = new Thickness(1),
             Child = sp,
+            Cursor = Cursors.Hand,
             ToolTip = ChipTip(chip),
         };
-        x.MouseLeftButtonUp += (_, e) => { e.Handled = true; seq.Main.Cell(col).Remove(chip); SeqSaveRender(); };
+        x.MouseLeftButtonUp += (_, e) => { e.Handled = true; seq.Parts[part].Cell(col).Remove(chip); SeqSaveRender(); };
+
+        // drag: move within the cell, into the same column of any sequence/part; Ctrl = copy
+        pill.MouseLeftButtonDown += (_, e) =>
+        {
+            if (ReferenceEquals(e.OriginalSource, x)) return;
+            _chipDown = (pill, seq, part, col, chip, e.GetPosition(SeqListHost));
+            _chipDragging = false;
+        };
+        pill.MouseMove += (_, e) => ChipDragMove(pill, e);
+        pill.MouseLeftButtonUp += (_, _) => ChipDragEnd(pill);
+        pill.LostMouseCapture += (_, _) => ChipDragCleanup();
 
         var cm = new ContextMenu();
         var dup = new MenuItem { Header = "Duplicate" };
         dup.Click += (_, _) =>
         {
-            var cell = seq.Main.Cell(col);
+            var cell = seq.Parts[part].Cell(col);
             cell.Insert(Math.Min(cell.IndexOf(chip) + 1, cell.Count), chip.Clone());
             SeqSaveRender();
         };
         var rem = new MenuItem { Header = "Remove" };
-        rem.Click += (_, _) => { seq.Main.Cell(col).Remove(chip); SeqSaveRender(); };
+        rem.Click += (_, _) => { seq.Parts[part].Cell(col).Remove(chip); SeqSaveRender(); };
         cm.Items.Add(dup);
         cm.Items.Add(rem);
         pill.ContextMenu = cm;
         return pill;
     }
 
+    // ---------------- chip drag mechanics ----------------
+
+    private void ChipDragMove(Border pill, MouseEventArgs e)
+    {
+        if (_chipDown is null || _chipDown.Value.pill != pill) return;
+        var pos = e.GetPosition(SeqListHost);
+        if (!_chipDragging)
+        {
+            if (e.LeftButton != MouseButtonState.Pressed) { _chipDown = null; return; }
+            var d = pos - _chipDown.Value.start;
+            if (Math.Abs(d.X) < 4 && Math.Abs(d.Y) < 4) return;
+            _chipDragging = true;
+            pill.CaptureMouse();
+            pill.Opacity = 0.35;
+            var layer = AdornerLayer.GetAdornerLayer(SeqListHost);
+            if (layer is not null)
+            {
+                var ghost = new Border
+                {
+                    CornerRadius = new CornerRadius(999),
+                    Padding = new Thickness(10, 3, 10, 4),
+                    Background = Tint(ColumnHue(_chipDown.Value.col, _chipDown.Value.chip.Kind), 0x66),
+                    BorderBrush = Tint(ColumnHue(_chipDown.Value.col, _chipDown.Value.chip.Kind), 0xE0),
+                    BorderThickness = new Thickness(1),
+                    Opacity = 0.9,
+                    Child = new TextBlock { Text = _chipDown.Value.chip.Label, Foreground = Hex("#F2F7FC"), FontSize = 11.5 },
+                };
+                _chipGhost = new GhostAdorner(SeqListHost, ghost);
+                layer.Add(_chipGhost);
+            }
+        }
+        _chipGhost?.SetPos(new Point(pos.X + 10, pos.Y + 6));
+
+        var over = FindCellAt(pos, _chipDown.Value.col);
+        if (!ReferenceEquals(over, _chipOver))
+        {
+            SetCellHighlight(_chipOver, false);
+            _chipOver = over;
+            SetCellHighlight(_chipOver, true);
+        }
+    }
+
+    private void ChipDragEnd(Border pill)
+    {
+        if (_chipDown is null || _chipDown.Value.pill != pill) { ChipDragCleanup(); return; }
+        var info = _chipDown.Value;
+        bool wasDragging = _chipDragging;
+        var over = _chipOver;
+        if (pill.IsMouseCaptured) pill.ReleaseMouseCapture();
+        var dropPos = Mouse.GetPosition(SeqListHost);
+        ChipDragCleanup();
+        if (!wasDragging || over is null) return;
+
+        bool copy = (Keyboard.Modifiers & ModifierKeys.Control) != 0;
+        var srcCell = info.seq.Parts[info.part].Cell(info.col);
+        var dstCell = over.Seq.Parts[over.Part].Cell(over.Col);
+        bool sameCell = ReferenceEquals(srcCell, dstCell);
+
+        int target = DropIndex(over, dropPos);
+        int srcIdx = srcCell.IndexOf(info.chip);
+        if (srcIdx < 0) return;
+
+        var moving = copy ? info.chip.Clone() : info.chip;
+        if (!copy)
+        {
+            srcCell.RemoveAt(srcIdx);
+            if (sameCell && srcIdx < target) target--;
+        }
+        // one stance + one invocation per part — entering a NEW cell replaces the same kind
+        if (!sameCell && moving.Kind is "stance" or "invocation")
+            dstCell.RemoveAll(c => c.Kind == moving.Kind);
+        target = Math.Clamp(target, 0, dstCell.Count);
+        dstCell.Insert(target, moving);
+        SeqSaveRender();
+        if (!sameCell)
+            ShowToast(copy ? "Pill copied" : "Pill moved");
+    }
+
+    private void ChipDragCleanup()
+    {
+        if (_chipDown is { } d) d.pill.Opacity = 1.0;
+        SetCellHighlight(_chipOver, false);
+        _chipOver = null;
+        if (_chipGhost is not null)
+            AdornerLayer.GetAdornerLayer(SeqListHost)?.Remove(_chipGhost);
+        _chipGhost = null;
+        _chipDown = null;
+        _chipDragging = false;
+    }
+
+    private SeqCell? FindCellAt(Point pos, string col)
+    {
+        foreach (var cell in _seqCells)
+        {
+            if (cell.Col != col) continue;                    // pills only fit their own column
+            var top = cell.Host.TranslatePoint(new Point(0, 0), SeqListHost);
+            if (pos.X >= top.X && pos.X <= top.X + cell.Host.ActualWidth &&
+                pos.Y >= top.Y && pos.Y <= top.Y + cell.Host.ActualHeight)
+                return cell;
+        }
+        return null;
+    }
+
+    private int DropIndex(SeqCell cell, Point posInHost)
+    {
+        // children = chips… then the ＋ pill last
+        int count = Math.Max(0, cell.Wrap.Children.Count - 1);
+        for (int i = 0; i < count; i++)
+        {
+            if (cell.Wrap.Children[i] is not FrameworkElement fe) continue;
+            var tl = fe.TranslatePoint(new Point(0, 0), SeqListHost);
+            if (posInHost.Y <= tl.Y + fe.ActualHeight &&
+                (posInHost.Y < tl.Y || posInHost.X < tl.X + fe.ActualWidth / 2))
+                return i;
+        }
+        return count;
+    }
+
+    private static void SetCellHighlight(SeqCell? cell, bool on)
+    {
+        if (cell is null) return;
+        string hue = ColumnHue(cell.Col, cell.Col == "stance" ? "stance" : cell.Col);
+        cell.Host.Background = on ? Tint(hue, 0x16) : Brushes.Transparent;
+        cell.Host.BorderBrush = on ? Tint(hue, 0x70) : Brushes.Transparent;
+    }
+
+    /// <summary>A floating clone of the dragged pill, riding the adorner layer.</summary>
+    private sealed class GhostAdorner : Adorner
+    {
+        private readonly UIElement _child;
+        private Point _pos;
+        public GhostAdorner(UIElement adorned, UIElement child) : base(adorned)
+        {
+            _child = child;
+            AddVisualChild(child);
+            IsHitTestVisible = false;
+        }
+        public void SetPos(Point p) { _pos = p; InvalidateArrange(); }
+        protected override int VisualChildrenCount => 1;
+        protected override Visual GetVisualChild(int index) => _child;
+        protected override Size MeasureOverride(Size constraint)
+        {
+            _child.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+            return new Size(0, 0);
+        }
+        protected override Size ArrangeOverride(Size finalSize)
+        {
+            _child.Arrange(new Rect(_pos, _child.DesiredSize));
+            return finalSize;
+        }
+    }
+
     // ---------------- the filter-as-you-type popup ----------------
 
-    private void OpenChipPopup(ActionSequence seq, string col, UIElement anchor)
+    private void OpenChipPopup(ActionSequence seq, int part, string col, UIElement anchor)
     {
         _chipPopup?.SetCurrentValue(Popup.IsOpenProperty, false);
 
@@ -310,7 +576,8 @@ public partial class MainWindow
 
         panel.Children.Add(new TextBlock
         {
-            Text = col switch { "action" => "ADD ACTIONS", "stance" => "ADD STANCE / INVOCATION", "spell" => "ADD SPELLS", _ => "ADD ABILITIES" },
+            Text = (col switch { "action" => "ADD ACTIONS", "stance" => "ADD STANCE / INVOCATION", "spell" => "ADD SPELLS", _ => "ADD ABILITIES" })
+                   + (part > 0 ? $"  ·  PART {part + 1}" : ""),
             FontSize = 10.5, FontWeight = FontWeights.Bold, Foreground = Hex("#7FB2D9"), Margin = new Thickness(1, 0, 0, 6),
         });
 
@@ -364,6 +631,26 @@ public partial class MainWindow
         {
             listHost.Children.Clear();
             string f = filter.Text.Trim();
+
+            // parts ≥ 2: offer the ↺ REVERT pills first (they restore pre-sequence values)
+            foreach (var (kind, value) in RevertOptions(col, part))
+            {
+                if (f.Length > 0 && value.IndexOf(f, StringComparison.OrdinalIgnoreCase) < 0 &&
+                    "revert".IndexOf(f, StringComparison.OrdinalIgnoreCase) < 0) continue;
+                var rcb = new CheckBox
+                {
+                    Content = "↺ revert " + value + "   · back to pre-sequence",
+                    Foreground = Hex("#BFD9CE"),
+                    FontSize = 12,
+                    Margin = new Thickness(2, 2, 0, 2),
+                    IsChecked = selected.Any(s => s.Kind == kind && s.Value == value),
+                };
+                string k2 = kind, v2 = value;
+                rcb.Checked += (_, _) => { if (!selected.Any(s => s.Kind == k2 && s.Value == v2)) selected.Add(new SeqChip(k2, v2)); };
+                rcb.Unchecked += (_, _) => selected.RemoveAll(s => s.Kind == k2 && s.Value == v2);
+                listHost.Children.Add(rcb);
+            }
+
             foreach (var (kind, value) in PopupOptions(col, spellKind))
             {
                 if (f.Length > 0 && value.IndexOf(f, StringComparison.OrdinalIgnoreCase) < 0) continue;
@@ -392,7 +679,7 @@ public partial class MainWindow
         {
             if (e.Key != Key.Enter) return;
             string f = filter.Text.Trim();
-            if (f.Length == 0) { CommitChips(seq, col, selected); return; }
+            if (f.Length == 0) { CommitChips(seq, part, col, selected); return; }
             string kind = col == "spell" ? spellKind : col == "stance" ? "stance" : col;
             var known = PopupOptions(col, spellKind).FirstOrDefault(o => string.Equals(o.value, f, StringComparison.OrdinalIgnoreCase));
             if (known.value is not null)
@@ -407,7 +694,7 @@ public partial class MainWindow
             filter.Clear();
             refresh();
         };
-        addBtn.Click += (_, _) => CommitChips(seq, col, selected);
+        addBtn.Click += (_, _) => CommitChips(seq, part, col, selected);
         refresh();
 
         var popup = new Popup
@@ -431,6 +718,22 @@ public partial class MainWindow
         popup.Opened += (_, _) => filter.Focus();
         _chipPopup = popup;
         popup.IsOpen = true;
+    }
+
+    /// <summary>The ↺ options a part ≥ 2 can restore, per column.</summary>
+    private static IEnumerable<(string kind, string value)> RevertOptions(string col, int part)
+    {
+        if (part <= 0) yield break;
+        switch (col)
+        {
+            case "stance":
+                yield return ("revert", "stance");
+                yield return ("revert", "invocation");
+                break;
+            case "spell":
+                yield return ("revert", "spells");
+                break;
+        }
     }
 
     private static void StyleKindPills(List<Border> pills, string active)
@@ -472,21 +775,23 @@ public partial class MainWindow
         _ => _seqCatalog.Abilities,
     };
 
-    private void CommitChips(ActionSequence seq, string col, List<SeqChip> picked)
+    private void CommitChips(ActionSequence seq, int part, string col, List<SeqChip> picked)
     {
         _chipPopup?.SetCurrentValue(Popup.IsOpenProperty, false);
         if (picked.Count == 0) return;
-        var cell = seq.Main.Cell(col);
+        var cell = seq.Parts[part].Cell(col);
         foreach (var chip in picked)
         {
-            // one physical stance + one invocation per part — a new one replaces the old
+            // one physical stance + one invocation per part — a new one replaces the old;
+            // same for each distinct ↺ revert pill
             if (chip.Kind is "stance" or "invocation") cell.RemoveAll(c => c.Kind == chip.Kind);
+            if (chip.Kind == "revert") cell.RemoveAll(c => c.Kind == "revert" && c.Value == chip.Value);
             cell.Add(chip.Clone());
         }
         SeqSaveRender();
     }
 
-    // ---------------- drag to reorder (IDs are positional) ----------------
+    // ---------------- drag to reorder sequences (IDs are positional) ----------------
 
     private void UpdateDragTarget(double y)
     {
@@ -533,6 +838,7 @@ public partial class MainWindow
     private static string ColumnHue(string col, string kind) => kind switch
     {
         "invocation" => "#7FDBCA",
+        "revert" => "#9FB6AA",
         _ => col switch { "action" => "#4FC3F7", "stance" => "#C792EA", "spell" => "#82AAFF", _ => "#FFCB6B" },
     };
 
@@ -550,8 +856,9 @@ public partial class MainWindow
         "spell" => "Cast this spell. The engine will be aware of your spell slots and what's memorized.",
         "memspell" => "Memorize this spell before anything casts.",
         "spellset" => $"Swap the whole spell set:  /memspellset '{chip.Value}'",
+        "revert" => "↺ Restores this aspect to its PRE-SEQUENCE value — the bot keeps short-term memory of what earlier parts changed.",
         _ => "Activated ability — abilities run AFTER spells, so Quick Buff finds the right spells already memorized.",
-    } + "\nRight-click to duplicate or remove. Dragging pills between sequences arrives next.";
+    } + "\nDrag to move (same column, any sequence) · Ctrl+drag to copy · right-click to duplicate or remove.";
 
     private void SeqInfo_Click(object sender, RoutedEventArgs e)
     {
@@ -589,12 +896,13 @@ THE FOUR COLUMNS
 • SPELLS — three flavors from the popup: CAST a spell, MEM a single spell, or swap the entire set with /memspellset 'name'. The engine will know how many spell slots you have and what's in them.
 • ABILITIES — activated abilities, deliberately executed AFTER spells so something like Quick Buff finds the right spells already memorized.
 
-ADDING PILLS
-Press ＋ in any cell: a popup filters as you type (instantly), you can tick several options, and Enter adds exactly what you typed even if it isn't in the list yet — your additions are remembered for next time. Pills can be removed (✕) or duplicated (right-click). Dragging pills around — within a sequence and between sequences — arrives in the next phase.
+PILLS: ADD, DRAG, COPY
+Press ＋ in any cell: a popup filters as you type (instantly), you can tick several options, and Enter adds exactly what you typed even if it isn't in the list yet — your additions are remembered for next time.
+DRAG a pill to move it: reorder within its cell, or drop it into the SAME column of any other sequence or part — the cell lights up when you're over a valid home. Hold CTRL while dropping to COPY instead of move. Pills only fit their own column (a spell can't live in Actions). Remove with ✕, duplicate in place with right-click.
 
-MULTI-PART SEQUENCES (coming with the engine)
-The ⛓ mark at a sequence's edge will chain a part 2 onto it. While a sequence runs, the bot keeps short-term memory of what changed — so part 2 can offer per-aspect REVERT: put the stance back, the invocation back, the spell set back exactly as they were. The classic use: buff sequence (stance + invocation + buff set + Quick Buff), then revert everything.
+MULTI-PART SEQUENCES + ↺ REVERT
+Press ⛓＋ at a sequence's edge to chain another part. Parts run in order, and while a sequence runs the bot keeps SHORT-TERM MEMORY of what it changed — so the popups in part 2+ offer ↺ REVERT pills: put the stance back, the invocation back, the spells back exactly as they were before the sequence started. The classic use: part 1 = stance + invocation + buff spell set + Quick Buff, part 2 = revert all three. 'unchain ✕' removes a part.
 
 WHEN DO THEY RUN?
-Phase 1 is the builder. The runtime engine ships together with the Key Mappings page — it needs your real key binds to fire actions. Everything you build now is saved (%AppData%\EQAvatar\sequences.json) and will run as-is once the engine lands.";
+This page is the builder. The runtime engine ships together with the Key Mappings page — it needs your real key binds to fire actions. Everything you build now is saved (%AppData%\EQAvatar\sequences.json) and will run as-is once the engine lands.";
 }

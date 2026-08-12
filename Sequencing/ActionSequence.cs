@@ -31,7 +31,7 @@ public sealed class SeqChip
         "memspell" => "mem · " + Value,
         "spellset" => "set · " + Value,
         "invocation" => Value + " ⁂",
-        "revert" => "revert " + Value,
+        "revert" => "↺ revert " + Value,
         _ => Value,
     };
 }
