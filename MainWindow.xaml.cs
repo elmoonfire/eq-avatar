@@ -649,8 +649,16 @@ public partial class MainWindow : Window
 
     private void StartGrind_Click(object sender, RoutedEventArgs e)
     {
-        if (_grind is { Running: true } || _hunt is { Running: true }) { GrindLogLine("Already running."); return; }
-        if (_grindTarget == IntPtr.Zero) { GrindLogLine("Set the EverQuest target first (Target EverQuest)."); return; }
+        if (_grind is { Running: true } || _hunt is { Running: true })
+        { ShowToast("Already running — Stop (F12) first"); return; }
+        if (_grindTarget == IntPtr.Zero) AutoTargetEq();     // the game may have launched after this page opened
+        if (_grindTarget == IntPtr.Zero)
+        {
+            SetGrindBanner(1, "CAN'T START — EverQuest window not found. Launch the game, then press ◎.");
+            ShowToast("EverQuest not found");
+            GrindLogLine("Start blocked: no game window. Launch EverQuest, then press the ◎ button in the header.");
+            return;
+        }
 
         var rotation = GrindRole.ParseRotation(GrindRotation.Text);
         _currentLog ??= EqLogWatcher.FindNewestLog(LogFolderBox.Text.Trim());
@@ -671,7 +679,13 @@ public partial class MainWindow : Window
             return;
         }
 
-        if (rotation.Count == 0) { GrindLogLine("Rotation is empty — add at least one 'key,delayMs' line."); return; }
+        if (rotation.Count == 0)
+        {
+            SetGrindBanner(1, "CAN'T START — the combat rotation is empty (open COMBAT ROTATION below).");
+            ShowToast("Rotation is empty");
+            GrindLogLine("Rotation-only mode needs at least one 'key,delayMs' line.");
+            return;
+        }
         _grind = new GrindRole(sink, rotation, StopOnDeathBox.IsChecked == true, _currentLog, _settings);
         _grind.Log += m => Dispatcher.Invoke(() => GrindLogLine(m));
         _grind.Stopped += () => Dispatcher.Invoke(() => { _grindTimer.Stop(); UpdateGrindStats(); EndRoleSession(); });

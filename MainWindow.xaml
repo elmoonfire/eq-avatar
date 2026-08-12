@@ -527,13 +527,28 @@
                                     <Setter.Value>
                                         <ControlTemplate TargetType="RadioButton">
                                             <Border x:Name="bd" BorderThickness="2" BorderBrush="#26303F" CornerRadius="9"
-                                                    Background="#0B121E" ClipToBounds="True">
-                                                <ContentPresenter/>
+                                                    Background="#0B121E" Padding="3" ClipToBounds="True"
+                                                    RenderTransformOrigin="0.5,0.5">
+                                                <Grid>
+                                                    <ContentPresenter/>
+                                                    <Border x:Name="hl" Background="#FFFFFF" Opacity="0" IsHitTestVisible="False" CornerRadius="6"/>
+                                                </Grid>
                                             </Border>
                                             <ControlTemplate.Triggers>
                                                 <Trigger Property="IsChecked" Value="True">
                                                     <Setter TargetName="bd" Property="BorderBrush" Value="#4FC3F7"/>
                                                     <Setter TargetName="bd" Property="Background" Value="#10233A"/>
+                                                    <Setter TargetName="hl" Property="Opacity" Value="0.10"/>
+                                                    <Setter TargetName="bd" Property="Effect">
+                                                        <Setter.Value>
+                                                            <DropShadowEffect Color="#4FC3F7" BlurRadius="16" ShadowDepth="0" Opacity="0.75"/>
+                                                        </Setter.Value>
+                                                    </Setter>
+                                                    <Setter TargetName="bd" Property="RenderTransform">
+                                                        <Setter.Value>
+                                                            <ScaleTransform ScaleX="1.02" ScaleY="1.02"/>
+                                                        </Setter.Value>
+                                                    </Setter>
                                                 </Trigger>
                                                 <Trigger Property="IsMouseOver" Value="True">
                                                     <Setter TargetName="bd" Property="BorderBrush" Value="#3E7CA6"/>
@@ -642,7 +657,7 @@
                                 <!-- HUNTING MODE -->
                                 <Border Style="{StaticResource SectionCard}">
                                     <StackPanel>
-                                        <Grid ClipToBounds="True" Height="104">
+                                        <Grid ClipToBounds="True" Height="156">
                                             <Image x:Name="ArtModes" Stretch="UniformToFill"/>
                                             <Border VerticalAlignment="Bottom" HorizontalAlignment="Left" Background="#C8060B10" Padding="10,4" CornerRadius="0,8,0,0">
                                                 <TextBlock Text="HUNTING MODE" FontWeight="Bold" FontSize="12" Foreground="#7FB2D9"/>
@@ -710,7 +725,7 @@
                                 <!-- TARGETING -->
                                 <Border Style="{StaticResource SectionCard}">
                                     <StackPanel>
-                                        <Grid ClipToBounds="True" Height="86">
+                                        <Grid ClipToBounds="True" Height="258">
                                             <Image x:Name="ArtTargeting" Stretch="UniformToFill"/>
                                             <Border VerticalAlignment="Bottom" HorizontalAlignment="Left" Background="#C8060B10" Padding="10,4" CornerRadius="0,8,0,0">
                                                 <TextBlock Text="TARGETING — STANCE" FontWeight="Bold" FontSize="12" Foreground="#7FB2D9"/>
@@ -763,7 +778,7 @@
                                 <!-- TETHER -->
                                 <Border Style="{StaticResource SectionCard}">
                                     <StackPanel>
-                                        <Grid ClipToBounds="True" Height="80">
+                                        <Grid ClipToBounds="True" Height="240">
                                             <Image x:Name="ArtTether" Stretch="UniformToFill"/>
                                             <Border VerticalAlignment="Bottom" HorizontalAlignment="Left" Background="#C8060B10" Padding="10,4" CornerRadius="0,8,0,0">
                                                 <StackPanel Orientation="Horizontal">
@@ -793,7 +808,7 @@
                                 <Expander IsExpanded="False" Foreground="{StaticResource Text}" Margin="0,0,0,10">
                                     <Expander.Header>
                                         <StackPanel Orientation="Horizontal">
-                                            <Border Width="120" Height="44" CornerRadius="7" ClipToBounds="True" Margin="0,0,10,0">
+                                            <Border Width="240" Height="88" CornerRadius="7" ClipToBounds="True" Margin="0,0,10,0">
                                                 <Image x:Name="ArtSettings" Stretch="UniformToFill"/>
                                             </Border>
                                             <TextBlock Text="GRIND SETTINGS" FontWeight="Bold" FontSize="12" Foreground="#7FB2D9" VerticalAlignment="Center"/>
@@ -841,7 +856,7 @@
                                 <Expander IsExpanded="False" Foreground="{StaticResource Text}" Margin="0,0,0,10">
                                     <Expander.Header>
                                         <StackPanel Orientation="Horizontal">
-                                            <Border Width="120" Height="44" CornerRadius="7" ClipToBounds="True" Margin="0,0,10,0">
+                                            <Border Width="240" Height="88" CornerRadius="7" ClipToBounds="True" Margin="0,0,10,0">
                                                 <Image x:Name="ArtCompass" Stretch="UniformToFill"/>
                                             </Border>
                                             <TextBlock Text="COMPASS" FontWeight="Bold" FontSize="12" Foreground="#7FB2D9" VerticalAlignment="Center"/>
@@ -865,7 +880,7 @@
                                 <Expander x:Name="RotationExpander" IsExpanded="False" Foreground="{StaticResource Text}" Margin="0,0,0,10">
                                     <Expander.Header>
                                         <StackPanel Orientation="Horizontal">
-                                            <Border Width="120" Height="44" CornerRadius="7" ClipToBounds="True" Margin="0,0,10,0">
+                                            <Border Width="240" Height="88" CornerRadius="7" ClipToBounds="True" Margin="0,0,10,0">
                                                 <Image x:Name="ArtRotation" Stretch="UniformToFill"/>
                                             </Border>
                                             <TextBlock Text="COMBAT ROTATION" FontWeight="Bold" FontSize="12" Foreground="#7FB2D9" VerticalAlignment="Center"/>
