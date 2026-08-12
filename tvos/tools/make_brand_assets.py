@@ -117,7 +117,11 @@ def imagestack(path, base_size, marketing=False):
         (1, base_size),
         (2, (base_size[0] * 2, base_size[1] * 2)),
     ]
-    idiom = "tv-marketing" if marketing else "tv"
+    # ALWAYS "tv" — including the 1280x768 App Store stack. Apple's own catalogs use "tv"
+    # here; "tv-marketing" makes actool file those renditions under idiom "marketing", and
+    # the App Store validator then reports "Missing App Store Icon" (error 90471) even
+    # though the image is plainly in the bundle.
+    idiom = "tv"
     for name, fn in (("Front", layer_front), ("Middle", layer_middle), ("Back", layer_back)):
         layer_dir = os.path.join(path, f"{name}.imagestacklayer")
         content = os.path.join(layer_dir, "Content.imageset")
@@ -170,7 +174,7 @@ def main():
     write_json(os.path.join(BRAND, "Contents.json"), {
         "assets": [
             {"filename": "App Icon.imagestack", "idiom": "tv", "role": "primary-app-icon", "size": "400x240"},
-            {"filename": "App Icon - App Store.imagestack", "idiom": "tv-marketing",
+            {"filename": "App Icon - App Store.imagestack", "idiom": "tv",
              "role": "primary-app-icon", "size": "1280x768"},
             {"filename": "Top Shelf Image Wide.imageset", "idiom": "tv",
              "role": "top-shelf-image-wide", "size": "2320x720"},
