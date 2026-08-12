@@ -212,6 +212,25 @@ jobs:
           brew install xcodegen
           xcodegen generate --spec project.yml
 
+      - name: Compare against Xcode's own tvOS template
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          # Ground truth: Xcode ships the canonical tvOS asset catalog in its project
+          # templates. Diffing ours against Apple's is faster than guessing what the
+          # App Store validator wants.
+          TPL="$(find /Applications/Xcode*.app/Contents/Developer/Library/Xcode/Templates -type d -name '*.brandassets' 2>/dev/null | head -1)"
+          echo "template brandassets: ${TPL:-<none found>}"
+          if [ -n "${TPL:-}" ]; then
+            find "$TPL" -name Contents.json | while read -r f; do
+              echo "--- ${f#$TPL/} ---"; cat "$f"; echo
+            done
+          fi
+          echo "=== ours ==="
+          find EQAvatarTV/Assets.xcassets -name Contents.json | while read -r f; do
+            echo "--- $f ---"; cat "$f"; echo
+          done
+
       - name: Install signing assets
         env:
           P12: ${{ secrets.IOS_DIST_P12_BASE64 }}
