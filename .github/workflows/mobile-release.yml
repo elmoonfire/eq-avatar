@@ -285,33 +285,33 @@ jobs:
             -exportOptionsPlist ExportOptions.plist
 
       - name: Inspect the built app icons
+        # Diagnostics only — never fail the job over a grep that finds nothing.
+        continue-on-error: true
         run: |
-          set -euo pipefail
-          # App Store Connect rejected an earlier build with "Missing App Store Icon"
-          # (90471) while actool reported success, so verify what actually landed in the
-          # bundle instead of trusting the build log.
-          echo "--- ASSETCATALOG settings that reached the generated project ---"
-          grep -o 'ASSETCATALOG_COMPILER_[A-Z_]* = [^;]*;' EQAvatarTV.xcodeproj/project.pbxproj | sort -u || true
-
+          set -uo pipefail
           IPA="$(find "$RUNNER_TEMP/export" -name '*.ipa' | head -1)"
           rm -rf "$RUNNER_TEMP/unz" && mkdir -p "$RUNNER_TEMP/unz"
           unzip -q -o "$IPA" -d "$RUNNER_TEMP/unz"
           APP="$(find "$RUNNER_TEMP/unz/Payload" -maxdepth 1 -name '*.app' | head -1)"
-          echo "--- app bundle: $APP ---"
-          ls -la "$APP" | head -20
 
-          echo "--- icon keys in Info.plist ---"
-          /usr/libexec/PlistBuddy -c 'Print' "$APP/Info.plist" | grep -i -A6 'icon' || echo '(no icon keys!)'
+          echo "=== FULL Info.plist (platform + device family decide which icon rules Apple applies) ==="
+          /usr/libexec/PlistBuddy -c 'Print' "$APP/Info.plist" || true
 
-          echo "--- app-icon entries inside Assets.car ---"
-          if [ -f "$APP/Assets.car" ]; then
-            xcrun assetutil --info "$APP/Assets.car" > "$RUNNER_TEMP/assets.json" 2>/dev/null || true
-            grep -o '"Name" : "[^"]*"' "$RUNNER_TEMP/assets.json" | sort -u | head -30
-            echo "--- roles present ---"
-            grep -o '"Role" : "[^"]*"' "$RUNNER_TEMP/assets.json" | sort | uniq -c
-          else
-            echo '(no Assets.car in the bundle!)'
-          fi
+          echo "=== app-icon asset metadata (idiom / subtype / scale / role) ==="
+          xcrun assetutil --info "$APP/Assets.car" > "$RUNNER_TEMP/assets.json" 2>/dev/null || true
+          python3 - "$RUNNER_TEMP/assets.json" <<'PYEOF' || true
+          import json, sys
+          data = json.load(open(sys.argv[1]))
+          for e in data:
+              if not isinstance(e, dict):
+                  continue
+              name = e.get("Name", "")
+              if "Icon" in name or "Shelf" in name:
+                  keep = {k: v for k, v in e.items()
+                          if k in ("Name","Idiom","Subtype","Scale","SizeOnDisk","RenditionName",
+                                   "AssetType","Role","Appearance","PixelWidth","PixelHeight")}
+                  print(json.dumps(keep, sort_keys=True))
+          PYEOF
 
       - name: Upload to TestFlight
         env:

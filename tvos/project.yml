@@ -29,10 +29,6 @@ targets:
         PRODUCT_NAME: EQ Avatar
         INFOPLIST_FILE: EQAvatarTV/Info.plist
         ASSETCATALOG_COMPILER_APPICON_NAME: "App Icon & Top Shelf Image"
-        # Without this, the 1280x768 "App Icon - App Store" layer stack is compiled but
-        # NOT embedded in the .app, and App Store Connect rejects the upload with
-        # "Missing Image Asset ... App Store Icon" (error 90471).
-        ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS: YES
         CODE_SIGN_STYLE: Manual
       configs:
         Release:
