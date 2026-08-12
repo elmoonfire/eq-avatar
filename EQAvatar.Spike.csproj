@@ -20,6 +20,13 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <!-- The game's own animated class emblems, lifted from the client's A_ClassAnim01..16 and
+         laid into one horizontal strip per class. Embedded rather than served from the hub:
+         class art is fixed game data, and the loadout menu should not need the network to draw. -->
+    <Resource Include="assets\class\*.png" />
+    <Resource Include="assets\class\class-anims.json" />
+  </ItemGroup>
+  <ItemGroup>
     <!-- The rescue tool is its own tiny project — keep its sources out of the app build. -->
     <Compile Remove="Rescue\**" />
     <None Remove="Rescue\**" />

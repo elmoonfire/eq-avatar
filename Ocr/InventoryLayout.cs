@@ -21,6 +21,12 @@ namespace EQAvatar.Spike.Ocr;
 /// declared width therefore captures the neighbouring glyph — and a clipped "/" OCRs as a "1",
 /// silently turning 257 into 2571. Every field below carries the exact span it can be read from
 /// without touching anything else.
+///
+/// A marker only blocks a read if it actually DRAWS something. <c>IWS_HastePercent</c> is a
+/// 15-wide label with EMPTY text sitting at x=145, exactly on top of where the right-aligned
+/// haste value is drawn in its 95..160 box (the "%" the user sees is part of the row's own
+/// "Attack Speed %" caption). Treating it as a divider clipped the value away entirely and
+/// Attack Speed read as nothing at all. It is the only empty-text marker in the grid.
 /// </summary>
 public static class InventoryLayout
 {
@@ -52,7 +58,7 @@ public static class InventoryLayout
         new(3, "End", "end", new Field[]{ new("end", 0, 58, 55, 58, 113), new("end", 1, 120, 55, 120, 175) }),
         new(4, "AC", "ac", new Field[]{ new("ac", 0, 30, 55, 30, 85), new("ac", 1, 92, 30, 92, 122), new("ac", 2, 127, 55, 127, 182) }),
         new(5, "Attack", "attack", new Field[]{ new("attack", 0, 65, 55, 65, 120), new("attack", 1, 127, 55, 127, 182) }),
-        new(6, "Attack Speed %", "attack speed", new Field[]{ new("attack speed", 0, 95, 65, 95, 145) }),
+        new(6, "Attack Speed %", "attack speed", new Field[]{ new("attack speed", 0, 95, 65, 95, 160) }),
         new(7, "Velocity", "velocity", new Field[]{ new("velocity", 0, 95, 65, 95, 160) }),
         new(8, "HP Regen", "hp regen", new Field[]{ new("hp regen", 0, 85, 75, 85, 160) }),
         new(9, "Mana Regen", "mana regen", new Field[]{ new("mana regen", 0, 85, 75, 85, 160) }),

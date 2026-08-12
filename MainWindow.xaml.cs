@@ -297,6 +297,7 @@ public partial class MainWindow : Window
         if (LicCharText != null)
             LicCharText.Text = charLine.Length > 0 ? charLine : "— set up on the Profile page";
         UpdateProfilePanel();
+        RefreshLoadoutUi();               // loadout line + hover menu; no-op until one is recorded
     }
 
     /// <summary>Brighter sibling of each tier's fill — the pill's rim light.</summary>
@@ -1186,7 +1187,8 @@ public partial class MainWindow : Window
             $"STR {Stat(snap, "strength")}  STA {Stat(snap, "stamina")}  AGI {Stat(snap, "agility")}  DEX {Stat(snap, "dexterity")}  " +
             $"WIS {Stat(snap, "wisdom")}  INT {Stat(snap, "intelligence")}  CHA {Stat(snap, "charisma")}\n" +
             $"MR {Stat(snap, "sv magic")}  FR {Stat(snap, "sv fire")}  CR {Stat(snap, "sv cold")}  " +
-            $"DR {Stat(snap, "sv disease")}  PR {Stat(snap, "sv poison")}  VR {Stat(snap, "sv void")}   Coin {coins}";
+            $"DR {Stat(snap, "sv disease")}  PR {Stat(snap, "sv poison")}  VR {Stat(snap, "sv void")}\n" +
+            $"Weight {Pair(snap, "weight")}   Worn {Stat(snap, "weight worn")}   Coin {coins}";
         OcrSendBtn.IsEnabled = snap.Fields.ContainsKey("hp");
 
         // The sheet the game just showed us is the most trustworthy character data there is, so
@@ -1196,6 +1198,7 @@ public partial class MainWindow : Window
         // survives a fresh read of a level 16 PAL/MNK/ENC loadout.
         if (snap.Level is not null || snap.Classes is not null || snap.Name is not null)
         {
+            RecordLoadout(snap);          // promotes this class combination to the current loadout
             ApplyLicensingFields();
             _settings.Save();
             UpdateChip();                 // repaints the title-bar bio and the Profile page
