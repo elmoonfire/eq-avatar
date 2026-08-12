@@ -32,15 +32,17 @@ public sealed class SplashWindow : Window
         var img = new Image
         {
             Stretch = Stretch.Uniform,
-            MaxWidth = 560, MaxHeight = 560,
+            Margin = new Thickness(70),
             HorizontalAlignment = HorizontalAlignment.Center,
             VerticalAlignment = VerticalAlignment.Center,
-            Effect = new DropShadowEffect { Color = Color.FromRgb(0x4F, 0xC3, 0xF7), BlurRadius = 60, ShadowDepth = 0, Opacity = 0.55 },
+            Effect = new DropShadowEffect { Color = Color.FromRgb(0x4F, 0xC3, 0xF7), BlurRadius = 70, ShadowDepth = 0, Opacity = 0.6 },
         };
-        try { img.Source = new BitmapImage(new Uri("pack://application:,,,/assets/mascot.jpg")); }
+        // The ROBOT — the app's own icon — filling the window as it fades into the app.
+        try { img.Source = new BitmapImage(new Uri("pack://application:,,,/assets/eqavatar-512.png")); }
         catch { /* no art, no splash */ }
 
-        var veil = new Grid { Background = new SolidColorBrush(Color.FromArgb(0xB8, 0x06, 0x07, 0x0B)) };
+        // Fully opaque veil: nothing of the app leaks through until the robot fades out.
+        var veil = new Grid { Background = new SolidColorBrush(Color.FromRgb(0x06, 0x07, 0x0B)) };
         veil.Children.Add(img);
         Content = veil;
         Opacity = 0;

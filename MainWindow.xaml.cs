@@ -61,7 +61,7 @@ public partial class MainWindow : Window
     private static readonly string[] Panels =
     {
         "PanelHome", "PanelLog", "PanelInput", "PanelMaps", "PanelData", "PanelSessions", "PanelCombat", "PanelGrind", "PanelFollower",
-        "PanelLogin", "PanelMouse", "PanelLicensing", "PanelSettings"
+        "PanelLogin", "PanelMouse", "PanelProfile", "PanelLicensing", "PanelSettings"
     };
     private static readonly string[] EqClasses =
     {
@@ -106,6 +106,13 @@ public partial class MainWindow : Window
     {
         InitializeComponent();
         Diag.BotLog.Init(AppSettings.AppVersion);
+        // Remember the window between runs (0.9.21) — no more resizing every launch.
+        if (_settings.WindowWidth >= 600 && _settings.WindowHeight >= 400)
+        {
+            Width = Math.Min(_settings.WindowWidth, SystemParameters.WorkArea.Width);
+            Height = Math.Min(_settings.WindowHeight, SystemParameters.WorkArea.Height);
+        }
+        if (_settings.WindowMaximized) WindowState = WindowState.Maximized;
         Loaded += (_, _) => OnLoadedInit();
         Loaded += (_, _) => { try { new Ui.SplashWindow(this).Show(); } catch { /* art missing = no splash */ } };
         SourceInitialized += OnSourceInitialized;
@@ -161,7 +168,9 @@ public partial class MainWindow : Window
 
     private void TitleClose_Click(object sender, RoutedEventArgs e) => Close();
 
-    private void Chip_Click(object sender, MouseButtonEventArgs e) { if (_ready) NavLicensing.IsChecked = true; }
+    private void Chip_Click(object sender, MouseButtonEventArgs e) { if (_ready) NavProfile.IsChecked = true; }
+    private void ChipTier_Click(object sender, MouseButtonEventArgs e)
+    { if (_ready) NavLicensing.IsChecked = true; e.Handled = true; }
 
     private void Nav_Checked(object sender, RoutedEventArgs e)
     {
@@ -176,6 +185,7 @@ public partial class MainWindow : Window
                 el.Visibility = p == name ? Visibility.Visible : Visibility.Collapsed;
         if (name == "PanelHome") RefreshHome();
         if (name == "PanelGrind") { InitArtUi(); AutoTargetEq(); }
+        if (name == "PanelProfile") UpdateProfilePanel();
         if (name == "PanelData") EnsureDataLoaded();
         if (name == "PanelSessions") RefreshSessions();
         if (name == "PanelCombat") RefreshCombatPanel();
@@ -259,24 +269,42 @@ public partial class MainWindow : Window
         ChipAvatar.Text = name.Length == 0 ? "?" : name.Substring(0, 1).ToUpperInvariant();
         bool running = _grind is { Running: true } && !_grind.Stats.Paused;
         ChipDot.Fill = running ? Hex("#7CE38B") : Hex("#5D6878");
+        // Best-ever level only climbs (class changes reset the CURRENT level to 10).
+        if (_settings.HubLevel > _settings.HubMaxLevel)
+        { _settings.HubMaxLevel = _settings.HubLevel; _settings.Save(); }
+
         string cls = (_settings.HubClass ?? "").Trim();
         string charLine = cls.Length > 0
-            ? $"Lv {Math.Max(1, _settings.HubLevel)} {cls} · {(_settings.HubServer ?? "Rivervale").Trim()}"
+            ? $"{(_settings.HubServer ?? "Rivervale").Trim()} · {cls} · Lv {Math.Max(1, _settings.HubLevel)} · best {Math.Max(_settings.HubMaxLevel, Math.Max(1, _settings.HubLevel))}"
             : "";
         string? tier = (_hub.Last is { Authorized: true } l) ? l.Tier : null;
         if (tier != null)
         {
             ChipTierBadge.Visibility = Visibility.Visible;
             ChipTierBadge.Background = TierFill(tier);
+            ChipTierBadge.BorderBrush = TierBorder(tier);
             ChipTierText.Text = tier.ToUpperInvariant();
             ChipSub.Text = charLine.Length > 0 ? charLine : (_settings.HubServer ?? "Rivervale");
         }
         else
         {
             ChipTierBadge.Visibility = Visibility.Collapsed;
-            ChipSub.Text = name.Length == 0 ? "Licensing → set your name" : (charLine.Length > 0 ? charLine : "not checked in");
+            ChipSub.Text = name.Length == 0 ? "Profile → set your name" : (charLine.Length > 0 ? charLine : "not checked in");
         }
+        if (LicCharText != null)
+            LicCharText.Text = charLine.Length > 0 ? charLine : "— set up on the Profile page";
+        UpdateProfilePanel();
     }
+
+    /// <summary>Brighter sibling of each tier's fill — the pill's rim light.</summary>
+    private Brush TierBorder(string tier) => tier switch
+    {
+        "Plaid" => Hex("#F2D9FF"),
+        "Hyper" => Hex("#D9FFE3"),
+        "Ludicrous" => Hex("#FFE3B8"),
+        "LDT Clan" => Hex("#B8E8FF"),
+        _ => Hex("#3E5A78"),
+    };
 
     private Brush TierFill(string tier) => tier switch
     {
@@ -1699,6 +1727,7 @@ public partial class MainWindow : Window
         _settings.HubClass = LicClassCombo.SelectedItem as string ?? _settings.HubClass;
         _settings.HubRace = LicRaceCombo.SelectedItem as string ?? _settings.HubRace;
         if (int.TryParse(LicLevelBox.Text.Trim(), out int lv)) _settings.HubLevel = Math.Clamp(lv, 1, 120);
+        _settings.HubMaxLevel = Math.Max(_settings.HubMaxLevel, _settings.HubLevel);
         if (!string.IsNullOrWhiteSpace(LicServerBox.Text)) _settings.HubServer = LicServerBox.Text.Trim();
     }
 
@@ -1879,6 +1908,10 @@ public partial class MainWindow : Window
 
     protected override void OnClosed(EventArgs e)
     {
+        _settings.WindowMaximized = WindowState == WindowState.Maximized;
+        if (WindowState == WindowState.Normal)
+        { _settings.WindowWidth = ActualWidth; _settings.WindowHeight = ActualHeight; }
+        _settings.Save();
         _fgTimer.Stop();
         _grindTimer.Stop();
         _followerTimer.Stop();

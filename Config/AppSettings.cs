@@ -36,7 +36,7 @@ public sealed class AppSettings
     // --- Client Hub (centralized licensing + usage dashboard) ---
     /// <summary>App version reported on every check-in (shown on the dashboard). Also the version
     /// the in-app updater compares against the newest GitHub release tag.</summary>
-    public const string AppVersion = "0.9.20";
+    public const string AppVersion = "0.9.21";
 
     // --- Auto-update (GitHub) ---
     public const string UpdateOwner = "elmoonfire";
@@ -127,6 +127,15 @@ public sealed class AppSettings
     public string WaypointOrder { get; set; } = "sequence";
     /// <summary>The combat rotation text ("key,delayMs" lines) — persisted since 0.9.19.</summary>
     public string GrindRotationText { get; set; } = "";
+
+    /// <summary>Remember the window between runs (0 = first launch, use XAML defaults).</summary>
+    public double WindowWidth { get; set; }
+    public double WindowHeight { get; set; }
+    public bool WindowMaximized { get; set; }
+
+    /// <summary>Highest level ever seen on this account — class changes reset the CURRENT level
+    /// to 10, so the best-ever is tracked separately and only ever goes up.</summary>
+    public int HubMaxLevel { get; set; }
     /// <summary>Licensing panel: keep scanning for the open inventory and read it automatically.</summary>
     public bool OcrAutoScan { get; set; } = false;
 

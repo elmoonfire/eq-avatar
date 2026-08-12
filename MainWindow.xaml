@@ -124,16 +124,38 @@
                 </Grid.ColumnDefinitions>
 
                 <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center" Margin="16,0,0,0">
-                    <Ellipse Width="20" Height="20" Margin="0,0,10,0">
-                        <Ellipse.Fill>
-                            <RadialGradientBrush GradientOrigin="0.38,0.32" Center="0.38,0.32" RadiusX="0.85" RadiusY="0.85">
-                                <GradientStop Color="#EAF9FF" Offset="0"/>
-                                <GradientStop Color="#4FC3F7" Offset="0.55"/>
-                                <GradientStop Color="#17607E" Offset="1"/>
-                            </RadialGradientBrush>
-                        </Ellipse.Fill>
-                    </Ellipse>
-                    <TextBlock Text="EQ · AVATAR" FontWeight="Bold" FontSize="13" Foreground="#DBE6F2"/>
+                    <!-- the ghost, floating over the bar like on the site -->
+                    <Grid Width="48" Height="50" Margin="0,0,8,0">
+                        <Image x:Name="ArtGhostLogo" Width="64" Height="68" Stretch="Uniform" Margin="-8,-11,-8,-7"
+                               IsHitTestVisible="False" RenderTransformOrigin="0.5,0.5">
+                            <Image.Effect>
+                                <DropShadowEffect Color="#4FC3F7" BlurRadius="14" ShadowDepth="0" Opacity="0.45"/>
+                            </Image.Effect>
+                            <Image.RenderTransform>
+                                <TransformGroup>
+                                    <RotateTransform x:Name="GhostRot" Angle="-2"/>
+                                    <TranslateTransform x:Name="GhostTrans" Y="0"/>
+                                </TransformGroup>
+                            </Image.RenderTransform>
+                            <Image.Triggers>
+                                <EventTrigger RoutedEvent="Image.Loaded">
+                                    <BeginStoryboard>
+                                        <Storyboard RepeatBehavior="Forever" AutoReverse="True">
+                                            <DoubleAnimation Storyboard.TargetName="GhostTrans" Storyboard.TargetProperty="Y"
+                                                             From="-2.5" To="3.5" Duration="0:0:2.7">
+                                                <DoubleAnimation.EasingFunction><SineEase EasingMode="EaseInOut"/></DoubleAnimation.EasingFunction>
+                                            </DoubleAnimation>
+                                            <DoubleAnimation Storyboard.TargetName="GhostRot" Storyboard.TargetProperty="Angle"
+                                                             From="-2.5" To="2.5" Duration="0:0:3.6">
+                                                <DoubleAnimation.EasingFunction><SineEase EasingMode="EaseInOut"/></DoubleAnimation.EasingFunction>
+                                            </DoubleAnimation>
+                                        </Storyboard>
+                                    </BeginStoryboard>
+                                </EventTrigger>
+                            </Image.Triggers>
+                        </Image>
+                    </Grid>
+                    <TextBlock Text="EQ · AVATAR" FontWeight="Bold" FontSize="13" Foreground="#DBE6F2" VerticalAlignment="Center"/>
                 </StackPanel>
 
                 <!-- transient "settings saved" toast (fades out) -->
@@ -150,7 +172,7 @@
                 <Border Grid.Column="2" x:Name="Chip" VerticalAlignment="Center" Margin="0,0,10,0" Cursor="Hand"
                         Background="#0E1420" BorderBrush="#2F3849" BorderThickness="1" CornerRadius="30" Padding="6,4,12,4"
                         shell:WindowChrome.IsHitTestVisibleInChrome="True" MouseLeftButtonUp="Chip_Click"
-                        ToolTip="Open Licensing">
+                        ToolTip="Open your Profile">
                     <StackPanel Orientation="Horizontal">
                         <Border Width="34" Height="34" CornerRadius="17" Margin="0,0,10,0">
                             <Border.Background>
@@ -172,7 +194,9 @@
                             </StackPanel>
                             <TextBlock x:Name="ChipSub" Text="Licensing → set your name" Foreground="{StaticResource TextDim}" FontSize="11"/>
                         </StackPanel>
-                        <Border x:Name="ChipTierBadge" CornerRadius="20" Padding="9,2" Margin="10,0,0,0" VerticalAlignment="Center" Visibility="Collapsed">
+                        <Border x:Name="ChipTierBadge" CornerRadius="999" Padding="10,3" Margin="10,0,0,0" VerticalAlignment="Center"
+                                Visibility="Collapsed" BorderThickness="1.5" Cursor="Hand"
+                                MouseLeftButtonUp="ChipTier_Click" ToolTip="Subscription &amp; licensing">
                             <TextBlock x:Name="ChipTierText" Text="" FontWeight="Bold" FontSize="10" Foreground="#0B0F16"/>
                         </Border>
                     </StackPanel>
@@ -265,6 +289,9 @@
                             </RadioButton>
 
                             <TextBlock Style="{StaticResource RailCap}" Text="ACCOUNT" Margin="6,14,0,6"/>
+                            <RadioButton x:Name="NavProfile" Style="{StaticResource NavItem}" GroupName="nav" Tag="PanelProfile" Checked="Nav_Checked">
+                                <StackPanel Orientation="Horizontal"><TextBlock Style="{StaticResource NavGlyph}" Text="&#xE77B;"/><TextBlock Text="Profile"/></StackPanel>
+                            </RadioButton>
                             <RadioButton x:Name="NavLicensing" Style="{StaticResource NavItem}" GroupName="nav" Tag="PanelLicensing" Checked="Nav_Checked">
                                 <StackPanel Orientation="Horizontal"><TextBlock Style="{StaticResource NavGlyph}" Text="&#xE72E;"/><TextBlock Text="Licensing"/></StackPanel>
                             </RadioButton>
@@ -623,7 +650,7 @@
                                     BorderBrush="#2C8C55" BorderThickness="1.6" Background="#0B121E"
                                     ToolTip="Start the selected hunting mode. EQL must be the focused window.">
                                 <Grid ClipToBounds="True">
-                                    <Image x:Name="ArtStart" Stretch="UniformToFill" Height="88"/>
+                                    <Image x:Name="ArtStart" Stretch="UniformToFill" Height="132"/>
                                     <Border VerticalAlignment="Bottom" Background="#C8060B10" Padding="8,4">
                                         <TextBlock Text="▶  START" FontWeight="Bold" FontSize="13.5" Foreground="#7CE38B" HorizontalAlignment="Center"/>
                                     </Border>
@@ -633,7 +660,7 @@
                                     BorderBrush="#7A6320" BorderThickness="1.6" Background="#0B121E"
                                     ToolTip="Stop everything. F12 does the same from anywhere, even with the game focused.">
                                 <Grid ClipToBounds="True">
-                                    <Image x:Name="ArtStop" Stretch="UniformToFill" Height="88"/>
+                                    <Image x:Name="ArtStop" Stretch="UniformToFill" Height="132"/>
                                     <Border VerticalAlignment="Bottom" Background="#C8060B10" Padding="8,4">
                                         <TextBlock Text="■  STOP  (F12)" FontWeight="Bold" FontSize="13.5" Foreground="#FFCB6B" HorizontalAlignment="Center"/>
                                     </Border>
@@ -643,7 +670,7 @@
                                     BorderBrush="#26405A" BorderThickness="1.6" Background="#0B121E"
                                     ToolTip="Pack it all away — saves every setting on this page.">
                                 <Grid ClipToBounds="True">
-                                    <Image x:Name="ArtSave" Stretch="UniformToFill" Height="88"/>
+                                    <Image x:Name="ArtSave" Stretch="UniformToFill" Height="132"/>
                                     <Border VerticalAlignment="Bottom" Background="#C8060B10" Padding="8,4">
                                         <TextBlock Text="🎒  SAVE SETTINGS" FontWeight="Bold" FontSize="12.5" Foreground="#9FD8FF" HorizontalAlignment="Center"/>
                                     </Border>
@@ -657,8 +684,8 @@
                                 <!-- HUNTING MODE -->
                                 <Border Style="{StaticResource SectionCard}">
                                     <StackPanel>
-                                        <Grid ClipToBounds="True" Height="156">
-                                            <Image x:Name="ArtModes" Stretch="UniformToFill"/>
+                                        <Grid ClipToBounds="True">
+                                            <Image x:Name="ArtModes" Stretch="Uniform"/>
                                             <Border VerticalAlignment="Bottom" HorizontalAlignment="Left" Background="#C8060B10" Padding="10,4" CornerRadius="0,8,0,0">
                                                 <TextBlock Text="HUNTING MODE" FontWeight="Bold" FontSize="12" Foreground="#7FB2D9"/>
                                             </Border>
@@ -725,8 +752,8 @@
                                 <!-- TARGETING -->
                                 <Border Style="{StaticResource SectionCard}">
                                     <StackPanel>
-                                        <Grid ClipToBounds="True" Height="258">
-                                            <Image x:Name="ArtTargeting" Stretch="UniformToFill"/>
+                                        <Grid ClipToBounds="True">
+                                            <Image x:Name="ArtTargeting" Stretch="Uniform"/>
                                             <Border VerticalAlignment="Bottom" HorizontalAlignment="Left" Background="#C8060B10" Padding="10,4" CornerRadius="0,8,0,0">
                                                 <TextBlock Text="TARGETING — STANCE" FontWeight="Bold" FontSize="12" Foreground="#7FB2D9"/>
                                             </Border>
@@ -778,8 +805,8 @@
                                 <!-- TETHER -->
                                 <Border Style="{StaticResource SectionCard}">
                                     <StackPanel>
-                                        <Grid ClipToBounds="True" Height="240">
-                                            <Image x:Name="ArtTether" Stretch="UniformToFill"/>
+                                        <Grid ClipToBounds="True">
+                                            <Image x:Name="ArtTether" Stretch="Uniform"/>
                                             <Border VerticalAlignment="Bottom" HorizontalAlignment="Left" Background="#C8060B10" Padding="10,4" CornerRadius="0,8,0,0">
                                                 <StackPanel Orientation="Horizontal">
                                                     <TextBlock Text="TETHER" FontWeight="Bold" FontSize="12" Foreground="#7FB2D9" VerticalAlignment="Center"/>
@@ -808,7 +835,7 @@
                                 <Expander IsExpanded="False" Foreground="{StaticResource Text}" Margin="0,0,0,10">
                                     <Expander.Header>
                                         <StackPanel Orientation="Horizontal">
-                                            <Border Width="240" Height="88" CornerRadius="7" ClipToBounds="True" Margin="0,0,10,0">
+                                            <Border Width="480" Height="176" CornerRadius="7" ClipToBounds="True" Margin="0,0,10,0">
                                                 <Image x:Name="ArtSettings" Stretch="UniformToFill"/>
                                             </Border>
                                             <TextBlock Text="GRIND SETTINGS" FontWeight="Bold" FontSize="12" Foreground="#7FB2D9" VerticalAlignment="Center"/>
@@ -856,7 +883,7 @@
                                 <Expander IsExpanded="False" Foreground="{StaticResource Text}" Margin="0,0,0,10">
                                     <Expander.Header>
                                         <StackPanel Orientation="Horizontal">
-                                            <Border Width="240" Height="88" CornerRadius="7" ClipToBounds="True" Margin="0,0,10,0">
+                                            <Border Width="480" Height="176" CornerRadius="7" ClipToBounds="True" Margin="0,0,10,0">
                                                 <Image x:Name="ArtCompass" Stretch="UniformToFill"/>
                                             </Border>
                                             <TextBlock Text="COMPASS" FontWeight="Bold" FontSize="12" Foreground="#7FB2D9" VerticalAlignment="Center"/>
@@ -880,7 +907,7 @@
                                 <Expander x:Name="RotationExpander" IsExpanded="False" Foreground="{StaticResource Text}" Margin="0,0,0,10">
                                     <Expander.Header>
                                         <StackPanel Orientation="Horizontal">
-                                            <Border Width="240" Height="88" CornerRadius="7" ClipToBounds="True" Margin="0,0,10,0">
+                                            <Border Width="480" Height="176" CornerRadius="7" ClipToBounds="True" Margin="0,0,10,0">
                                                 <Image x:Name="ArtRotation" Stretch="UniformToFill"/>
                                             </Border>
                                             <TextBlock Text="COMBAT ROTATION" FontWeight="Bold" FontSize="12" Foreground="#7FB2D9" VerticalAlignment="Center"/>
@@ -1440,15 +1467,9 @@
                                        FontFamily="Consolas" FontSize="11"/>
 
                             <TextBlock Grid.Row="3" Grid.Column="0" Text="Character" VerticalAlignment="Center" Margin="0,0,0,6"/>
-                            <WrapPanel Grid.Row="3" Grid.Column="1" Grid.ColumnSpan="3" Margin="0,0,0,6">
-                                <ComboBox x:Name="LicClassCombo" Width="150" VerticalAlignment="Center" Margin="0,0,8,4"
-                                          ToolTip="Your character's class — drives the profile page stats and color."/>
-                                <TextBlock Text="Lv" VerticalAlignment="Center" Foreground="{StaticResource TextDim}" Margin="0,0,4,4"/>
-                                <TextBox x:Name="LicLevelBox" Text="1" Width="46" VerticalAlignment="Center" Margin="0,0,12,4"/>
-                                <ComboBox x:Name="LicRaceCombo" Width="130" VerticalAlignment="Center" Margin="0,0,8,4"/>
-                                <TextBlock Text="Server" VerticalAlignment="Center" Foreground="{StaticResource TextDim}" Margin="0,0,4,4"/>
-                                <TextBox x:Name="LicServerBox" Text="Rivervale" Width="120" VerticalAlignment="Center" Margin="0,0,0,4"/>
-                            </WrapPanel>
+                            <TextBlock Grid.Row="3" Grid.Column="1" Grid.ColumnSpan="3" x:Name="LicCharText" Margin="0,0,0,6"
+                                       VerticalAlignment="Center" Foreground="{StaticResource Text}" FontFamily="Consolas" FontSize="12"
+                                       Text="— set up on the Profile page"/>
                         </Grid>
 
                         <WrapPanel Grid.Row="2" Margin="0,4,0,10">
@@ -1488,27 +1509,6 @@
                             </Grid>
                         </Border>
 
-                        <!-- Character Sheet OCR: read the in-game Inventory window, no manual entry -->
-                        <Border Grid.Row="4" Background="{StaticResource Panel}" BorderBrush="{StaticResource AccentDim}"
-                                BorderThickness="1" CornerRadius="8" Padding="14" Margin="0,0,0,10">
-                            <StackPanel>
-                                <TextBlock Text="CHARACTER SHEET — READ FROM THE GAME" FontSize="11" Foreground="{StaticResource TextDim}"/>
-                                <TextBlock TextWrapping="Wrap" Foreground="{StaticResource TextDim}" FontSize="11.5" Margin="0,4,0,8"
-                                           Text="Open your Inventory in-game (Equipment tab), leave it visible, and press Read. The app captures the game window, finds the sheet by its own labels, and reads vitals, attributes, resists, regens, weight, coin, and your name/level/class — the real numbers, straight off the screen. Then send them to your web profile."/>
-                                <WrapPanel>
-                                    <Button Content="Read inventory now" Click="OcrRead_Click" FontWeight="SemiBold" Margin="0,0,8,6"/>
-                                    <CheckBox x:Name="OcrAutoBox" Content="auto-scan" Click="OcrAuto_Click" VerticalAlignment="Center" Margin="0,0,8,6"
-                                              Foreground="{StaticResource Text}"
-                                              ToolTip="Keeps watching the game every few seconds and reads the sheet automatically whenever the inventory is open — no button pressing. Sends to your profile at most every 10 minutes."/>
-                                    <Button x:Name="OcrSendBtn" Content="Send to profile" Click="OcrSend_Click" IsEnabled="False" Margin="0,0,8,6"/>
-                                    <TextBlock x:Name="OcrStatus" Text="no read yet" VerticalAlignment="Center"
-                                               Foreground="{StaticResource TextDim}" FontSize="11.5" Margin="0,0,0,6"/>
-                                </WrapPanel>
-                                <TextBlock x:Name="OcrSummary" FontFamily="Consolas" FontSize="11.5" Foreground="{StaticResource Text}"
-                                           TextWrapping="Wrap" Margin="0,2,0,0" Text=""/>
-                            </StackPanel>
-                        </Border>
-
                         <Border Grid.Row="5" Style="{StaticResource Card}" Margin="0,0,0,10">
                             <StackPanel>
                                 <Grid>
@@ -1538,6 +1538,80 @@
                         <TextBox x:Name="LicLog" Grid.Row="6" IsReadOnly="True"
                                  Background="#0C0F13" Foreground="{StaticResource Good}" FontFamily="Consolas" FontSize="11"
                                  VerticalScrollBarVisibility="Auto" TextWrapping="Wrap"/>
+                    </Grid>
+
+                    <!-- ===== PROFILE (character identity + sheet OCR) ===== -->
+                    <Grid x:Name="PanelProfile" Margin="18" Visibility="Collapsed">
+                        <ScrollViewer VerticalScrollBarVisibility="Auto">
+                            <StackPanel>
+                                <Border Background="{StaticResource Panel}" BorderBrush="{StaticResource AccentDim}"
+                                        BorderThickness="1" CornerRadius="10" Padding="16" Margin="0,0,0,10">
+                                    <StackPanel>
+                                        <Grid>
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*"/>
+                                                <ColumnDefinition Width="Auto"/>
+                                            </Grid.ColumnDefinitions>
+                                            <StackPanel>
+                                                <TextBlock x:Name="ProfName" Text="—" FontSize="22" FontWeight="Bold" Foreground="#EAF6FF"/>
+                                                <TextBlock x:Name="ProfSub" Text="set your character below" Foreground="{StaticResource TextDim}" FontSize="12.5" Margin="0,2,0,0"/>
+                                            </StackPanel>
+                                            <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                                                <Border Background="#10233A" BorderBrush="#4FC3F7" BorderThickness="1.2" CornerRadius="999" Padding="12,5" Margin="0,0,8,0">
+                                                    <StackPanel Orientation="Horizontal">
+                                                        <TextBlock Text="CURRENT " FontSize="10" Foreground="#9FD8FF" VerticalAlignment="Center"/>
+                                                        <TextBlock x:Name="ProfCurLvl" Text="Lv 1" FontSize="13" FontWeight="Bold" Foreground="#EAF6FF"
+                                                                   ToolTip="Level with your CURRENT class combination — changing classes resets this to 10."/>
+                                                    </StackPanel>
+                                                </Border>
+                                                <Border Background="#241C33" BorderBrush="#C77DFF" BorderThickness="1.2" CornerRadius="999" Padding="12,5">
+                                                    <StackPanel Orientation="Horizontal">
+                                                        <TextBlock Text="BEST " FontSize="10" Foreground="#E3C6FF" VerticalAlignment="Center"/>
+                                                        <TextBlock x:Name="ProfBestLvl" Text="Lv 1" FontSize="13" FontWeight="Bold" Foreground="#F4EAFF"
+                                                                   ToolTip="Highest level ever reached on this account — never goes down, even when a class change resets you to 10."/>
+                                                    </StackPanel>
+                                                </Border>
+                                            </StackPanel>
+                                        </Grid>
+                                        <WrapPanel Margin="0,12,0,0">
+                                            <ComboBox x:Name="LicClassCombo" Width="150" VerticalAlignment="Center" Margin="0,0,8,4"
+                                                      ToolTip="Your character's class combination — drives the web armory stats and color."/>
+                                            <TextBlock Text="Lv" VerticalAlignment="Center" Foreground="{StaticResource TextDim}" Margin="0,0,4,4"/>
+                                            <TextBox x:Name="LicLevelBox" Text="1" Width="46" VerticalAlignment="Center" Margin="0,0,12,4"/>
+                                            <ComboBox x:Name="LicRaceCombo" Width="130" VerticalAlignment="Center" Margin="0,0,8,4"/>
+                                            <TextBlock Text="Server" VerticalAlignment="Center" Foreground="{StaticResource TextDim}" Margin="0,0,4,4"/>
+                                            <TextBox x:Name="LicServerBox" Text="Rivervale" Width="120" VerticalAlignment="Center" Margin="0,0,12,4"/>
+                                            <Button Content="Save" Click="SaveLicensing_Click" Margin="0,0,8,4"/>
+                                            <Button Content="Open web armory →" Click="OpenArmory_Click" Margin="0,0,0,4"
+                                                    ToolTip="Your public character page on eqavatar.ldtlan.com."/>
+                                        </WrapPanel>
+                                        <TextBlock Foreground="{StaticResource TextDim}" FontSize="11" Margin="0,6,0,0" TextWrapping="Wrap"
+                                                   Text="These fields fill themselves from the character-sheet reads below — the app keeps them (and your best-ever level) up to date as it plays."/>
+                                    </StackPanel>
+                                </Border>
+
+                                <!-- Character Sheet OCR: read the in-game Inventory window, no manual entry -->
+                                <Border Background="{StaticResource Panel}" BorderBrush="{StaticResource AccentDim}"
+                                        BorderThickness="1" CornerRadius="8" Padding="14" Margin="0,0,0,10">
+                                    <StackPanel>
+                                        <TextBlock Text="CHARACTER SHEET — READ FROM THE GAME" FontSize="11" Foreground="{StaticResource TextDim}"/>
+                                        <TextBlock TextWrapping="Wrap" Foreground="{StaticResource TextDim}" FontSize="11.5" Margin="0,4,0,8"
+                                                   Text="Open your Inventory in-game (Equipment tab), leave it visible, and press Read. The app captures the game window, finds the sheet by its own labels, and reads vitals, attributes, resists, regens, weight, coin, and your name/level/class — the real numbers, straight off the screen. Then send them to your web profile."/>
+                                        <WrapPanel>
+                                            <Button Content="Read inventory now" Click="OcrRead_Click" FontWeight="SemiBold" Margin="0,0,8,6"/>
+                                            <CheckBox x:Name="OcrAutoBox" Content="auto-scan" Click="OcrAuto_Click" VerticalAlignment="Center" Margin="0,0,8,6"
+                                                      Foreground="{StaticResource Text}"
+                                                      ToolTip="Keeps watching the game every few seconds and reads the sheet automatically whenever the inventory is open — no button pressing. Sends to your profile at most every 10 minutes."/>
+                                            <Button x:Name="OcrSendBtn" Content="Send to profile" Click="OcrSend_Click" IsEnabled="False" Margin="0,0,8,6"/>
+                                            <TextBlock x:Name="OcrStatus" Text="no read yet" VerticalAlignment="Center"
+                                                       Foreground="{StaticResource TextDim}" FontSize="11.5" Margin="0,0,0,6"/>
+                                        </WrapPanel>
+                                        <TextBlock x:Name="OcrSummary" FontFamily="Consolas" FontSize="11.5" Foreground="{StaticResource Text}"
+                                                   TextWrapping="Wrap" Margin="0,2,0,0" Text=""/>
+                                    </StackPanel>
+                                </Border>
+                            </StackPanel>
+                        </ScrollViewer>
                     </Grid>
 
                     <!-- ===== SETTINGS ===== -->
