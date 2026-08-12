@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Reflection;
 using System.Text.Json;
 
 namespace EQAvatar.Spike.Config;
@@ -34,9 +35,33 @@ public sealed class AppSettings
     public double MouseAngleJitterDegrees { get; set; } = 6; // random launch-angle wobble
 
     // --- Client Hub (centralized licensing + usage dashboard) ---
-    /// <summary>App version reported on every check-in (shown on the dashboard). Also the version
-    /// the in-app updater compares against the newest GitHub release tag.</summary>
-    public const string AppVersion = "0.9.30";
+    /// <summary>
+    /// App version reported on every check-in (shown on the dashboard), and the version the
+    /// in-app updater compares against the release manifest.
+    ///
+    /// DERIVED FROM THE BUILD — NEVER HAND-EDITED. This was a hardcoded const, and nothing in
+    /// the release pipeline touched it: CI builds the tag, publishes the zip, then commits
+    /// latest.json with the tag's version. So shipping a release without separately remembering
+    /// to edit this one line produced a build that under-reported its own version — it saw a
+    /// newer manifest, updated, relaunched still claiming the old number, and updated again,
+    /// forever. 0.9.31 shipped exactly that way. CI now passes -p:Version=&lt;tag&gt; to publish
+    /// and this reads it back off the assembly, so the two cannot disagree.
+    /// </summary>
+    public static readonly string AppVersion = ResolveVersion();
+
+    private static string ResolveVersion()
+    {
+        Assembly asm = typeof(AppSettings).Assembly;
+        string? v = asm.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion;
+        if (string.IsNullOrWhiteSpace(v)) v = asm.GetName().Version?.ToString();
+        if (string.IsNullOrWhiteSpace(v)) return "0.0.0";
+
+        int plus = v.IndexOf('+');                 // strip SourceLink's "+<commit sha>"
+        if (plus > 0) v = v[..plus];
+        string[] parts = v.Split('.');             // "0.9.32.0" -> "0.9.32"
+        if (parts.Length == 4 && parts[3] == "0") v = string.Join('.', parts, 0, 3);
+        return v;
+    }
 
     // --- Auto-update (GitHub) ---
     public const string UpdateOwner = "elmoonfire";

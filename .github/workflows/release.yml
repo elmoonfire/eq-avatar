@@ -16,10 +16,18 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '8.0.x'
+      - name: Resolve version from tag
+        id: ver
+        shell: pwsh
+        run: |
+          $v = "${{ github.ref_name }}".TrimStart('v')
+          if ($v -notmatch '^\d+\.\d+\.\d+$') { $v = '0.0.0' }   # workflow_dispatch on a branch
+          "value=$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          Write-Host "building as $v"
       - name: Publish
-        run: dotnet publish EQAvatar.Spike.csproj -c Release -r win-x64 --self-contained false -o publish
+        run: dotnet publish EQAvatar.Spike.csproj -c Release -r win-x64 --self-contained false -p:Version=${{ steps.ver.outputs.value }} -o publish
       - name: Publish rescue tool
-        run: dotnet publish Rescue/EQAvatarRescue.csproj -c Release -r win-x64 --self-contained false -p:PublishSingleFile=true -o rescue-publish
+        run: dotnet publish Rescue/EQAvatarRescue.csproj -c Release -r win-x64 --self-contained false -p:PublishSingleFile=true -p:Version=${{ steps.ver.outputs.value }} -o rescue-publish
       - name: Zip
         shell: pwsh
         run: |
@@ -34,7 +42,7 @@ jobs:
       - name: Update manifest
         shell: pwsh
         run: |
-          $ver = "${{ github.ref_name }}".TrimStart('v')
+          $ver = "${{ steps.ver.outputs.value }}"
           $url = "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/EQAvatar.Spike.zip"
           $obj = [ordered]@{ version = $ver; url = $url; notes = "EQ Avatar $ver" }
           $obj | ConvertTo-Json | Set-Content -Path latest.json -Encoding utf8
