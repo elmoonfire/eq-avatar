@@ -1255,6 +1255,19 @@ public partial class MainWindow : Window
         (bool ok, string msg) = await _hub.SendStats(real);
         OcrStatus.Text = ok ? "profile updated ✓" : "send failed: " + Trunc(msg, 60);
         LicLogLine("[ocr] " + msg);
+
+        // Gear rides separately because it is keyed per LOADOUT — each one carries its own full
+        // 23-slot set, so equipment stored against the character alone would smear them together.
+        if (ok && s.Equipment is { } eq && s.Classes is { Length: > 0 } cls)
+        {
+            string[] classes = cls.Split('/', StringSplitOptions.RemoveEmptyEntries);
+            (bool gok, string gmsg) = await _hub.SendEquipment(
+                classes, s.Level ?? _settings.HubLevel, _settings.HubRace,
+                eq.Slots.Select(q => (q.Id, q.Name, q.Occupied, q.IconPng, q.IconHash)));
+            LicLogLine("[ocr] " + gmsg);
+            if (gok) OcrStatus.Text = $"profile + equipment updated ✓ ({eq.OccupiedCount} slots)";
+        }
+
         if (ok) ShowToast("Character sheet sent to profile");
     }
 

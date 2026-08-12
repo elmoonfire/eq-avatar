@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Net.Http;
 using System.Text;
 using System.Text.Json;
@@ -197,6 +198,64 @@ public sealed class HubClient
         }
         catch { return null; }
     }
+
+    /// <summary>
+    /// Publish the equipment the app just read off the game screen, for one loadout.
+    ///
+    /// Gear goes to its own endpoint rather than riding along with the stats check-in, because
+    /// it is keyed per LOADOUT: every EQ Legends loadout carries its own full 23-slot set, so
+    /// equipment stored against the character alone would smear three of them together. The
+    /// icons travel as base64 PNGs — the game's own 40x40 pixels, which is what makes the
+    /// armory's icons match the inventory instead of approximating it.
+    /// </summary>
+    public async Task<(bool ok, string message)> SendEquipment(
+        IReadOnlyList<string> classes, int level, string? race,
+        IEnumerable<(int Id, string Name, bool Occupied, byte[]? IconPng, string? IconHash)> slots,
+        CancellationToken ct = default)
+    {
+        if (classes.Count == 0) return (false, "no loadout to attach the gear to");
+
+        var payload = new
+        {
+            api_key  = _s.HubApiKey,
+            username = (_s.HubUsername ?? "").Trim(),
+            loadout  = new { classes, level, race = race ?? "" },
+            slots    = slots.Select(s => new
+            {
+                id = s.Id,
+                name = s.Name,
+                occupied = s.Occupied,
+                hash = s.IconHash,
+                png = s.IconPng is null ? null : Convert.ToBase64String(s.IconPng),
+            }).ToArray(),
+        };
+
+        try
+        {
+            using var req = new HttpRequestMessage(HttpMethod.Post, EquipmentUrl())
+            { Content = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json") };
+            req.Headers.TryAddWithoutValidation("X-API-KEY", _s.HubApiKey);
+            using var resp = await Http.SendAsync(req, ct);
+            string body = await resp.Content.ReadAsStringAsync(ct);
+            if (!resp.IsSuccessStatusCode) return (false, $"hub said {(int)resp.StatusCode}: {Trim(body)}");
+            using JsonDocument doc = JsonDocument.Parse(body);
+            int filled = doc.RootElement.TryGetProperty("filled", out JsonElement f) ? f.GetInt32() : 0;
+            int icons = doc.RootElement.TryGetProperty("icons", out JsonElement i) ? i.GetInt32() : 0;
+            return (true, $"equipment published — {filled} slots filled, {icons} icons stored");
+        }
+        catch (Exception ex) { return (false, "equipment upload failed: " + ex.Message); }
+    }
+
+    /// <summary>HubUrl points at the check-in endpoint (…/hub/api.php); gear lives beside it.</summary>
+    private string EquipmentUrl()
+    {
+        string url = _s.HubUrl ?? "";
+        int i = url.IndexOf("api.php", StringComparison.OrdinalIgnoreCase);
+        string root = i >= 0 ? url[..i] : (url.EndsWith("/") ? url : url + "/");
+        return root + "api/equipment.php";
+    }
+
+    private static string Trim(string s) => s.Length <= 120 ? s : s[..120];
 
     private sealed class HistoryResponse
     {
