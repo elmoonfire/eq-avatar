@@ -163,6 +163,7 @@ public partial class MainWindow
         ["run burst ms"] = $"{_settings.HuntRunMsMin}–{_settings.HuntRunMsMax}",
         ["variance %"] = _settings.RandomVariancePercent.ToString("0"),
         ["skip hard cons"] = _settings.HuntSkipHardCons ? "yes" : "no",
+        ["cast/sing only"] = _settings.GrindCastOnly ? "yes" : "no",
         ["look around"] = _settings.HuntLookAround ? "yes" : "no",
     };
 

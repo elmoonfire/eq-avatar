@@ -148,6 +148,8 @@ public sealed class HuntRole
         if (_watcher != null) { _watcher.LineRead += OnLine; _watcher.Start(fromStart: false); }
         Log?.Invoke($"HUNT started — target={_target.Display}, con={_con.Display}, move={_fwd.Display}/{_left.Display}/{_right.Display}/{_back.Display}"
                     + (_loc.IsNone ? "" : $", /loc key={_loc.Display}") + ". Keep EQ focused; F12 stops. Watch it.");
+        if (_s.GrindCastOnly)
+            Log?.Invoke("Cast/sing only — no facing turns and no closing in during a fight; unreachable targets get dropped instead.");
         _ = Task.Run(() => Loop(_cts.Token));
     }
 
@@ -168,7 +170,18 @@ public sealed class HuntRole
     {
         // Facing/range feedback + bard interrupts arrive as plain lines the parser doesn't type.
         if (raw.Contains("You cannot see your target", StringComparison.OrdinalIgnoreCase)) _cantSee = true;
-        else if (raw.Contains("too far away", StringComparison.OrdinalIgnoreCase)) _tooFar = true;
+        else if (raw.Contains("too far away", StringComparison.OrdinalIgnoreCase)
+                 || raw.Contains("out of range", StringComparison.OrdinalIgnoreCase)) _tooFar = true;
+
+        // Spell/song damage is attributed to the VICTIM ("a rat was hit by non-melee for 42 points
+        // of damage."), so the melee "did one of OUR lines print?" test never fires for a caster or
+        // a bard. Count these as our output too — a resist still proves the cast reached the mob,
+        // which is exactly what the facing/reach logic wants to know.
+        if (raw.Contains("hit by non-melee", StringComparison.OrdinalIgnoreCase)
+            || raw.Contains("resisted your", StringComparison.OrdinalIgnoreCase)
+            || raw.Contains("Your target resisted", StringComparison.OrdinalIgnoreCase))
+            Interlocked.Increment(ref _ourSwings);
+
         if (_s.GrindBardMode && _singing && LogEventParser.MelodyStopped(raw))
         { _singing = false; Log?.Invoke("Melody stopped (log) — will recast."); }
         if (_s.LevEnabled && (raw.Contains("float gently to the ground", StringComparison.OrdinalIgnoreCase)
@@ -570,7 +583,9 @@ public sealed class HuntRole
                 Stats.State = "fighting"; Stats.Fights++;
                 _mobDead = false; _cantSee = false; _tooFar = false;
                 DateTime fightStart = DateTime.Now, lastOut = DateTime.Now;
-                int i = 0, sweep = 0, swingsSeen = _ourSwings;
+                int i = 0, sweep = 0, swingsSeen = _ourSwings, unreachable = 0;
+                bool castOnly = _s.GrindCastOnly;
+                if (castOnly) Stats.State = "fighting — casting";
                 while (!ct.IsCancellationRequested && !_mobDead && !_selfDead)
                 {
                     if (!_sink.Ready) { await Task.Delay(300, ct); continue; }
@@ -601,21 +616,46 @@ public sealed class HuntRole
                     // FACING FIX: if our hits are landing, all good. If the log says we can't see
                     // the target / it's out of reach — or nothing lands for a few seconds — turn in
                     // a widening sweep (and close distance) until our swings start printing.
-                    if (_ourSwings != swingsSeen) { swingsSeen = _ourSwings; sweep = 0; lastOut = DateTime.Now; }
-                    if (_tooFar)
-                    { _tooFar = false; Stats.State = "fighting — closing in"; await HoldKey(_fwd, Vary(430), ct); }
-                    // Bard songs tick slower than melee swings — give them a longer quiet window.
-                    double noOut = _s.GrindBardMode ? 6.5 : 3.2;
-                    if (_cantSee || (DateTime.Now - lastOut).TotalSeconds > noOut)
+                    if (_ourSwings != swingsSeen) { swingsSeen = _ourSwings; sweep = 0; unreachable = 0; lastOut = DateTime.Now; }
+
+                    if (castOnly)
                     {
-                        bool sawIt = _cantSee; _cantSee = false;
-                        double[] scan = { 60, -90, 120, -150, 180, 180 };
-                        double a = scan[Math.Min(sweep, scan.Length - 1)]; sweep++;
-                        Stats.State = "fighting — facing target";
-                        Log?.Invoke((sawIt ? "Can't see the target" : "No hits landing") + $" — turning {a:0}° to face it.");
-                        await TurnBy(a, ct);
-                        lastOut = DateTime.Now;
-                        Stats.State = "fighting";
+                        // CAST / SING ONLY: spells and songs don't care which way we're pointing, so
+                        // every melee correction is dead time — no facing sweeps, no closing bursts.
+                        // The rotation just keeps firing. When EQ says the target is out of reach or
+                        // out of sight we don't fix it, we drop it: the seek phase will walk us to a
+                        // mob we can actually hit, which is faster than pivoting at this one.
+                        bool blocked = _cantSee || _tooFar;
+                        _cantSee = false; _tooFar = false;
+                        if (blocked) unreachable++;
+                        double giveUp = Math.Max(3, _s.GrindCastGiveUpSeconds);
+                        bool quiet = (DateTime.Now - lastOut).TotalSeconds > giveUp;
+                        if (unreachable >= 2 || quiet)
+                        {
+                            Log?.Invoke(unreachable >= 2
+                                ? "Cast-only: target is out of range or line of sight — dropping it and finding another."
+                                : $"Cast-only: nothing landed in {giveUp:0}s — dropping this target.");
+                            Stats.Skipped++;
+                            break;
+                        }
+                    }
+                    else
+                    {
+                        if (_tooFar)
+                        { _tooFar = false; Stats.State = "fighting — closing in"; await HoldKey(_fwd, Vary(430), ct); }
+                        // Bard songs tick slower than melee swings — give them a longer quiet window.
+                        double noOut = _s.GrindBardMode ? 6.5 : 3.2;
+                        if (_cantSee || (DateTime.Now - lastOut).TotalSeconds > noOut)
+                        {
+                            bool sawIt = _cantSee; _cantSee = false;
+                            double[] scan = { 60, -90, 120, -150, 180, 180 };
+                            double a = scan[Math.Min(sweep, scan.Length - 1)]; sweep++;
+                            Stats.State = "fighting — facing target";
+                            Log?.Invoke((sawIt ? "Can't see the target" : "No hits landing") + $" — turning {a:0}° to face it.");
+                            await TurnBy(a, ct);
+                            lastOut = DateTime.Now;
+                            Stats.State = "fighting";
+                        }
                     }
                 }
                 if (_mobDead) { Stats.Kills++; Log?.Invoke($"Kill #{Stats.Kills}."); }

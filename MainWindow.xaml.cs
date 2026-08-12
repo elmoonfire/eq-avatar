@@ -718,6 +718,8 @@ public partial class MainWindow : Window
             GrindLogLine("Rotation-only mode needs at least one 'key,delayMs' line.");
             return;
         }
+        if (CastOnlyBox.IsChecked == true)
+            GrindLogLine("Cast-only is already implied by rotation-only — there is no movement or facing to skip here.");
         _grind = new GrindRole(sink, rotation, StopOnDeathBox.IsChecked == true, _currentLog, _settings);
         _grind.Log += m => Dispatcher.Invoke(() => GrindLogLine(m));
         _grind.Stopped += () => Dispatcher.Invoke(() => { _grindTimer.Stop(); UpdateGrindStats(); EndRoleSession(); });
@@ -747,6 +749,7 @@ public partial class MainWindow : Window
         _settings.GrindRotationText = GrindRotation.Text;
         _settings.GrindTargetMobs = TargetMobsBox.Text;
         _settings.GrindBardMode = BardBox.IsChecked == true;
+        _settings.GrindCastOnly = CastOnlyBox.IsChecked == true;
         _settings.LevEnabled = LevBox.IsChecked == true;
         _settings.LevCastKey = LevKeyBox.Text.Trim();
         if (!string.IsNullOrWhiteSpace(LevNameBox.Text)) _settings.LevBuffName = LevNameBox.Text.Trim();
@@ -774,6 +777,7 @@ public partial class MainWindow : Window
         GrindRotation.Text = _settings.GrindRotationText ?? "";
         TargetMobsBox.Text = _settings.GrindTargetMobs;
         BardBox.IsChecked = _settings.GrindBardMode;
+        CastOnlyBox.IsChecked = _settings.GrindCastOnly;
         LevBox.IsChecked = _settings.LevEnabled;
         LevKeyBox.Text = _settings.LevCastKey;
         LevNameBox.Text = _settings.LevBuffName;

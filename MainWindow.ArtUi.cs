@@ -75,6 +75,10 @@ public partial class MainWindow
             : ModeTileWp.IsChecked == true ? 3 : 0;
     }
 
+    /// <summary>Cast/sing-only is orthogonal to the mode tiles — it only changes what happens
+    /// once a fight starts, so all this does is keep the rotation caption honest.</summary>
+    private void CastOnly_Click(object sender, RoutedEventArgs e) => RotationText_Changed(this, null!);
+
     // ---------------- stances ----------------
 
     private void Stance_Checked(object sender, RoutedEventArgs e)
@@ -127,7 +131,8 @@ public partial class MainWindow
         int lines = 0;
         foreach (string l in GrindRotation.Text.Split('\n'))
             if (l.Trim() is { Length: > 0 } t && !t.StartsWith("#")) lines++;
-        RotationSummary.Text = $"{lines} line(s)" + (BardBox?.IsChecked == true ? " · bard melody" : "");
+        RotationSummary.Text = $"{lines} line(s)" + (BardBox?.IsChecked == true ? " · bard melody" : "")
+                             + (CastOnlyBox?.IsChecked == true ? " · cast/sing only" : "");
     }
 
     private void GrindData_Click(object sender, RoutedEventArgs e) => NavData.IsChecked = true;

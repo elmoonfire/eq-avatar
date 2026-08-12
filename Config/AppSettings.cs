@@ -128,6 +128,15 @@ public sealed class AppSettings
     /// <summary>Bard melody mode: cast the first rotation line once and let it sing; recast ONLY
     /// when the log shows the melody stopped (stun, fizzled note, song ends).</summary>
     public bool GrindBardMode { get; set; } = false;
+    /// <summary>Cast/sing-only mode: the character fights purely with spells and songs, so the Hunt
+    /// engine drops every melee correction — it never turns to face the mob and never steps closer
+    /// mid-fight. All of that time goes into the rotation instead. When the log says the target is
+    /// out of range or out of line of sight the fight is abandoned (see
+    /// <see cref="GrindCastGiveUpSeconds"/>) and the seek phase goes and finds a reachable one.</summary>
+    public bool GrindCastOnly { get; set; } = false;
+    /// <summary>Cast/sing-only: seconds with nothing landing on the target before we give up on it.
+    /// Two explicit "out of range / can't see" log lines abandon it sooner.</summary>
+    public double GrindCastGiveUpSeconds { get; set; } = 8;
     /// <summary>Mouselook calibration: horizontal pixels of right-mouse drag per degree of turn.
     /// Self-tunes from measured /loc headings while the tether homing runs.</summary>
     public double HuntTurnPxPerDegree { get; set; } = 3.5;

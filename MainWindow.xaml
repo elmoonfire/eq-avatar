@@ -749,6 +749,9 @@
                                             <CheckBox x:Name="RotOnlyBox" Content="rotation only (no movement)" Click="RotOnly_Click" VerticalAlignment="Center" Margin="0,0,10,4"
                                                       Foreground="{StaticResource TextDim}"
                                                       ToolTip="Ignore the mode tiles and just cycle the combat rotation in place — the original grind."/>
+                                            <CheckBox x:Name="CastOnlyBox" Content="cast spell/song only" Click="CastOnly_Click" VerticalAlignment="Center" Margin="0,0,10,4"
+                                                      Foreground="{StaticResource TextDim}"
+                                                      ToolTip="Caster / bard mode: fights with spells and songs only. It never turns to face the mob and never steps closer mid-fight — all that time goes into the rotation instead. If EQ says the target is out of range or out of sight, it drops that target and hunts a reachable one."/>
                                             <CheckBox x:Name="StopOnDeathBox" Content="stop on death" IsChecked="True" VerticalAlignment="Center" Margin="0,0,4,4"
                                                       Foreground="{StaticResource TextDim}"/>
                                         </WrapPanel>
