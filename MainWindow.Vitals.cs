@@ -98,13 +98,69 @@ public partial class MainWindow
         UpdateVitalsStatus();
     }
 
+    // ---------------- target window ----------------
+
+    private void TargetPick_Click(object sender, RoutedEventArgs e)
+    {
+        using System.Drawing.Bitmap? frame = VitalsSvc.CaptureFrame();
+        if (frame is null)
+        { GrindLogLine("No game window to capture — Target EverQuest first (and keep it on screen)."); return; }
+
+        var dlg = new CompassPickWindow(frame,
+            "Pick the target window",
+            "Drag a box over your TARGET window — frame, name and health bar together, not just the bar. "
+            + "You must have a mob targeted right now: this is the picture she'll compare against.")
+        { Owner = this };
+        if (dlg.ShowDialog() != true) { UpdateTargetStatus(); return; }
+
+        if (!VitalsSvc.SetTargetBox(dlg.NX, dlg.NY, dlg.NW, dlg.NH, frame))
+        { GrindLogLine("Couldn't read the target window — try again."); UpdateTargetStatus(); return; }
+
+        double m = VitalsSvc.TargetMatch();
+        GrindLogLine($"Target window saved — matching {(m < 0 ? "?" : $"{m * 100:0}")}% with your target up. "
+                   + $"Now CLEAR your target and press 'Test target read': it should fall well below {_settings.TargetMatchPercent}%. "
+                   + "If it doesn't, your UI keeps an empty target window on screen — put the match % in the gap between the two readings.");
+        UpdateTargetStatus();
+    }
+
+    private void TargetTest_Click(object sender, RoutedEventArgs e)
+    {
+        if (!VitalsSvc.HasTargetBox) { GrindLogLine("Pick the target window first (with a mob targeted)."); return; }
+        ApplyVitalsFields();                                  // honour a threshold typed but not yet saved
+        double m = VitalsSvc.TargetMatch();
+        // Use the SAME clamped threshold the role uses, so this verdict can never disagree with it.
+        double need = Roles.HuntRole.TargetNeed(_settings);
+        GrindLogLine(m < 0
+            ? "Couldn't read the target window — is the game on screen?"
+            : $"Target window matches {m * 100:0}% — she reads that as {(m >= need ? "TARGETED" : "nothing targeted")} "
+              + $"(threshold {need * 100:0}%).");
+        UpdateTargetStatus();
+    }
+
+    private void TargetGate_Changed(object sender, RoutedEventArgs e)
+    {
+        if (TargetStatus is null || TargetMatchBox is null) return;
+        _settings.TargetGateEnabled = TargetGateBox.IsChecked == true;
+        UpdateTargetStatus();
+    }
+
+    private void UpdateTargetStatus()
+    {
+        if (TargetStatus is null) return;
+        TargetStatus.Text = !VitalsSvc.HasTargetBox ? "not set — she'll consider to find out, as before"
+                          : _settings.TargetGateEnabled ? "set — considering only when targeted"
+                          : "set, but the gate is off";
+    }
+
     /// <summary>Read the rest-gating boxes into settings (called with the rest of ApplyHuntFields).</summary>
     private void ApplyVitalsFields()
     {
         _settings.RestGateEnabled = RestGateBox.IsChecked == true;
+        _settings.TargetGateEnabled = TargetGateBox.IsChecked == true;
         if (int.TryParse(RestHpBox.Text.Trim(), out int hp)) _settings.RestHpPercent = Math.Clamp(hp, 0, 100);
         if (int.TryParse(RestManaBox.Text.Trim(), out int mp)) _settings.RestManaPercent = Math.Clamp(mp, 0, 100);
         if (int.TryParse(RestMaxBox.Text.Trim(), out int cap)) _settings.RestMaxSeconds = Math.Clamp(cap, 5, 3600);
+        if (int.TryParse(TargetMatchBox.Text.Trim(), out int tm)) _settings.TargetMatchPercent = Math.Clamp(tm, 10, 100);
     }
 
     /// <summary>Fill the rest-gating boxes from saved settings on load.</summary>
@@ -114,6 +170,9 @@ public partial class MainWindow
         RestHpBox.Text = _settings.RestHpPercent.ToString();
         RestManaBox.Text = _settings.RestManaPercent.ToString();
         RestMaxBox.Text = _settings.RestMaxSeconds.ToString();
+        TargetGateBox.IsChecked = _settings.TargetGateEnabled;
+        TargetMatchBox.Text = _settings.TargetMatchPercent.ToString();
         UpdateVitalsStatus(live: false);
+        UpdateTargetStatus();
     }
 }

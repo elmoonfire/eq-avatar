@@ -128,6 +128,7 @@ public sealed class HuntRole
     private int _wpIndex = -1, _wpStep = 1;
     private double _wpTx, _wpTy;
     private bool _wpHave, _noPlanWarned, _noLocWarned;
+    private int _noTargetRuns;                               // consecutive passes with nothing selected
 
     private ZonePlan? CurrentPlan()
     {
@@ -569,6 +570,12 @@ public sealed class HuntRole
                     if (!_sink.Ready) continue;
                     _sink.Send(_target);                    // target nearest NPC (Tab by default)
                     await Task.Delay(Vary(350), ct);
+
+                    // Don't /consider thin air. Tab finds nothing far more often than it finds a
+                    // mob, and conning anyway meant a stream of con attempts every pass. With the
+                    // target window picked we can just LOOK at whether something is selected.
+                    if (!await HaveTarget(ct)) continue;
+
                     _lastCon = ConsiderDifficulty.Unknown;
                     _lastAttitude = ConsiderAttitude.Unknown;
                     _lastConText = "";
@@ -681,6 +688,59 @@ public sealed class HuntRole
         catch (Exception ex) { Log?.Invoke("Hunt error: " + ex.Message); }
         finally { ReleaseKeys(); }
     }
+
+    /// <summary>Is anything actually targeted right now?
+    ///
+    /// Answers from the target window on screen when it's been picked, because EQ's log says
+    /// nothing at all about targeting — pressing Tab into empty air is indistinguishable from
+    /// pressing it at a mob until something else gives it away. An unreadable window (or one that
+    /// was never picked) returns TRUE, so the role keeps its old behaviour of conning to find out
+    /// rather than standing there refusing to try.
+    ///
+    /// Also gives the target key a second chance: Tab often needs a moment after a turn, so a
+    /// negative read is retried once before we give up and go roam.</summary>
+    private async Task<bool> HaveTarget(CancellationToken ct)
+    {
+        if (!_s.TargetGateEnabled || _vitals is not { HasTargetBox: true } v) return true;
+        double need = TargetNeed(_s);
+
+        if (v.HasTarget(need) is not bool got) return true;   // can't read it — carry on as before
+        if (got) { _noTargetRuns = 0; return true; }
+
+        // One retry: press again and give the UI a beat to draw.
+        _sink.Send(_target);
+        await Task.Delay(Vary(320), ct);
+        if (v.HasTarget(need) is not bool again || again) { _noTargetRuns = 0; return true; }
+
+        _noTargetRuns++;
+
+        // SAFETY VALVE. A fingerprint taken with nothing actually targeted, a target window that
+        // has since moved, a UI reskin, a resolution change or anything sitting over that corner
+        // of the screen all read as "no target" forever — and a bot that never cons is a bot that
+        // never fights. After a long dry run, stop trusting the picture and go back to conning to
+        // find out, loudly, rather than roaming all night with nothing to show for it.
+        if (_noTargetRuns >= NoTargetGiveUp)
+        {
+            _noTargetRuns = 0;
+            Log?.Invoke($"No target seen in {NoTargetGiveUp} passes — that usually means the target-window pick is wrong "
+                      + "(picked without a mob targeted, or the window has moved). Considering anyway; re-pick it on the Grind page.");
+            return true;
+        }
+
+        Stats.State = "nothing targeted — roaming";
+        // Say it occasionally, not every pass: the whole point of this gate is less noise.
+        if (_noTargetRuns == 1 || _noTargetRuns % 25 == 0)
+            Log?.Invoke($"Nothing in range to target — roaming{(_noTargetRuns > 1 ? $" ({_noTargetRuns} passes)" : "")}.");
+        return false;
+    }
+
+    /// <summary>Consecutive empty passes before we assume the target-window pick is broken rather
+    /// than the zone being empty. ~20 passes is a minute or two of roaming.</summary>
+    private const int NoTargetGiveUp = 20;
+
+    /// <summary>The match fraction that counts as "targeted". Shared with the UI's Test button so
+    /// the verdict she prints can never disagree with the one she acts on.</summary>
+    public static double TargetNeed(AppSettings s) => Math.Clamp(s.TargetMatchPercent, 10, 100) / 100.0;
 
     /// <summary>Rest between fights.
     ///

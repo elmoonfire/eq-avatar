@@ -121,6 +121,13 @@ public sealed class AppSettings
     public int RestManaPercent { get; set; } = 80;
     /// <summary>Safety cap on a need-based rest, so a bad bar read can never park the bot forever.</summary>
     public int RestMaxSeconds { get; set; } = 180;
+    /// <summary>With the target window picked, skip the /consider entirely when nothing is
+    /// selected instead of conning into thin air every seek pass.</summary>
+    public bool TargetGateEnabled { get; set; } = true;
+    /// <summary>How much of the target window has to look like it did when a target was up before
+    /// we believe one is selected (percent of fingerprint cells). Lower it if she misses real
+    /// targets, raise it if she thinks the empty world is a target.</summary>
+    public int TargetMatchPercent { get; set; } = 60;
     public int HuntMaxFightSeconds { get; set; } = 25;       // bail on a fight that never ends (keeps it roaming)
     /// <summary>Skip mobs whose consider reads as too hard (flee / challenge).</summary>
     public bool HuntSkipHardCons { get; set; } = true;

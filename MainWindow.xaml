@@ -916,7 +916,7 @@
                                 <Expander IsExpanded="False" Foreground="{StaticResource Text}" Margin="0,0,0,10">
                                     <Expander.Header>
                                         <StackPanel Orientation="Horizontal">
-                                            <TextBlock Text="VITALS — WHEN TO REST" FontWeight="Bold" FontSize="12" Foreground="#7FB2D9" VerticalAlignment="Center"/>
+                                            <TextBlock Text="WHAT SHE CAN SEE — RESTING &amp; TARGETING" FontWeight="Bold" FontSize="12" Foreground="#7FB2D9" VerticalAlignment="Center"/>
                                             <Border x:Name="VitalsVerdict" Background="#2A2410" BorderBrush="#7A6320" BorderThickness="1" CornerRadius="6" Padding="8,2" Margin="10,0,0,0" VerticalAlignment="Center">
                                                 <TextBlock x:Name="VitalsVerdictText" Text="not set" FontSize="10.5" Foreground="#FFE1A6"/>
                                             </Border>
@@ -948,6 +948,26 @@
                                                          ToolTip="Safety cap: however low the bars read, she never rests longer than this before carrying on."/>
                                                 <TextBlock Text="s" VerticalAlignment="Center" Foreground="{StaticResource TextDim}" Margin="0,0,4,4"/>
                                             </WrapPanel>
+
+                                            <Border Background="#0E1723" BorderBrush="#26405A" BorderThickness="1" CornerRadius="8" Padding="10,8" Margin="0,10,0,0">
+                                                <StackPanel>
+                                                    <TextBlock TextWrapping="Wrap" Foreground="{StaticResource TextDim}" Margin="0,0,0,7"
+                                                               Text="Target window — so she stops considering thin air. EQ's log never mentions targeting, so pressing Tab at nothing looks exactly like pressing it at a mob, and she used to /consider on every pass to find out. Get a mob targeted, then pick your target window: she'll compare against it and only consider when something really is selected."/>
+                                                    <WrapPanel>
+                                                        <Button Content="Pick target window" Click="TargetPick_Click" Margin="0,0,6,4" Padding="10,3"
+                                                                ToolTip="Target any mob first, then drag a box over your target window — include its frame and name, not just the health bar."/>
+                                                        <Button Content="Test target read" Click="TargetTest_Click" Margin="0,0,10,4" Padding="10,3"
+                                                                ToolTip="Prints how much of the window matches right now. Try it once with a target and once without — you want a clear gap either side of the threshold."/>
+                                                        <CheckBox x:Name="TargetGateBox" Content="only consider when targeted" IsChecked="True" VerticalAlignment="Center" Margin="0,0,8,4"
+                                                                  Checked="TargetGate_Changed" Unchecked="TargetGate_Changed" Foreground="{StaticResource Text}"/>
+                                                        <TextBlock Text="match ≥" VerticalAlignment="Center" Foreground="{StaticResource TextDim}" Margin="0,0,4,4"/>
+                                                        <TextBox x:Name="TargetMatchBox" Width="44" Text="60" VerticalAlignment="Center" Margin="0,0,4,4"
+                                                                 ToolTip="How much of the window has to match. Test it with and without a target: put this number in the gap between the two readings. Lower it if she misses real targets, raise it if she thinks empty ground is a target."/>
+                                                        <TextBlock Text="%" VerticalAlignment="Center" Foreground="{StaticResource TextDim}" Margin="0,0,10,4"/>
+                                                        <TextBlock x:Name="TargetStatus" Text="not set" VerticalAlignment="Center" Foreground="{StaticResource TextDim}" Margin="0,0,4,4"/>
+                                                    </WrapPanel>
+                                                </StackPanel>
+                                            </Border>
                                         </StackPanel>
                                     </Border>
                                 </Expander>

@@ -51,8 +51,28 @@ public sealed class VitalsReader
         public bool Set => W > 0.0015 && H > 0.0008 && R >= 0;
     }
 
+    /// <summary>The target window: a region plus a fingerprint of what it looks like when a target
+    /// IS selected. Stored as a coarse grid of average colours rather than one colour, because the
+    /// window is a mix of frame, background, name text and a health bar.</summary>
+    public sealed class Region
+    {
+        public double X { get; set; }
+        public double Y { get; set; }
+        public double W { get; set; }
+        public double H { get; set; }
+        /// <summary>Cols*Rows*3 averaged RGB values, captured with a target up.</summary>
+        public double[]? Sig { get; set; }
+        public bool Set => W > 0.004 && H > 0.004 && Sig is { Length: SigCols * SigRows * 3 };
+    }
+
+    /// <summary>Fingerprint grid. Coarse on purpose: averaging a cell washes out which mob's name
+    /// is written in it, so one target looks like any other, while the window's frame and
+    /// background — the parts that actually say "a window is drawn here" — stay put.</summary>
+    private const int SigCols = 8, SigRows = 4;
+
     public Bar Hp { get; set; } = new();
     public Bar Mana { get; set; } = new();
+    public Region Target { get; set; } = new();
 
     private readonly Func<IntPtr> _hwnd;
 
@@ -213,6 +233,85 @@ public sealed class VitalsReader
         return Math.Clamp(frac, 0, 1);
     }
 
+    // ---------------- target window ----------------
+
+    /// <summary>True once the target window has been picked and can be tested.</summary>
+    public bool HasTargetBox => Target.Set;
+
+    /// <summary>Learn what the target window looks like WITH a target selected, from the frame the
+    /// user drew on. Returns false if the sample failed.</summary>
+    public bool SetTargetBox(double nx, double ny, double nw, double nh, Bitmap frame)
+    {
+        Target.X = nx; Target.Y = ny; Target.W = nw; Target.H = nh;
+        Target.Sig = null;
+        double[,,]? px = Sample(frame,
+            (int)(nx * frame.Width), (int)(ny * frame.Height),
+            Math.Max(SigCols, (int)(nw * frame.Width)), Math.Max(SigRows, (int)(nh * frame.Height)));
+        if (px is null) return false;
+        Target.Sig = Signature(px);
+        Save();
+        return Target.Set;                                   // a too-small drag is a failed pick, not a saved one
+    }
+
+    /// <summary>Average colour per grid cell.</summary>
+    private static double[] Signature(double[,,] px)
+    {
+        int w = px.GetLength(0), h = px.GetLength(1);
+        var sig = new double[SigCols * SigRows * 3];
+        for (int cy = 0; cy < SigRows; cy++)
+            for (int cx = 0; cx < SigCols; cx++)
+            {
+                int x0 = cx * w / SigCols, x1 = Math.Max(x0 + 1, (cx + 1) * w / SigCols);
+                int y0 = cy * h / SigRows, y1 = Math.Max(y0 + 1, (cy + 1) * h / SigRows);
+                double r = 0, g = 0, b = 0;
+                int n = 0;
+                for (int x = x0; x < x1 && x < w; x++)
+                    for (int y = y0; y < y1 && y < h; y++)
+                    { r += px[x, y, 0]; g += px[x, y, 1]; b += px[x, y, 2]; n++; }
+                int i = (cy * SigCols + cx) * 3;
+                sig[i] = r / Math.Max(1, n); sig[i + 1] = g / Math.Max(1, n); sig[i + 2] = b / Math.Max(1, n);
+            }
+        return sig;
+    }
+
+    /// <summary>Fraction of grid cells that currently look like they did with a target up, or -1
+    /// when the window can't be read. With no target the EQ target window isn't drawn at all, so
+    /// what's underneath is the moving world — which matches a specific UI panel in very few cells.</summary>
+    public double TargetMatch()
+    {
+        if (!Target.Set) return -1;
+        IntPtr h = _hwnd();
+        if (h == IntPtr.Zero || !GetWindowRect(h, out RECT r)) return -1;
+        int winW = r.Right - r.Left, winH = r.Bottom - r.Top;
+        int cx = r.Left + (int)(Target.X * winW), cy = r.Top + (int)(Target.Y * winH);
+        int cw = Math.Max(SigCols, (int)(Target.W * winW)), ch = Math.Max(SigRows, (int)(Target.H * winH));
+        try
+        {
+            using var bmp = new Bitmap(cw, ch, PixelFormat.Format32bppArgb);
+            using (Graphics g = Graphics.FromImage(bmp))
+                g.CopyFromScreen(cx, cy, 0, 0, new Size(cw, ch), CopyPixelOperation.SourceCopy);
+            double[,,]? px = Sample(bmp, 0, 0, cw, ch);
+            if (px is null) return -1;
+            double[] now = Signature(px), want = Target.Sig!;
+            int hits = 0;
+            for (int i = 0; i < want.Length; i += 3)
+            {
+                double d = Math.Abs(now[i] - want[i]) + Math.Abs(now[i + 1] - want[i + 1]) + Math.Abs(now[i + 2] - want[i + 2]);
+                if (d <= 90) hits++;                          // per-cell tolerance
+            }
+            return hits / (double)(SigCols * SigRows);
+        }
+        catch { return -1; }
+    }
+
+    /// <summary>Is something targeted? Null means "can't tell" — the caller must carry on as
+    /// before rather than treating uncertainty as "no target" and freezing.</summary>
+    public bool? HasTarget(double needFraction)
+    {
+        double m = TargetMatch();
+        return m < 0 ? null : m >= Math.Clamp(needFraction, 0.1, 1.0);
+    }
+
     /// <summary>A box that's nearly square gives us no way to tell which way the bar drains, and
     /// the read degrades to a full/empty flip at the halfway point. The UI asks for a re-pick.</summary>
     public static bool TooSquare(Bar bar) => bar.Set && bar.W < 2 * bar.H && bar.H < 2 * bar.W;
@@ -229,14 +328,19 @@ public sealed class VitalsReader
 
     private static string FilePath => Path.Combine(AppSettings.Dir, "vitals.json");
 
-    private sealed class Saved { public Bar? Hp { get; set; } public Bar? Mana { get; set; } }
+    private sealed class Saved
+    {
+        public Bar? Hp { get; set; }
+        public Bar? Mana { get; set; }
+        public Region? Target { get; set; }
+    }
 
     public void Save()
     {
         try
         {
             Directory.CreateDirectory(AppSettings.Dir);
-            File.WriteAllText(FilePath, JsonSerializer.Serialize(new Saved { Hp = Hp, Mana = Mana },
+            File.WriteAllText(FilePath, JsonSerializer.Serialize(new Saved { Hp = Hp, Mana = Mana, Target = Target },
                 new JsonSerializerOptions { WriteIndented = true }));
         }
         catch { }
@@ -250,6 +354,7 @@ public sealed class VitalsReader
             Saved? s = JsonSerializer.Deserialize<Saved>(File.ReadAllText(FilePath));
             if (s?.Hp != null) Hp = s.Hp;
             if (s?.Mana != null) Mana = s.Mana;
+            if (s?.Target != null) Target = s.Target;
         }
         catch { }
     }
