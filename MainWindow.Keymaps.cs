@@ -4,6 +4,7 @@ using System.Net.Http;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
+using System.Text.Json;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
@@ -35,6 +36,11 @@ public partial class MainWindow
     private bool _kmInit;
     private bool _kmBusy;
     private CancellationTokenSource? _kmAuto;
+
+    // import-from-a-friend state
+    private sealed record DiffRow(KeyBind Theirs, KeyBind? Mine, CheckBox Box);
+    private readonly List<DiffRow> _kmDiff = new();
+    private string _kmImportFrom = "";
 
     private void InitKeymapsUi()
     {
@@ -430,6 +436,270 @@ public partial class MainWindow
         };
     }
 
+    // ---------------- import a friend's binds (share link only) ----------------
+
+    /// <summary>The app will only ever read someone else's binds through OUR hub's share-token
+    /// endpoint: we take just the name + token out of whatever was pasted and rebuild the URL
+    /// against the configured hub. A link to anywhere else simply can't be followed.</summary>
+    private string? BuildImportUrl(string pasted, out string who)
+    {
+        who = "";
+        pasted = (pasted ?? "").Trim();
+        if (pasted.Length == 0) return null;
+        string u = "", tok = "";
+        int q = pasted.IndexOf('?');
+        string query = q >= 0 ? pasted[(q + 1)..] : pasted;
+        foreach (string part in query.Split('&'))
+        {
+            int eq = part.IndexOf('=');
+            if (eq <= 0) continue;
+            string k = part[..eq].Trim().ToLowerInvariant();
+            string v = Uri.UnescapeDataString(part[(eq + 1)..].Trim());
+            if (k is "u" or "user" or "username") u = v;
+            else if (k is "share" or "token" or "k") tok = v;
+        }
+        if (u.Length == 0 || tok.Length == 0) return null;
+        who = u;
+        string hub = _settings.HubUrl;
+        int i = hub.IndexOf("api.php", StringComparison.OrdinalIgnoreCase);
+        string apiBase = (i >= 0 ? hub[..i] : hub.TrimEnd('/') + "/") + "api/keymaps.php";
+        return $"{apiBase}?u={Uri.EscapeDataString(u)}&share={Uri.EscapeDataString(tok)}";
+    }
+
+    private async void KmFetch_Click(object sender, RoutedEventArgs e)
+    {
+        string? url = BuildImportUrl(KmImportUrl.Text, out string who);
+        if (url is null)
+        {
+            KmImportStatus.Foreground = Hex("#FFCB6B");
+            KmImportStatus.Text = "that doesn't look like a shared Key Mappings link — it needs the ?u=NAME&share=TOKEN part from your friend's page.";
+            return;
+        }
+        KmImportStatus.Foreground = Hex("#9FE0FF");
+        KmImportStatus.Text = $"reading {who}'s published binds…";
+        _kmDiff.Clear(); KmDiffHost.Children.Clear(); KmApplyBtn.Visibility = Visibility.Collapsed;
+        try
+        {
+            using var resp = await KmHttp.GetAsync(url);
+            string body = await resp.Content.ReadAsStringAsync();
+            if (!resp.IsSuccessStatusCode)
+            {
+                KmImportStatus.Foreground = Hex("#FFCB6B");
+                KmImportStatus.Text = (int)resp.StatusCode == 403
+                    ? $"{who} hasn't switched sharing on (or the link's token is stale) — ask them for a fresh link from their account page."
+                    : $"couldn't read that page ({(int)resp.StatusCode}): {body.Trim()}";
+                return;
+            }
+            using var doc = JsonDocument.Parse(body);
+            var root = doc.RootElement;
+            _kmImportFrom = root.TryGetProperty("username", out var un) ? (un.GetString() ?? who) : who;
+            var theirs = new List<KeyBind>();
+            if (root.TryGetProperty("binds", out var arr) && arr.ValueKind == JsonValueKind.Array)
+                foreach (var b in arr.EnumerateArray())
+                    theirs.Add(new KeyBind
+                    {
+                        Category  = b.TryGetProperty("cat", out var c) ? (c.GetString() ?? "") : "",
+                        Action    = b.TryGetProperty("action", out var a) ? (a.GetString() ?? "") : "",
+                        Primary   = b.TryGetProperty("primary", out var p) ? (p.GetString() ?? "") : "",
+                        Alternate = b.TryGetProperty("alt", out var s2) ? (s2.GetString() ?? "") : "",
+                    });
+            theirs.RemoveAll(t => t.Action.Trim().Length == 0);
+            if (theirs.Count == 0)
+            {
+                KmImportStatus.Foreground = Hex("#FFCB6B");
+                KmImportStatus.Text = $"{_kmImportFrom} hasn't published any key binds yet.";
+                return;
+            }
+            BuildDiff(theirs);
+            Diag.BotLog.Log("keymap", $"import fetch from {_kmImportFrom}: {theirs.Count} binds, {_kmDiff.Count} differ");
+        }
+        catch (Exception ex)
+        {
+            KmImportStatus.Foreground = Hex("#FFCB6B");
+            KmImportStatus.Text = "couldn't read that link: " + ex.Message;
+            Diag.BotLog.Log("keymap", "import error: " + ex);
+        }
+    }
+
+    private static bool SameKey(string a, string b) =>
+        Input.KeybindApplier.KeysLookEqual(a ?? "", b ?? "") || (a ?? "").Trim() == (b ?? "").Trim();
+
+    private void BuildDiff(List<KeyBind> theirs)
+    {
+        _kmDiff.Clear();
+        KmDiffHost.Children.Clear();
+        var store = KeyMapStore.Current;
+        int same = 0, locked = 0;
+
+        foreach (var t in theirs)
+        {
+            var mine = store.Find(t.Action);
+            bool differs = mine is null || !SameKey(mine.Primary, t.Primary) || !SameKey(mine.Alternate, t.Alternate);
+            if (!differs) { same++; continue; }
+            if (mine is { Locked: true }) locked++;
+            var box = new CheckBox
+            {
+                IsChecked = mine is not { Locked: true },
+                IsEnabled = mine is not { Locked: true },
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(2, 0, 6, 0),
+                ToolTip = mine is { Locked: true } ? "locked — untick the padlock on the row above to allow this" : "apply this one",
+            };
+            var dr = new DiffRow(t, mine, box);
+            _kmDiff.Add(dr);
+            KmDiffHost.Children.Add(MakeDiffRow(dr));
+        }
+
+        int actionable = _kmDiff.Count(d => d.Mine is not { Locked: true });
+        KmImportStatus.Foreground = Hex("#9FE0FF");
+        KmImportStatus.Text = _kmDiff.Count == 0
+            ? $"{_kmImportFrom}'s binds match yours exactly — nothing to change ({same} identical)."
+            : $"{_kmImportFrom}: {_kmDiff.Count} bind(s) differ from yours ({same} already match"
+              + (locked > 0 ? $", {locked} of the differences are LOCKED and will be skipped" : "") + "). "
+              + "Untick anything you'd rather keep, then press Apply in game with EQL's Key binds screen open on category ALL.";
+        KmApplyBtn.Visibility = actionable > 0 ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    private FrameworkElement MakeDiffRow(DiffRow d)
+    {
+        bool isLocked = d.Mine is { Locked: true };
+        var grid = new Grid { Margin = new Thickness(0, 0, 0, 3) };
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(26) });
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(150) });
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(24) });
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(150) });
+
+        Grid.SetColumn(d.Box, 0);
+        grid.Children.Add(d.Box);
+
+        var name = new TextBlock
+        {
+            Text = d.Theirs.Action,
+            Foreground = isLocked ? Hex("#7E8B99") : Hex("#DDE7F0"),
+            FontSize = 12.5, VerticalAlignment = VerticalAlignment.Center,
+            TextTrimming = TextTrimming.CharacterEllipsis, Margin = new Thickness(2, 0, 8, 0),
+            ToolTip = isLocked ? "You've locked this bind — it stays exactly as it is." : d.Theirs.Category,
+        };
+        Grid.SetColumn(name, 1);
+        grid.Children.Add(name);
+
+        static string Pair(KeyBind? b) => b is null ? "not bound yet"
+            : (b.Primary.Length == 0 ? "—" : b.Primary) + (b.Alternate.Length > 0 ? "  /  " + b.Alternate : "");
+
+        var mine = new TextBlock
+        {
+            Text = Pair(d.Mine), FontFamily = new FontFamily("Consolas"), FontSize = 11.5,
+            Foreground = Hex("#8FA9C4"), HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center, ToolTip = "yours now",
+        };
+        Grid.SetColumn(mine, 2);
+        grid.Children.Add(mine);
+
+        var arrow = new TextBlock
+        {
+            Text = isLocked ? "🔒" : "→", FontSize = 12, Foreground = isLocked ? Hex("#FFCB6B") : Hex("#4FC3F7"),
+            HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center,
+        };
+        Grid.SetColumn(arrow, 3);
+        grid.Children.Add(arrow);
+
+        var theirs = new TextBlock
+        {
+            Text = Pair(d.Theirs), FontFamily = new FontFamily("Consolas"), FontSize = 11.5,
+            Foreground = isLocked ? Hex("#6E7A87") : Hex("#9FE0FF"), HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center, ToolTip = "theirs",
+        };
+        Grid.SetColumn(theirs, 4);
+        grid.Children.Add(theirs);
+
+        return new Border
+        {
+            CornerRadius = new CornerRadius(8),
+            Background = isLocked ? Hex("#171A1E") : Hex("#101825"),
+            BorderBrush = isLocked ? Hex("#4A3E22") : Hex("#1C2C3E"),
+            BorderThickness = new Thickness(1), Padding = new Thickness(4),
+            Child = grid,
+        };
+    }
+
+    private async void KmApply_Click(object sender, RoutedEventArgs e)
+    {
+        if (_kmBusy || _kmAuto != null) return;
+        IntPtr hwnd = ResolveGameWindow();
+        if (hwnd == IntPtr.Zero) { KmImportStatus.Text = "game not found — launch EQL first."; return; }
+
+        var changes = new List<Input.KeybindApplier.Change>();
+        foreach (var d in _kmDiff)
+        {
+            if (d.Box.IsChecked != true) continue;
+            if (d.Mine is { Locked: true }) continue;                       // belt and braces
+            if (!SameKey(d.Mine?.Primary ?? "", d.Theirs.Primary))
+                changes.Add(new Input.KeybindApplier.Change
+                { Action = d.Theirs.Action, Category = d.Theirs.Category, Alternate = false,
+                  DesiredKey = d.Theirs.Primary, CurrentKey = d.Mine?.Primary ?? "" });
+            if (!SameKey(d.Mine?.Alternate ?? "", d.Theirs.Alternate))
+                changes.Add(new Input.KeybindApplier.Change
+                { Action = d.Theirs.Action, Category = d.Theirs.Category, Alternate = true,
+                  DesiredKey = d.Theirs.Alternate, CurrentKey = d.Mine?.Alternate ?? "" });
+        }
+        if (changes.Count == 0) { KmImportStatus.Text = "nothing ticked to apply."; return; }
+
+        _kmBusy = true;
+        KmApplyBtn.IsEnabled = false;
+        KmImportStatus.Foreground = Hex("#9FE0FF");
+        KmImportStatus.Text = $"applying {changes.Count} bind(s) — leave the Key binds screen open and hands off the keyboard…";
+        try
+        {
+            var applier = new Input.KeybindApplier();
+            var outcome = await applier.ApplyAsync(hwnd, changes,
+                msg => Dispatcher.Invoke(() => KmImportStatus.Text = msg), CancellationToken.None);
+
+            // trust only what the game showed us afterwards
+            var store = KeyMapStore.Current;
+            foreach (var c in outcome.Changes.Where(c => c.Done))
+            {
+                var mine = store.Find(c.Action) ?? new KeyBind { Action = c.Action, Category = c.Category };
+                if (store.Find(c.Action) is null) store.Binds.Add(mine);
+                if (c.Alternate) mine.Alternate = c.DesiredKey; else mine.Primary = c.DesiredKey;
+            }
+            store.IngestedFrom = _kmImportFrom;
+            store.IngestedAt = DateTime.Now;
+            store.Save();
+
+            var parts = new List<string> { $"{outcome.Applied} set" };
+            if (outcome.Failed > 0) parts.Add($"{outcome.Failed} didn't take");
+            if (outcome.NotFound > 0) parts.Add($"{outcome.NotFound} not found on screen");
+            if (outcome.Skipped > 0) parts.Add($"{outcome.Skipped} skipped");
+            KmImportStatus.Foreground = outcome.Failed + outcome.NotFound > 0 ? Hex("#FFCB6B") : Hex("#7CE38B");
+            KmImportStatus.Text = string.Join(" · ", parts) + ". " +
+                (outcome.Failed + outcome.NotFound + outcome.Skipped > 0
+                    ? "Details below — anything not set is still on your own settings."
+                    : $"Your binds now match {_kmImportFrom}'s (locked rows untouched).");
+
+            KmDiffHost.Children.Clear();
+            foreach (var c in outcome.Changes.Where(c => c.Result.Length > 0 && !c.Done))
+                KmDiffHost.Children.Add(new TextBlock
+                {
+                    Text = $"· {c.Action} ({c.Slot}) → {(c.DesiredKey.Length == 0 ? "—" : c.DesiredKey)}: {c.Result}",
+                    Foreground = Hex("#C9A96B"), FontSize = 11.5, TextWrapping = TextWrapping.Wrap,
+                    Margin = new Thickness(2, 2, 2, 0),
+                });
+            _kmDiff.Clear();
+            KmApplyBtn.Visibility = Visibility.Collapsed;
+            Diag.BotLog.Log("keymap", $"apply from {_kmImportFrom}: {outcome.Applied} set, {outcome.Failed} failed, " +
+                                      $"{outcome.NotFound} not found, {outcome.Skipped} skipped, {outcome.Sweeps} sweeps");
+            RenderKeymaps();
+        }
+        catch (Exception ex)
+        {
+            KmImportStatus.Foreground = Hex("#FFCB6B");
+            KmImportStatus.Text = "apply failed: " + ex.Message;
+            Diag.BotLog.Log("keymap", "apply error: " + ex);
+        }
+        finally { _kmBusy = false; KmApplyBtn.IsEnabled = true; }
+    }
+
     private void KmInfo_Click(object sender, RoutedEventArgs e)
     {
         var text = new TextBlock
@@ -472,6 +742,10 @@ Click the padlock on any row to lock that bind. Locked binds are yours: when you
 
 SHARING
 Share ↗ publishes these mappings to your member page on the website, where friends can browse and search them with the same instant filters — and copy them into their own game. Turn sharing on (and get your link) from your account page, exactly like the armory.
+
+IMPORTING A FRIEND'S SETUP
+Open 'Import from a friend', paste the link from their shared Key Mappings page, and press Fetch. You get a line-by-line diff — your key, their key — with everything ticked by default and your LOCKED binds greyed out and skipped. Untick anything you want to keep. Then, with the game's Key binds screen open on category ALL, press 'Apply in game': the bot finds each row, clicks the cell, presses the key, and reads the row back to confirm it took. Anything it couldn't set is listed afterwards, and your own settings are left alone in those cases.
+The app can only ever read through that share link — never from a file or any other website — and it can't send a left/right mouse click as a bind, so those few get flagged for you to do by hand.
 
 FIXING READS
 OCR isn't perfect. Remove a bad row with ✕ and add the correct one by hand in the add row. Hand-added rows merge by action name just like captured ones.";

@@ -1604,6 +1604,33 @@
                                     </StackPanel>
                                 </Border>
 
+                                <!-- IMPORT: pull a friend's published binds straight from their shared page -->
+                                <Expander x:Name="KmImportExpander" Foreground="#DDE7F0" Margin="0,0,0,10">
+                                    <Expander.Header>
+                                        <StackPanel Orientation="Horizontal">
+                                            <TextBlock Text="IMPORT FROM A FRIEND" FontWeight="Bold" FontSize="11" Foreground="#7FB2D9" VerticalAlignment="Center"/>
+                                            <TextBlock Text="paste their shared Key Mappings link — locked binds of yours are never touched"
+                                                       FontSize="10.5" Foreground="{StaticResource TextDim}" VerticalAlignment="Center" Margin="10,0,0,0"/>
+                                        </StackPanel>
+                                    </Expander.Header>
+                                    <Border Background="#121A28" BorderBrush="#26405A" BorderThickness="1"
+                                            CornerRadius="10" Padding="12,10" Margin="0,6,0,0">
+                                        <StackPanel>
+                                            <StackPanel Orientation="Horizontal">
+                                                <TextBox x:Name="KmImportUrl" Width="520" FontSize="11.5" Margin="0,0,8,0"
+                                                         ToolTip="The link from a friend's shared Key Mappings page, e.g. https://eqavatar.ldtlan.com/hub/keymaps.php?u=NAME&amp;share=TOKEN — the app only ever reads through that share link, never from a file or any other site."/>
+                                                <Button Content="Fetch" Click="KmFetch_Click" Padding="14,5" Margin="0,0,8,0"
+                                                        ToolTip="Read their published binds and show exactly what differs from yours."/>
+                                                <Button x:Name="KmApplyBtn" Content="Apply in game" Click="KmApply_Click" Padding="14,5" Margin="0"
+                                                        Visibility="Collapsed" FontWeight="SemiBold"
+                                                        ToolTip="Walks the game's Key binds screen and sets each ticked bind: clicks the cell, presses the key, then re-reads the row to confirm it took."/>
+                                            </StackPanel>
+                                            <TextBlock x:Name="KmImportStatus" Text="" TextWrapping="Wrap" FontSize="11.5" Foreground="#9FE0FF" Margin="0,8,0,0"/>
+                                            <StackPanel x:Name="KmDiffHost" Margin="0,8,0,0"/>
+                                        </StackPanel>
+                                    </Border>
+                                </Expander>
+
                                 <!-- column titles: a scene per column with its name underneath, then that column's own filter -->
                                 <Grid Margin="0,0,0,6">
                                     <Grid.ColumnDefinitions>

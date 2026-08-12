@@ -14,12 +14,12 @@ using EQAvatar.Spike.Input;
 namespace EQAvatar.Spike.Ocr;
 
 /// <summary>
-/// Reads the game's Controls → Key binds screen with Windows OCR and turns the visible rows
-/// into KeyBind entries. Geometry does the parsing: words are clustered into rows, and each
-/// row is split at its big horizontal gaps — left chunk = the action label, following chunks
-/// = primary / alternate keys. A row with no big gap is treated as a category header for the
-/// rows that follow. One call reads one visible page; the user scrolls and captures again,
-/// and KeyMapStore.Merge stitches the passes together.
+/// Reads the game's Controls -> Key binds screen with Windows OCR. Geometry does the work:
+/// words are clustered into rows, each row is split at its big horizontal gaps, and the key
+/// chunks are then assigned to COLUMNS by x-position (measured once across the whole page).
+/// Columns matter twice over — they tell an empty primary from an empty secondary, and they
+/// give the applier a screen point to click for a cell with no text in it at all.
+/// One call reads one visible page; the caller scrolls and calls again.
 /// </summary>
 public static class KeybindReader
 {
@@ -33,14 +33,36 @@ public static class KeybindReader
 
     private readonly record struct Tok(string Text, double X0, double X1, double Cy, double H);
 
-    /// <summary>One capture: the binds found plus the SCREEN rectangle they occupied, so the
+    /// <summary>One parsed row, with the SCREEN point of each key cell so it can be clicked.</summary>
+    public sealed class KeyRow
+    {
+        public KeyBind Bind { get; init; } = new();
+        public int RowY;                    // screen Y centre of the row
+        public int PrimaryX, AlternateX;    // screen X centre of each key column (0 = unknown)
+        public bool HasPrimaryCell => PrimaryX > 0;
+        public bool HasAlternateCell => AlternateX > 0;
+    }
+
+    /// <summary>One capture: the rows found plus the SCREEN rectangle they occupied, so the
     /// auto-capture loop knows exactly where to put the cursor when it scrolls the list.</summary>
     public sealed class KeybindPage
     {
-        public List<KeyBind> Binds { get; init; } = new();
+        public List<KeyRow> Rows { get; init; } = new();
+        public List<KeyBind> Binds => Rows.Select(r => r.Bind).ToList();
         public int RegionX, RegionY, RegionW, RegionH;
         public bool HasRegion => RegionW > 20 && RegionH > 20;
         public (int X, int Y) Center => (RegionX + RegionW / 2, RegionY + RegionH / 2);
+
+        public KeyRow? FindRow(string action) => Rows.FirstOrDefault(
+            r => string.Equals(Normalize(r.Bind.Action), Normalize(action), StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>OCR reads wobble on punctuation and spacing — compare action names loosely.</summary>
+    public static string Normalize(string s)
+    {
+        var sb = new System.Text.StringBuilder(s.Length);
+        foreach (char c in s) if (char.IsLetterOrDigit(c)) sb.Append(char.ToLowerInvariant(c));
+        return sb.ToString();
     }
 
     /// <summary>Convenience wrapper kept for callers that only want the binds.</summary>
@@ -48,13 +70,12 @@ public static class KeybindReader
 
     /// <summary>Words we never accept as a bind's action label (column titles, window chrome).</summary>
     private static readonly Regex Noise = new(
-        @"^(primary|alternate|alt|action|command|key\s*binds?|keyboard|mouse|controls|options|search|filter|page|reset|defaults?|accept|cancel|ok|apply)$",
+        @"^(primary|secondary|alternate|alt|action|command|key\s*binds?|keyboard|mouse|controls|options|search|filter|page|category|all|reset|defaults?|accept|cancel|ok|apply|done|close)$",
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
     public static async Task<KeybindPage> ReadPageAsync(IntPtr hwnd)
     {
         var page = new KeybindPage();
-        var binds = page.Binds;
         if (hwnd == IntPtr.Zero || !GetWindowRect(hwnd, out RECT r)) return page;
         int w = Math.Max(1, r.Right - r.Left), h = Math.Max(1, r.Bottom - r.Top);
         if (w < 100 || h < 100) return page;
@@ -99,11 +120,9 @@ public static class KeybindReader
             else rows.Add(new List<Tok> { t });
         }
 
-        // ---- split each row at its large horizontal gaps: label | primary | alternate ----
+        // ---- split each row at its large horizontal gaps ----
         double gapMin = Math.Max(34, w * 0.02);
-        string category = "";
-        int accepted = 0;
-        double minY = 0, maxY = 0, minX = 0, maxX = 0;
+        var parsed = new List<(List<List<Tok>> chunks, double cy)>();
         foreach (var row in rows)
         {
             var ts = row.OrderBy(t => t.X0).ToList();
@@ -113,11 +132,32 @@ public static class KeybindReader
                 if (ts[i].X0 - chunks[^1][^1].X1 >= gapMin) chunks.Add(new List<Tok>());
                 chunks[^1].Add(ts[i]);
             }
-            string Text(List<Tok> c) => string.Join(" ", c.Select(t => t.Text)).Trim();
+            parsed.Add((chunks, ts.Average(t => t.Cy)));
+        }
 
+        static string Text(List<Tok> c) => string.Join(" ", c.Select(t => t.Text)).Trim();
+        static double Mid(List<Tok> c) => (c[0].X0 + c[^1].X1) / 2.0;
+
+        // ---- measure the key COLUMNS once, from the rows that clearly have two of them ----
+        var firstKeyX = new List<double>();
+        var secondKeyX = new List<double>();
+        foreach (var (chunks, _) in parsed)
+        {
+            if (chunks.Count >= 2 && !Noise.IsMatch(Text(chunks[0]))) firstKeyX.Add(Mid(chunks[1]));
+            if (chunks.Count >= 3) secondKeyX.Add(Mid(chunks[2]));
+        }
+        double colA = Median(firstKeyX), colB = Median(secondKeyX);
+        bool twoCols = secondKeyX.Count >= 2 && colB > colA + gapMin * 0.5;
+
+        string category = "";
+        int accepted = 0;
+        double minY = 0, maxY = 0, minX = 0, maxX = 0;
+
+        foreach (var (chunks, cy) in parsed)
+        {
             if (chunks.Count == 1)
             {
-                // no key column → likely a category header for the rows below
+                // no key column -> likely a category header for the rows below
                 string t = Text(chunks[0]);
                 if (t.Length is >= 3 and <= 32 && !Noise.IsMatch(t) && !t.Any(char.IsDigit) && t.Count(c => c == ' ') <= 3)
                     category = t;
@@ -126,27 +166,39 @@ public static class KeybindReader
 
             string action = Text(chunks[0]);
             if (action.Length < 2 || Noise.IsMatch(action)) continue;
-            string primary = Text(chunks[1]);
-            string alternate = chunks.Count > 2 ? string.Join(" / ", chunks.Skip(2).Select(Text)) : "";
-            if (primary.Length == 0 && alternate.Length == 0) continue;
-            if (Noise.IsMatch(primary)) continue;                       // "Primary | Alternate" title row
 
-            double rowTop = ts.Min(t => t.Cy) - ts[0].H, rowBot = ts.Max(t => t.Cy) + ts[0].H;
-            if (accepted == 0) { minY = rowTop; maxY = rowBot; minX = ts.Min(t => t.X0); maxX = ts.Max(t => t.X1); }
-            else { minY = Math.Min(minY, rowTop); maxY = Math.Max(maxY, rowBot);
-                   minX = Math.Min(minX, ts.Min(t => t.X0)); maxX = Math.Max(maxX, ts.Max(t => t.X1)); }
+            string primary = "", alternate = "";
+            foreach (var c in chunks.Skip(1))
+            {
+                string val = Text(c);
+                if (val.Length == 0 || Noise.IsMatch(val)) continue;
+                if (val == "-" || val == "—") continue;             // explicit "unbound" marker
+                double mid = Mid(c);
+                bool toAlt = twoCols && Math.Abs(mid - colB) < Math.Abs(mid - colA);
+                if (toAlt) alternate = alternate.Length == 0 ? val : alternate + " " + val;
+                else primary = primary.Length == 0 ? val : primary + " " + val;
+            }
+            if (primary.Length == 0 && alternate.Length == 0) continue;
+
+            var rts = chunks.SelectMany(c => c).ToList();
+            double rowTop = cy - rts[0].H, rowBot = cy + rts[0].H;
+            if (accepted == 0) { minY = rowTop; maxY = rowBot; minX = rts.Min(t => t.X0); maxX = rts.Max(t => t.X1); }
+            else
+            {
+                minY = Math.Min(minY, rowTop); maxY = Math.Max(maxY, rowBot);
+                minX = Math.Min(minX, rts.Min(t => t.X0)); maxX = Math.Max(maxX, rts.Max(t => t.X1));
+            }
             accepted++;
 
-            binds.Add(new KeyBind
+            page.Rows.Add(new KeyRow
             {
-                Category = category,
-                Action = action,
-                Primary = primary == "-" ? "" : primary,
-                Alternate = alternate == "-" ? "" : alternate,
+                Bind = new KeyBind { Category = category, Action = action, Primary = primary, Alternate = alternate },
+                RowY = r.Top + (int)cy,
+                PrimaryX = colA > 0 ? r.Left + (int)colA : 0,
+                AlternateX = twoCols ? r.Left + (int)colB : 0,
             });
         }
 
-        // Screen-space rectangle the rows occupied — the auto-capture loop scrolls over its centre.
         if (accepted > 0)
         {
             page.RegionX = r.Left + (int)minX;
@@ -155,5 +207,12 @@ public static class KeybindReader
             page.RegionH = (int)(maxY - minY);
         }
         return page;
+    }
+
+    private static double Median(List<double> xs)
+    {
+        if (xs.Count == 0) return 0;
+        var s = xs.OrderBy(x => x).ToList();
+        return s.Count % 2 == 1 ? s[s.Count / 2] : (s[s.Count / 2 - 1] + s[s.Count / 2]) / 2.0;
     }
 }
