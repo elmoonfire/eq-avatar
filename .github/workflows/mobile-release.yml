@@ -202,8 +202,11 @@ jobs:
           set -euo pipefail
           # Both are generated, never committed: the layered tvOS icon/top-shelf art
           # (derived PNGs) and the .xcodeproj (a file that rots silently by hand).
-          python3 -m pip install --quiet --upgrade pillow
-          python3 tools/make_brand_assets.py
+          # The runner's Python is externally managed (PEP 668), so pip refuses to install
+          # into it. A throwaway venv sidesteps that without fighting the system install.
+          python3 -m venv "$RUNNER_TEMP/assetvenv"
+          "$RUNNER_TEMP/assetvenv/bin/pip" install --quiet --upgrade pillow
+          "$RUNNER_TEMP/assetvenv/bin/python" tools/make_brand_assets.py
           brew install xcodegen
           xcodegen generate --spec project.yml
 
