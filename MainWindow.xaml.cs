@@ -61,7 +61,7 @@ public partial class MainWindow : Window
     private static readonly string[] Panels =
     {
         "PanelHome", "PanelLog", "PanelInput", "PanelMaps", "PanelData", "PanelSessions", "PanelCombat", "PanelGrind", "PanelFollower",
-        "PanelLogin", "PanelMouse", "PanelProfile", "PanelLicensing", "PanelSettings"
+        "PanelLogin", "PanelMouse", "PanelSequencer", "PanelProfile", "PanelLicensing", "PanelSettings"
     };
     private static readonly string[] EqClasses =
     {
@@ -186,6 +186,7 @@ public partial class MainWindow : Window
                 el.Visibility = p == name ? Visibility.Visible : Visibility.Collapsed;
         if (name == "PanelHome") RefreshHome();
         if (name == "PanelGrind") { InitArtUi(); AutoTargetEq(); }
+        if (name == "PanelSequencer") InitSequencerUi();
         if (name == "PanelProfile") UpdateProfilePanel();
         if (name == "PanelData") EnsureDataLoaded();
         if (name == "PanelSessions") RefreshSessions();

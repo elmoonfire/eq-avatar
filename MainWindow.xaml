@@ -259,6 +259,9 @@
                             <RadioButton x:Name="NavFollower" Style="{StaticResource NavItem}" GroupName="nav" Tag="PanelFollower" Checked="Nav_Checked">
                                 <StackPanel Orientation="Horizontal"><TextBlock Style="{StaticResource NavGlyph}" Text="&#xE716;"/><TextBlock Text="Follower"/></StackPanel>
                             </RadioButton>
+                            <RadioButton x:Name="NavSequencer" Style="{StaticResource NavItem}" GroupName="nav" Tag="PanelSequencer" Checked="Nav_Checked">
+                                <StackPanel Orientation="Horizontal"><TextBlock Style="{StaticResource NavGlyph}" Text="&#xE762;"/><TextBlock Text="Action Sequencer"/></StackPanel>
+                            </RadioButton>
                             <RadioButton x:Name="NavMouse" Style="{StaticResource NavItem}" GroupName="nav" Tag="PanelMouse" Checked="Nav_Checked">
                                 <StackPanel Orientation="Horizontal"><TextBlock Style="{StaticResource NavGlyph}" Text="&#xE962;"/><TextBlock Text="Mouse Motion"/></StackPanel>
                             </RadioButton>
@@ -1551,6 +1554,93 @@
                         <TextBox x:Name="LicLog" Grid.Row="6" IsReadOnly="True"
                                  Background="#0C0F13" Foreground="{StaticResource Good}" FontFamily="Consolas" FontSize="11"
                                  VerticalScrollBarVisibility="Auto" TextWrapping="Wrap"/>
+                    </Grid>
+
+                    <!-- ===== ACTION SEQUENCER (visual sequence builder — engine lands with Key Mappings) ===== -->
+                    <Grid x:Name="PanelSequencer" Visibility="Collapsed">
+                        <ScrollViewer VerticalScrollBarVisibility="Auto">
+                            <StackPanel Margin="18,14,18,26">
+                                <Border CornerRadius="12" ClipToBounds="True" Margin="0,0,0,12">
+                                    <Image x:Name="ArtSeqBanner" Stretch="Uniform"/>
+                                </Border>
+
+                                <Grid Margin="0,0,0,4">
+                                    <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                                        <TextBlock Text="ACTION SEQUENCER" FontWeight="Bold" FontSize="15" Foreground="#BFE3FF" VerticalAlignment="Center"/>
+                                        <Border Background="#16202E" BorderBrush="#2A4A57" BorderThickness="1" CornerRadius="999"
+                                                Width="22" Height="22" Cursor="Hand" MouseLeftButtonUp="SeqInfo_Click" Margin="10,0,0,0"
+                                                ToolTip="How sequences work — numbers, columns, pills, multi-part + revert. The full guide.">
+                                            <TextBlock Text="i" FontFamily="Georgia" FontStyle="Italic" FontWeight="Bold" FontSize="13"
+                                                       Foreground="#7FB2D9" HorizontalAlignment="Center" VerticalAlignment="Center" Margin="0,-1,0,0"/>
+                                        </Border>
+                                    </StackPanel>
+                                    <Button Content="＋  New sequence" Click="SeqNew_Click" Padding="14,6" Margin="0"
+                                            FontWeight="SemiBold" HorizontalAlignment="Right" VerticalAlignment="Center"
+                                            ToolTip="Add an empty sequence at the end of the list — it takes the next number."/>
+                                </Grid>
+                                <TextBlock x:Name="SeqCountText" Text="" FontSize="10.5" Foreground="{StaticResource TextDim}" Margin="1,0,0,12"/>
+
+                                <!-- column titles: each its own scene, not a table header -->
+                                <Grid Margin="0,0,0,10">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="72"/>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="34"/>
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel Grid.Column="0"
+                                                ToolTip="The sequence number is its POSITION — always 1..N. Drag a medallion to reorder; drag #3 to the 8th spot and it becomes #8. Other pages reference sequences by this number.">
+                                        <Border CornerRadius="9" ClipToBounds="True" Height="58" Margin="2,0,2,3">
+                                            <Image x:Name="ArtSeqColId" Stretch="UniformToFill"/>
+                                        </Border>
+                                        <TextBlock Text="SEQ" FontWeight="Bold" FontSize="10.5" Foreground="#9FE0FF" HorizontalAlignment="Center"/>
+                                    </StackPanel>
+                                    <StackPanel Grid.Column="1"
+                                                ToolTip="General actions — jump, sit, target nearest NPC, open inventory. Each fires the key your game has bound to it; the Key Mappings page (Information section) will read those bindings straight from the game.">
+                                        <Border CornerRadius="9" ClipToBounds="True" Height="58" Margin="4,0,4,3">
+                                            <Image x:Name="ArtSeqColAction" Stretch="UniformToFill"/>
+                                        </Border>
+                                        <TextBlock Text="ACTIONS" FontWeight="Bold" FontSize="10.5" Foreground="#4FC3F7" HorizontalAlignment="Center"/>
+                                    </StackPanel>
+                                    <StackPanel Grid.Column="2"
+                                                ToolTip="Physical stances AND invocations — each part of a sequence carries one of each; adding another replaces it.">
+                                        <Border CornerRadius="9" ClipToBounds="True" Height="58" Margin="4,0,4,3">
+                                            <Image x:Name="ArtSeqColStance" Stretch="UniformToFill"/>
+                                        </Border>
+                                        <TextBlock Text="STANCES" FontWeight="Bold" FontSize="10.5" Foreground="#C792EA" HorizontalAlignment="Center"/>
+                                    </StackPanel>
+                                    <StackPanel Grid.Column="3"
+                                                ToolTip="Spell work — CAST a spell, MEM a single spell, or swap the whole set with /memspellset 'name'. The engine will know your spell slots and their contents.">
+                                        <Border CornerRadius="9" ClipToBounds="True" Height="58" Margin="4,0,4,3">
+                                            <Image x:Name="ArtSeqColSpell" Stretch="UniformToFill"/>
+                                        </Border>
+                                        <TextBlock Text="SPELLS" FontWeight="Bold" FontSize="10.5" Foreground="#82AAFF" HorizontalAlignment="Center"/>
+                                    </StackPanel>
+                                    <StackPanel Grid.Column="4"
+                                                ToolTip="Activated abilities — they run AFTER spells, so Quick Buff finds the right spells already memorized.">
+                                        <Border CornerRadius="9" ClipToBounds="True" Height="58" Margin="4,0,4,3">
+                                            <Image x:Name="ArtSeqColAbility" Stretch="UniformToFill"/>
+                                        </Border>
+                                        <TextBlock Text="ABILITIES" FontWeight="Bold" FontSize="10.5" Foreground="#FFCB6B" HorizontalAlignment="Center"/>
+                                    </StackPanel>
+                                </Grid>
+
+                                <StackPanel x:Name="SeqListHost"/>
+
+                                <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
+                                    <Border Background="#16202E" BorderBrush="#2A4A57" BorderThickness="1" CornerRadius="999"
+                                            Width="22" Height="22" Cursor="Hand" MouseLeftButtonUp="SeqInfo_Click"
+                                            ToolTip="Open the full sequencer guide.">
+                                        <TextBlock Text="i" FontFamily="Georgia" FontStyle="Italic" FontWeight="Bold" FontSize="13"
+                                                   Foreground="#7FB2D9" HorizontalAlignment="Center" VerticalAlignment="Center" Margin="0,-1,0,0"/>
+                                    </Border>
+                                    <TextBlock Text="hover any title or pill for help — the engine that RUNS sequences ships with the Key Mappings page"
+                                               FontSize="10.5" Foreground="{StaticResource TextDim}" VerticalAlignment="Center" Margin="8,0,0,0"/>
+                                </StackPanel>
+                            </StackPanel>
+                        </ScrollViewer>
                     </Grid>
 
                     <!-- ===== PROFILE (character identity + sheet OCR) ===== -->
