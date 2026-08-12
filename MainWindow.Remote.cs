@@ -134,7 +134,7 @@ public partial class MainWindow
     {
         int radius = int.TryParse(cmd.Str("radius"), out int r) ? Math.Clamp(r, 10, 1500) : _settings.HuntTetherRadius;
         TetherBox.IsChecked = true;
-        TetherSlider.Value = radius;
+        TetherRope.Value = radius;
         ApplyHuntFields();
         _settings.Save();
         // A new anchor takes effect on the next role start; if Hunt is live it re-anchors next /loc.

@@ -36,7 +36,7 @@ public sealed class AppSettings
     // --- Client Hub (centralized licensing + usage dashboard) ---
     /// <summary>App version reported on every check-in (shown on the dashboard). Also the version
     /// the in-app updater compares against the newest GitHub release tag.</summary>
-    public const string AppVersion = "0.9.18";
+    public const string AppVersion = "0.9.19";
 
     // --- Auto-update (GitHub) ---
     public const string UpdateOwner = "elmoonfire";
@@ -125,6 +125,8 @@ public sealed class AppSettings
     public string GrindMode { get; set; } = "hunt";
     /// <summary>Waypoint order: "sequence" (1→N then back, ping-pong) or "random".</summary>
     public string WaypointOrder { get; set; } = "sequence";
+    /// <summary>The combat rotation text ("key,delayMs" lines) — persisted since 0.9.19.</summary>
+    public string GrindRotationText { get; set; } = "";
     /// <summary>Licensing panel: keep scanning for the open inventory and read it automatically.</summary>
     public bool OcrAutoScan { get; set; } = false;
 

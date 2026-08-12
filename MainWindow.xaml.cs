@@ -175,6 +175,7 @@ public partial class MainWindow : Window
             if (FindName(p) is UIElement el)
                 el.Visibility = p == name ? Visibility.Visible : Visibility.Collapsed;
         if (name == "PanelHome") RefreshHome();
+        if (name == "PanelGrind") { InitArtUi(); AutoTargetEq(); }
         if (name == "PanelData") EnsureDataLoaded();
         if (name == "PanelSessions") RefreshSessions();
         if (name == "PanelCombat") RefreshCombatPanel();
@@ -694,9 +695,10 @@ public partial class MainWindow : Window
         if (int.TryParse(HuntRestBox.Text.Trim(), out int r)) _settings.HuntRestSeconds = Math.Clamp(r, 0, 600);
         _settings.HuntMode = HuntBox.IsChecked == true;
         _settings.GrindStance = StanceDef.IsChecked == true ? "defensive" : StanceDir.IsChecked == true ? "directive" : "aggressive";
-        _settings.HuntHostileOnly = HostileOnlyBox.IsChecked == true;
+        _settings.HuntHostileOnly = HostileSelBox.SelectedIndex == 1;
         _settings.HuntTetherEnabled = TetherBox.IsChecked == true;
-        _settings.HuntTetherRadius = (int)TetherSlider.Value;
+        _settings.HuntTetherRadius = (int)TetherRope.Value;
+        _settings.GrindRotationText = GrindRotation.Text;
         _settings.GrindTargetMobs = TargetMobsBox.Text;
         _settings.GrindBardMode = BardBox.IsChecked == true;
         _settings.LevEnabled = LevBox.IsChecked == true;
@@ -704,18 +706,6 @@ public partial class MainWindow : Window
         if (!string.IsNullOrWhiteSpace(LevNameBox.Text)) _settings.LevBuffName = LevNameBox.Text.Trim();
         _settings.GrindMode = GrindModeSetting();
         _settings.WaypointOrder = WaypointOrderBox.SelectedIndex == 1 ? "random" : "sequence";
-    }
-
-    private void TetherSlider_Changed(object sender, RoutedPropertyChangedEventArgs<double> e)
-    {
-        if (TetherLabel is null) return;
-        // 10-unit steps for tight little camps below 50; the familiar 50-unit steps above.
-        double v = TetherSlider.Value;
-        double snapped = Math.Clamp(v < 50 ? Math.Round(v / 10) * 10 : Math.Round(v / 50) * 50, 10, 1500);
-        if (Math.Abs(snapped - v) > 0.01) { TetherSlider.Value = snapped; return; }   // re-enters once
-        TetherLabel.Text = $"{(int)snapped} units";
-        _settings.HuntTetherRadius = (int)snapped;
-        PushTetherToMaps();
     }
 
     /// <summary>Fill the Grind keybind boxes from saved settings on load.</summary>
@@ -731,10 +721,11 @@ public partial class MainWindow : Window
         HuntLocKeyBox.Text = _settings.HuntLocKey;
         HuntRestBox.Text = _settings.HuntRestSeconds.ToString();
         (_settings.GrindStance switch { "defensive" => StanceDef, "directive" => StanceDir, _ => StanceAggro }).IsChecked = true;
-        HostileOnlyBox.IsChecked = _settings.HuntHostileOnly;
+        HostileSelBox.SelectedIndex = _settings.HuntHostileOnly ? 1 : 0;
         TetherBox.IsChecked = _settings.HuntTetherEnabled;
-        TetherSlider.Value = Math.Clamp(_settings.HuntTetherRadius, 10, 1500);
-        TetherLabel.Text = $"{(int)TetherSlider.Value} units";
+        TetherRope.Value = Math.Clamp(_settings.HuntTetherRadius, 10, 1500);
+        TetherLabel.Text = $"{(int)TetherRope.Value} units";
+        GrindRotation.Text = _settings.GrindRotationText ?? "";
         TargetMobsBox.Text = _settings.GrindTargetMobs;
         BardBox.IsChecked = _settings.GrindBardMode;
         LevBox.IsChecked = _settings.LevEnabled;
@@ -744,6 +735,7 @@ public partial class MainWindow : Window
         { "camp" => 1, "zone" => 2, "waypoints" => 3, _ => 0 };
         WaypointOrderBox.SelectedIndex = (_settings.WaypointOrder ?? "sequence").StartsWith("rand", StringComparison.OrdinalIgnoreCase) ? 1 : 0;
         UpdateCompassStatus();
+        InitArtUi();                                 // mascot scenes, tether face, tile sync
         OcrAutoBox.IsChecked = _settings.OcrAutoScan;
         if (_settings.OcrAutoScan) StartOcrAuto();
         if (!string.IsNullOrWhiteSpace(_settings.HubServer)) LoginServerBox.Text = _settings.HubServer;

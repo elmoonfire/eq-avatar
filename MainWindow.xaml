@@ -4,6 +4,7 @@
         xmlns:shell="clr-namespace:System.Windows.Shell;assembly=PresentationFramework"
         xmlns:map="clr-namespace:EQAvatar.Spike.Map"
         xmlns:charts="clr-namespace:EQAvatar.Spike.Charts"
+        xmlns:ui="clr-namespace:EQAvatar.Spike.Ui"
         Title="EQ Avatar" Height="720" Width="1060" MinHeight="560" MinWidth="900"
         WindowStyle="None" Background="{StaticResource Bg}" WindowStartupLocation="CenterScreen">
 
@@ -517,194 +518,416 @@
 
                     <!-- ===== GRIND ===== -->
                     <Grid x:Name="PanelGrind" Margin="18" Visibility="Collapsed">
+                        <Grid.Resources>
+                            <!-- selectable scene tile (modes + stances): accent ring when chosen -->
+                            <Style x:Key="SceneTile" TargetType="RadioButton">
+                                <Setter Property="Cursor" Value="Hand"/>
+                                <Setter Property="Margin" Value="0,0,8,0"/>
+                                <Setter Property="Template">
+                                    <Setter.Value>
+                                        <ControlTemplate TargetType="RadioButton">
+                                            <Border x:Name="bd" BorderThickness="2" BorderBrush="#26303F" CornerRadius="9"
+                                                    Background="#0B121E" ClipToBounds="True">
+                                                <ContentPresenter/>
+                                            </Border>
+                                            <ControlTemplate.Triggers>
+                                                <Trigger Property="IsChecked" Value="True">
+                                                    <Setter TargetName="bd" Property="BorderBrush" Value="#4FC3F7"/>
+                                                    <Setter TargetName="bd" Property="Background" Value="#10233A"/>
+                                                </Trigger>
+                                                <Trigger Property="IsMouseOver" Value="True">
+                                                    <Setter TargetName="bd" Property="BorderBrush" Value="#3E7CA6"/>
+                                                </Trigger>
+                                            </ControlTemplate.Triggers>
+                                        </ControlTemplate>
+                                    </Setter.Value>
+                                </Setter>
+                            </Style>
+                            <Style x:Key="TileCaption" TargetType="TextBlock">
+                                <Setter Property="FontWeight" Value="Bold"/>
+                                <Setter Property="FontSize" Value="12"/>
+                                <Setter Property="Foreground" Value="#EAF6FF"/>
+                                <Setter Property="HorizontalAlignment" Value="Center"/>
+                                <Setter Property="Margin" Value="0,4,0,0"/>
+                            </Style>
+                            <Style x:Key="TileSub" TargetType="TextBlock">
+                                <Setter Property="FontSize" Value="10.5"/>
+                                <Setter Property="Foreground" Value="#9FB6CC"/>
+                                <Setter Property="HorizontalAlignment" Value="Center"/>
+                                <Setter Property="Margin" Value="0,0,0,6"/>
+                                <Setter Property="TextAlignment" Value="Center"/>
+                            </Style>
+                            <Style x:Key="SectionCard" TargetType="Border">
+                                <Setter Property="Background" Value="#121A28"/>
+                                <Setter Property="BorderBrush" Value="#26405A"/>
+                                <Setter Property="BorderThickness" Value="1"/>
+                                <Setter Property="CornerRadius" Value="10"/>
+                                <Setter Property="Padding" Value="12,10"/>
+                                <Setter Property="Margin" Value="0,0,0,10"/>
+                            </Style>
+                        </Grid.Resources>
                         <Grid.RowDefinitions>
                             <RowDefinition Height="Auto"/>
                             <RowDefinition Height="Auto"/>
-                            <RowDefinition Height="Auto"/>
                             <RowDefinition Height="*"/>
-                            <RowDefinition Height="Auto"/>
-                            <RowDefinition Height="Auto"/>
-                            <RowDefinition Height="Auto"/>
-                            <RowDefinition Height="Auto"/>
-                            <RowDefinition Height="Auto"/>
                         </Grid.RowDefinitions>
 
-                        <StackPanel Grid.Row="0" Margin="0,0,0,8">
-                            <Border x:Name="GrindBanner" CornerRadius="8" Padding="12,9" Margin="0,0,0,8"
+                        <!-- header: status banner + target-game icon + info -->
+                        <Grid Grid.Row="0" Margin="0,0,0,8">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <Border x:Name="GrindBanner" CornerRadius="8" Padding="12,9"
                                     Background="#20303F" BorderBrush="#2A4A57" BorderThickness="1">
                                 <StackPanel Orientation="Horizontal">
                                     <Ellipse x:Name="GrindBannerDot" Width="12" Height="12" Fill="#5D6878" Margin="0,0,11,0" VerticalAlignment="Center"/>
-                                    <TextBlock x:Name="GrindBannerText" Text="STOPPED — press Start grind" FontWeight="Bold" FontSize="14" Foreground="#C6D2DE" VerticalAlignment="Center"/>
+                                    <TextBlock x:Name="GrindBannerText" Text="STOPPED — press Start" FontWeight="Bold" FontSize="14" Foreground="#C6D2DE" VerticalAlignment="Center"/>
                                 </StackPanel>
                             </Border>
-                            <TextBlock TextWrapping="Wrap" Foreground="{StaticResource TextDim}"
-                                       Text="Press Start grind and your avatar HUNTS: it roams, targets the nearest NPC, considers it, and runs your rotation until it drops — then rests and hunts again. EQL must be the active window (input only fires while EQL is focused; F12 stops anytime). Keys accept 0-9, A-Z, F1-F12, Tab, and mouse1–mouse5 — so target=Tab and con=mouse5 both work. Movement uses forward + strafe-left/right + back with right-mouse look; set your keys below. /loc: bind a key to a macro whose LAST line is /loc so the bot can keep your position live. Tip: make a NEW chat tab, right-click it → Filters → Other → Other (Misc) so /loc doesn't spam your main chat."/>
-                        </StackPanel>
+                            <StackPanel Grid.Column="1" Orientation="Horizontal" Margin="10,0,0,0" VerticalAlignment="Center">
+                                <Button x:Name="GrindTargetBtn" Content="◎" Width="36" Height="36" FontSize="17" Padding="0"
+                                        Click="TargetEq_Click"
+                                        ToolTip="Target EverQuest. Auto-detected when this page opens — click to re-detect if you restarted the game."/>
+                                <TextBlock x:Name="GrindTargetLabel" Text="—" VerticalAlignment="Center" Margin="7,0,10,0"
+                                           Foreground="{StaticResource TextDim}" FontFamily="Consolas" FontSize="11"
+                                           MaxWidth="240" TextTrimming="CharacterEllipsis"/>
+                                <Button Content="ⓘ" Width="32" Height="32" FontSize="15" Padding="0" Click="GrindInfo_Click"
+                                        ToolTip="How the Grind role works — everything that used to be written on this page."/>
+                            </StackPanel>
+                        </Grid>
 
-                        <WrapPanel Grid.Row="1" Margin="0,0,0,6">
-                            <Button Content="Target EverQuest" Click="TargetEq_Click"/>
-                            <TextBlock x:Name="GrindTargetLabel" Text="target: —" VerticalAlignment="Center"
-                                       Foreground="{StaticResource TextDim}" FontFamily="Consolas"/>
-                        </WrapPanel>
+                        <!-- start / stop / save as mascot scenes -->
+                        <Grid Grid.Row="1" Margin="0,0,0,10">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="1.2*"/>
+                                <ColumnDefinition Width="1.2*"/>
+                                <ColumnDefinition Width="*"/>
+                            </Grid.ColumnDefinitions>
+                            <Button Grid.Column="0" Click="StartGrind_Click" Padding="0" Margin="0,0,8,0" Cursor="Hand"
+                                    BorderBrush="#2C8C55" BorderThickness="1.6" Background="#0B121E"
+                                    ToolTip="Start the selected hunting mode. EQL must be the focused window.">
+                                <Grid ClipToBounds="True">
+                                    <Image x:Name="ArtStart" Stretch="UniformToFill" Height="88"/>
+                                    <Border VerticalAlignment="Bottom" Background="#C8060B10" Padding="8,4">
+                                        <TextBlock Text="▶  START" FontWeight="Bold" FontSize="13.5" Foreground="#7CE38B" HorizontalAlignment="Center"/>
+                                    </Border>
+                                </Grid>
+                            </Button>
+                            <Button Grid.Column="1" Click="StopGrind_Click" Padding="0" Margin="0,0,8,0" Cursor="Hand"
+                                    BorderBrush="#7A6320" BorderThickness="1.6" Background="#0B121E"
+                                    ToolTip="Stop everything. F12 does the same from anywhere, even with the game focused.">
+                                <Grid ClipToBounds="True">
+                                    <Image x:Name="ArtStop" Stretch="UniformToFill" Height="88"/>
+                                    <Border VerticalAlignment="Bottom" Background="#C8060B10" Padding="8,4">
+                                        <TextBlock Text="■  STOP  (F12)" FontWeight="Bold" FontSize="13.5" Foreground="#FFCB6B" HorizontalAlignment="Center"/>
+                                    </Border>
+                                </Grid>
+                            </Button>
+                            <Button Grid.Column="2" Click="SaveGrind_Click" Padding="0" Cursor="Hand"
+                                    BorderBrush="#26405A" BorderThickness="1.6" Background="#0B121E"
+                                    ToolTip="Pack it all away — saves every setting on this page.">
+                                <Grid ClipToBounds="True">
+                                    <Image x:Name="ArtSave" Stretch="UniformToFill" Height="88"/>
+                                    <Border VerticalAlignment="Bottom" Background="#C8060B10" Padding="8,4">
+                                        <TextBlock Text="🎒  SAVE SETTINGS" FontWeight="Bold" FontSize="12.5" Foreground="#9FD8FF" HorizontalAlignment="Center"/>
+                                    </Border>
+                                </Grid>
+                            </Button>
+                        </Grid>
 
-                        <TextBlock Grid.Row="2" Foreground="{StaticResource TextDim}" Margin="0,0,0,3"
-                                   Text="Combat rotation — one &quot;key,delayMs&quot; per line (keys: 0-9, A-Z, F1-F12, Tab, mouse1-5). If it's one macro key, just one line:"/>
-                        <TextBox x:Name="GrindRotation" Grid.Row="3" AcceptsReturn="True" FontFamily="Consolas" FontSize="12"
-                                 Background="#0C0F13" BorderBrush="{StaticResource AccentDim}"
-                                 VerticalScrollBarVisibility="Auto"
-                                 Text="# key,delayMs  (your in-game macro is on 4)&#10;4,1400"/>
-
-                        <WrapPanel Grid.Row="4" Margin="0,8,0,0">
-                            <Button Content="Start grind" Click="StartGrind_Click" Margin="0,0,8,8"/>
-                            <Button Content="Stop (F12)" Click="StopGrind_Click" Margin="0,0,8,8"/>
-                            <Button Content="Save settings" Click="SaveGrind_Click" Margin="0,0,16,8"/>
-                            <CheckBox x:Name="HuntBox" Content="Hunt mode (roam &amp; find mobs)" IsChecked="True" Visibility="Collapsed"
-                                      Foreground="{StaticResource Warn}" VerticalAlignment="Center" Margin="0,0,12,8"/>
-                            <TextBlock Text="Mode" VerticalAlignment="Center" Foreground="{StaticResource Warn}" Margin="0,0,5,8" FontWeight="Bold"/>
-                            <ComboBox x:Name="GrindModeBox" Width="215" VerticalAlignment="Center" Margin="0,0,6,8"
-                                      SelectionChanged="GrindMode_Changed"
-                                      ToolTip="Hunt roams and destroys. Camp holds this exact spot (hazard-safe: it barely moves) and kills the respawns. Hunting Zone stays inside the shape you draw on the Maps page. Waypoints patrols the route you draw on the Maps page. Rotation only just cycles keys with no movement.">
-                                <ComboBoxItem Content="Hunt — roam &amp; destroy" IsSelected="True"/>
-                                <ComboBoxItem Content="Camp — hold this spot"/>
-                                <ComboBoxItem Content="Hunting Zone — stay in the drawn area"/>
-                                <ComboBoxItem Content="Waypoints — patrol the route"/>
-                                <ComboBoxItem Content="Rotation only (no movement)"/>
-                            </ComboBox>
-                            <ComboBox x:Name="WaypointOrderBox" Width="150" VerticalAlignment="Center" Margin="0,0,6,8" Visibility="Collapsed"
-                                      ToolTip="Sequence walks 1→N then back again (ping-pong). Random hops between waypoints like a player with no plan.">
-                                <ComboBoxItem Content="In sequence ⇄" IsSelected="True"/>
-                                <ComboBoxItem Content="Random order"/>
-                            </ComboBox>
-                            <Button x:Name="GrindPlanBtn" Content="Draw on map →" Visibility="Collapsed" Margin="0,0,12,8"
-                                    Click="GrindPlan_Click" ToolTip="Opens the Maps page with the drawing tools for this mode."/>
-                            <CheckBox x:Name="StopOnDeathBox" Content="stop on death" IsChecked="True"
-                                      Foreground="{StaticResource TextDim}" VerticalAlignment="Center" Margin="0,0,16,8"/>
-                            <TextBlock Text="fwd" VerticalAlignment="Center" Foreground="{StaticResource TextDim}" Margin="0,0,3,8"/>
-                            <TextBox x:Name="HuntForwardKeyBox" Text="W" Width="44" VerticalAlignment="Center" Margin="0,0,8,8"/>
-                            <TextBlock Text="back" VerticalAlignment="Center" Foreground="{StaticResource TextDim}" Margin="0,0,3,8"/>
-                            <TextBox x:Name="HuntBackKeyBox" Text="S" Width="44" VerticalAlignment="Center" Margin="0,0,8,8"/>
-                            <TextBlock Text="strafe L" VerticalAlignment="Center" Foreground="{StaticResource TextDim}" Margin="0,0,3,8"/>
-                            <TextBox x:Name="HuntLeftKeyBox" Text="A" Width="44" VerticalAlignment="Center" Margin="0,0,8,8"
-                                     ToolTip="Strafe left (with right-mouse held, this turns/strafes left)."/>
-                            <TextBlock Text="strafe R" VerticalAlignment="Center" Foreground="{StaticResource TextDim}" Margin="0,0,3,8"/>
-                            <TextBox x:Name="HuntRightKeyBox" Text="D" Width="44" VerticalAlignment="Center" Margin="0,0,8,8"
-                                     ToolTip="Strafe right (with right-mouse held, this turns/strafes right)."/>
-                            <TextBlock Text="target" VerticalAlignment="Center" Foreground="{StaticResource TextDim}" Margin="0,0,3,8"/>
-                            <TextBox x:Name="HuntTargetKeyBox" Text="Tab" Width="54" VerticalAlignment="Center" Margin="0,0,8,8"
-                                     ToolTip="Bind 'target nearest NPC' to this in-game. Tab by default; can be a mouse button."/>
-                            <TextBlock Text="con" VerticalAlignment="Center" Foreground="{StaticResource TextDim}" Margin="0,0,3,8"/>
-                            <TextBox x:Name="HuntConsiderKeyBox" Text="C" Width="64" VerticalAlignment="Center" Margin="0,0,8,8"
-                                     ToolTip="Consider the target. Type mouse5 to use your side mouse button."/>
-                            <TextBlock Text="/loc" VerticalAlignment="Center" Foreground="{StaticResource TextDim}" Margin="0,0,3,8"/>
-                            <TextBox x:Name="HuntLocKeyBox" Text="" Width="54" VerticalAlignment="Center" Margin="0,0,8,8"
-                                     ToolTip="Optional: a key bound to a /loc macro. The bot taps it to keep position live."/>
-                            <TextBlock Text="rest s" VerticalAlignment="Center" Foreground="{StaticResource TextDim}" Margin="0,0,3,8"/>
-                            <TextBox x:Name="HuntRestBox" Text="8" Width="40" VerticalAlignment="Center" Margin="0,0,8,8"/>
-                        </WrapPanel>
-
-                        <!-- Targeting suite: stance, hostile-only, tether, directive list (0.9.14) -->
-                        <Border Grid.Row="5" Background="#121A28" BorderBrush="#26405A" BorderThickness="1"
-                                CornerRadius="8" Padding="12,10" Margin="0,2,0,6" VerticalAlignment="Top">
+                        <ScrollViewer Grid.Row="2" VerticalScrollBarVisibility="Auto">
                             <StackPanel>
-                                <TextBlock Text="TARGETING" FontSize="11" Foreground="{StaticResource TextDim}" Margin="0,0,0,6"/>
-                                <WrapPanel>
-                                    <TextBlock Text="Stance:" VerticalAlignment="Center" Margin="0,0,8,6"
-                                               ToolTip="Behaves like a pet: how eager is the bot to start fights?"/>
-                                    <RadioButton x:Name="StanceAggro" GroupName="stance" Content="Aggressive" IsChecked="True" Margin="0,0,12,6"
-                                                 Foreground="{StaticResource Text}" VerticalAlignment="Center"
-                                                 ToolTip="Attacks anything it finds while roaming (today's behavior)."/>
-                                    <RadioButton x:Name="StanceDef" GroupName="stance" Content="Defensive" Margin="0,0,12,6"
-                                                 Foreground="{StaticResource Text}" VerticalAlignment="Center"
-                                                 ToolTip="Holds position and only fights back when something attacks first."/>
-                                    <RadioButton x:Name="StanceDir" GroupName="stance" Content="Directive" Margin="0,0,12,6"
-                                                 Foreground="{StaticResource Text}" VerticalAlignment="Center"
-                                                 ToolTip="Only engages mobs on the target list — feed it from the Game Data page."/>
-                                    <CheckBox x:Name="HostileOnlyBox" Content="only scowls / threatening" Margin="0,0,12,6"
-                                              Foreground="{StaticResource Warn}" VerticalAlignment="Center"
-                                              ToolTip="Skip anything whose /con attitude isn't scowls or glares threateningly — no faction accidents."/>
-                                    <CheckBox x:Name="BardBox" Content="bard melody mode" Margin="0,0,12,6"
-                                              Foreground="{StaticResource Text}" VerticalAlignment="Center"
-                                              ToolTip="For bards running /melody: the FIRST rotation line is your melody hotkey. It fires once and keeps singing — the bot only recasts when the log says the melody stopped (stun, fizzled note, song end). No more interrupting your own songs."/>
-                                </WrapPanel>
-                                <WrapPanel>
-                                    <CheckBox x:Name="TetherBox" Content="tether to start point" VerticalAlignment="Center" Margin="0,0,10,4"
-                                              Foreground="{StaticResource Text}"
-                                              ToolTip="Anchors where the run starts (first /loc). The bot walks straight back inside whenever it crosses the radius, and the circle is drawn on the Maps page + overlay. Tight radii need a /loc key bound (or a repeating /loc macro) so its position stays fresh."/>
-                                    <Slider x:Name="TetherSlider" Width="180" Minimum="10" Maximum="1500" Value="300"
-                                            TickFrequency="50" IsSnapToTickEnabled="False" VerticalAlignment="Center" Margin="0,0,8,4"
-                                            ToolTip="10-unit steps below 50 for tight little camps; 50-unit steps from 50 up."
-                                            ValueChanged="TetherSlider_Changed"/>
-                                    <TextBlock x:Name="TetherLabel" Text="300 units" VerticalAlignment="Center"
-                                               Foreground="{StaticResource TextDim}" Margin="0,0,16,4" MinWidth="70"/>
-                                    <TextBlock Text="Directive targets:" VerticalAlignment="Center" Margin="0,0,6,4"
-                                               Foreground="{StaticResource TextDim}"/>
-                                    <TextBox x:Name="TargetMobsBox" Width="240" Height="44" AcceptsReturn="True" FontSize="11"
-                                             FontFamily="Consolas" VerticalScrollBarVisibility="Auto" VerticalAlignment="Center" Margin="0,0,6,4"
-                                             ToolTip="One mob name per line. Add from Game Data → pick a mob → 'Target with Grind'."/>
-                                </WrapPanel>
-                                <WrapPanel Margin="0,4,0,0">
-                                    <TextBlock Text="Compass:" VerticalAlignment="Center" Margin="0,0,8,4" Foreground="{StaticResource TextDim}"
-                                               ToolTip="Reads your facing straight off the in-game compass strip — homing and target-facing become instant and exact. Make the compass FULLY OPAQUE in-game (transparency lets the world bleed through and muddies the read)."/>
-                                    <Button Content="Pick region" Click="CompassPick_Click" Margin="0,0,6,4" Padding="10,3"
-                                            ToolTip="Captures the game and lets you drag a box around the compass strip (just under the minimap). One-time; survives window moves/resizes."/>
-                                    <Button x:Name="CompassSpinBtn" Content="Spin-calibrate" Click="CompassSpin_Click" Margin="0,0,8,4" Padding="10,3"
-                                            ToolTip="Stand somewhere safe with EQ on screen. The bot turns one full circle (~10 s) to fingerprint the compass and measure exactly how many mouse-pixels make 360°."/>
-                                    <TextBlock x:Name="CompassStatus" Text="not set" VerticalAlignment="Center" Foreground="{StaticResource TextDim}" Margin="0,0,16,4"/>
-                                    <CheckBox x:Name="LevBox" Content="keep Levitate up" VerticalAlignment="Center" Margin="0,0,6,4"
-                                              Foreground="{StaticResource Text}"
-                                              ToolTip="Casts your Levitate hotkey at the start of a run and re-casts when the log says it wore off (plus a safety timer). While levitating the bot rides its view just above the horizon, floating over pits and water instead of steering down into them."/>
-                                    <TextBlock Text="cast key" VerticalAlignment="Center" Margin="0,0,4,4" Foreground="{StaticResource TextDim}"/>
-                                    <TextBox x:Name="LevKeyBox" Width="46" VerticalAlignment="Center" Margin="0,0,8,4"
-                                             ToolTip="The hotkey that casts Levitate (spell gem or social)."/>
-                                    <TextBlock Text="buff name" VerticalAlignment="Center" Margin="0,0,4,4" Foreground="{StaticResource TextDim}"/>
-                                    <TextBox x:Name="LevNameBox" Width="90" VerticalAlignment="Center" Margin="0,0,4,4"
-                                             ToolTip="Watched in 'Your X spell has worn off.' lines to know when to recast."/>
-                                </WrapPanel>
-                            </StackPanel>
-                        </Border>
 
-                        <TextBlock x:Name="GrindStatsLabel" Grid.Row="6" Margin="0,4,0,4" FontFamily="Consolas"
-                                   Foreground="{StaticResource Text}" Text="idle — keys 0 · kills 0 · xp 0 · loops 0"/>
-
-                        <TextBox x:Name="GrindLog" Grid.Row="7" Height="96" IsReadOnly="True"
-                                 Background="#0C0F13" Foreground="{StaticResource Good}" FontFamily="Consolas" FontSize="11"
-                                 VerticalScrollBarVisibility="Auto" TextWrapping="Wrap"/>
-
-                        <Expander Grid.Row="8" Margin="0,8,0,0" Foreground="{StaticResource Text}" IsExpanded="False"
-                                  Expanded="GrindSess_Expanded">
-                            <Expander.Header>
-                                <TextBlock Text="PREVIOUS GRIND SESSIONS" FontSize="11.5" FontWeight="Bold" Foreground="#7FB2D9"/>
-                            </Expander.Header>
-                            <StackPanel Margin="0,6,0,0">
-                                <WrapPanel Margin="0,0,0,4">
-                                    <TextBlock Text="filter" VerticalAlignment="Center" Foreground="{StaticResource TextDim}" Margin="0,0,5,0"/>
-                                    <TextBox x:Name="GrindSessFilter" Width="180" TextChanged="GrindSessFilter_Changed"
-                                             ToolTip="Type to filter by mode or zone. Click any column header to sort."/>
-                                </WrapPanel>
-                                <DataGrid x:Name="GrindSessGrid" AutoGenerateColumns="False" IsReadOnly="True" MaxHeight="240"
-                                          Background="#0C0F13" RowBackground="#0F141C" AlternatingRowBackground="#111A26"
-                                          Foreground="{StaticResource Text}" BorderBrush="#26405A" BorderThickness="1"
-                                          GridLinesVisibility="None" HeadersVisibility="Column" CanUserAddRows="False"
-                                          FontSize="11.5" ColumnHeaderHeight="26">
-                                    <DataGrid.Columns>
-                                        <DataGridTextColumn Header="When" Binding="{Binding When, StringFormat='{}{0:MMM d HH:mm}'}" Width="105" SortDirection="Descending"/>
-                                        <DataGridTextColumn Header="Mode" Binding="{Binding Mode}" Width="90"/>
-                                        <DataGridTextColumn Header="Zone" Binding="{Binding Zone}" Width="130"/>
-                                        <DataGridTextColumn Header="Duration" Binding="{Binding Duration}" Width="75"/>
-                                        <DataGridTextColumn Header="Kills" Binding="{Binding Kills}" Width="55"/>
-                                        <DataGridTextColumn Header="XP" Binding="{Binding Xp}" Width="50"/>
-                                        <DataGridTextColumn Header="AA" Binding="{Binding Aa}" Width="45"/>
-                                        <DataGridTextColumn Header="Deaths" Binding="{Binding Deaths}" Width="60"/>
-                                        <DataGridTextColumn Header="Dmg dealt" Binding="{Binding Dealt, StringFormat=N0}" Width="85"/>
-                                        <DataGridTextColumn Header="Dmg taken" Binding="{Binding Taken, StringFormat=N0}" Width="*"/>
-                                    </DataGrid.Columns>
-                                </DataGrid>
-                                <Border Background="#13243B" CornerRadius="6" Padding="10,6" Margin="0,4,0,0">
-                                    <TextBlock x:Name="GrindSessTally" FontFamily="Consolas" FontSize="11.5" Foreground="#9FB6CC"
-                                               Text="no sessions yet"/>
+                                <!-- HUNTING MODE -->
+                                <Border Style="{StaticResource SectionCard}">
+                                    <StackPanel>
+                                        <Grid ClipToBounds="True" Height="104">
+                                            <Image x:Name="ArtModes" Stretch="UniformToFill"/>
+                                            <Border VerticalAlignment="Bottom" HorizontalAlignment="Left" Background="#C8060B10" Padding="10,4" CornerRadius="0,8,0,0">
+                                                <TextBlock Text="HUNTING MODE" FontWeight="Bold" FontSize="12" Foreground="#7FB2D9"/>
+                                            </Border>
+                                        </Grid>
+                                        <UniformGrid Columns="4" Margin="0,8,0,4">
+                                            <RadioButton x:Name="ModeTileHunt" GroupName="modeTile" Style="{StaticResource SceneTile}" Checked="ModeTile_Checked" IsChecked="True"
+                                                         ToolTip="Search &amp; destroy: roam the area, target, consider, fight, rest, repeat.">
+                                                <StackPanel>
+                                                    <Image x:Name="ArtModeHunt" Height="80" Stretch="UniformToFill"/>
+                                                    <TextBlock Text="HUNT" Style="{StaticResource TileCaption}"/>
+                                                    <TextBlock Text="roam &amp; destroy" Style="{StaticResource TileSub}"/>
+                                                </StackPanel>
+                                            </RadioButton>
+                                            <RadioButton x:Name="ModeTileCamp" GroupName="modeTile" Style="{StaticResource SceneTile}" Checked="ModeTile_Checked"
+                                                         ToolTip="Hold this exact spot and kill the respawns — it barely moves, so hazards around the camp can't swallow it.">
+                                                <StackPanel>
+                                                    <Image x:Name="ArtModeCamp" Height="80" Stretch="UniformToFill"/>
+                                                    <TextBlock Text="CAMP" Style="{StaticResource TileCaption}"/>
+                                                    <TextBlock Text="hold this spot" Style="{StaticResource TileSub}"/>
+                                                </StackPanel>
+                                            </RadioButton>
+                                            <RadioButton x:Name="ModeTileZone" GroupName="modeTile" Style="{StaticResource SceneTile}" Checked="ModeTile_Checked"
+                                                         ToolTip="Hunts only inside the circle / rectangle / polygon you draw on the Maps page.">
+                                                <StackPanel>
+                                                    <Image x:Name="ArtModeZone" Height="80" Stretch="UniformToFill"/>
+                                                    <TextBlock Text="HUNTING ZONE" Style="{StaticResource TileCaption}"/>
+                                                    <TextBlock Text="stay in the drawn area" Style="{StaticResource TileSub}"/>
+                                                </StackPanel>
+                                            </RadioButton>
+                                            <RadioButton x:Name="ModeTileWp" GroupName="modeTile" Style="{StaticResource SceneTile}" Checked="ModeTile_Checked" Margin="0"
+                                                         ToolTip="Patrols the waypoint route you draw on the Maps page — closely, never exactly. Looks human.">
+                                                <StackPanel>
+                                                    <Image x:Name="ArtModeWp" Height="80" Stretch="UniformToFill"/>
+                                                    <TextBlock Text="WAYPOINTS" Style="{StaticResource TileCaption}"/>
+                                                    <TextBlock Text="patrol the route" Style="{StaticResource TileSub}"/>
+                                                </StackPanel>
+                                            </RadioButton>
+                                        </UniformGrid>
+                                        <WrapPanel>
+                                            <ComboBox x:Name="GrindModeBox" Width="10" Visibility="Collapsed" SelectionChanged="GrindMode_Changed">
+                                                <ComboBoxItem Content="Hunt" IsSelected="True"/>
+                                                <ComboBoxItem Content="Camp"/>
+                                                <ComboBoxItem Content="Hunting Zone"/>
+                                                <ComboBoxItem Content="Waypoints"/>
+                                                <ComboBoxItem Content="Rotation only"/>
+                                            </ComboBox>
+                                            <CheckBox x:Name="HuntBox" IsChecked="True" Visibility="Collapsed"/>
+                                            <ComboBox x:Name="WaypointOrderBox" Width="150" VerticalAlignment="Center" Margin="0,0,8,4" Visibility="Collapsed"
+                                                      ToolTip="Sequence walks 1→N then back again (ping-pong). Random hops between waypoints like a player with no plan.">
+                                                <ComboBoxItem Content="In sequence ⇄" IsSelected="True"/>
+                                                <ComboBoxItem Content="Random order"/>
+                                            </ComboBox>
+                                            <Button x:Name="GrindPlanBtn" Content="Draw on map →" Visibility="Collapsed" Margin="0,0,10,4"
+                                                    Click="GrindPlan_Click" ToolTip="Opens the Maps page with the drawing tools for this mode."/>
+                                            <CheckBox x:Name="RotOnlyBox" Content="rotation only (no movement)" Click="RotOnly_Click" VerticalAlignment="Center" Margin="0,0,10,4"
+                                                      Foreground="{StaticResource TextDim}"
+                                                      ToolTip="Ignore the mode tiles and just cycle the combat rotation in place — the original grind."/>
+                                            <CheckBox x:Name="StopOnDeathBox" Content="stop on death" IsChecked="True" VerticalAlignment="Center" Margin="0,0,4,4"
+                                                      Foreground="{StaticResource TextDim}"/>
+                                        </WrapPanel>
+                                    </StackPanel>
                                 </Border>
+
+                                <!-- TARGETING -->
+                                <Border Style="{StaticResource SectionCard}">
+                                    <StackPanel>
+                                        <Grid ClipToBounds="True" Height="86">
+                                            <Image x:Name="ArtTargeting" Stretch="UniformToFill"/>
+                                            <Border VerticalAlignment="Bottom" HorizontalAlignment="Left" Background="#C8060B10" Padding="10,4" CornerRadius="0,8,0,0">
+                                                <TextBlock Text="TARGETING — STANCE" FontWeight="Bold" FontSize="12" Foreground="#7FB2D9"/>
+                                            </Border>
+                                        </Grid>
+                                        <UniformGrid Columns="3" Margin="0,8,0,4">
+                                            <RadioButton x:Name="StanceAggro" GroupName="stance" Style="{StaticResource SceneTile}" Checked="Stance_Checked" IsChecked="True"
+                                                         ToolTip="Attacks anything it finds while working the selected mode.">
+                                                <StackPanel>
+                                                    <Image x:Name="ArtStanceA" Height="86" Stretch="UniformToFill"/>
+                                                    <TextBlock Text="AGGRESSIVE" Style="{StaticResource TileCaption}"/>
+                                                    <TextBlock Text="attack on sight" Style="{StaticResource TileSub}"/>
+                                                </StackPanel>
+                                            </RadioButton>
+                                            <RadioButton x:Name="StanceDef" GroupName="stance" Style="{StaticResource SceneTile}" Checked="Stance_Checked"
+                                                         ToolTip="Holds its ground and only fights back when something attacks first.">
+                                                <StackPanel>
+                                                    <Image x:Name="ArtStanceD" Height="86" Stretch="UniformToFill"/>
+                                                    <TextBlock Text="DEFENSIVE" Style="{StaticResource TileCaption}"/>
+                                                    <TextBlock Text="fight back only" Style="{StaticResource TileSub}"/>
+                                                </StackPanel>
+                                            </RadioButton>
+                                            <RadioButton x:Name="StanceDir" GroupName="stance" Style="{StaticResource SceneTile}" Checked="Stance_Checked" Margin="0"
+                                                         ToolTip="Only engages mobs on your directive list — pick them on the Game Data page.">
+                                                <StackPanel>
+                                                    <Image x:Name="ArtStanceDir" Height="86" Stretch="UniformToFill"/>
+                                                    <TextBlock Text="DIRECTIVE" Style="{StaticResource TileCaption}"/>
+                                                    <TextBlock Text="only the chosen list" Style="{StaticResource TileSub}"/>
+                                                </StackPanel>
+                                            </RadioButton>
+                                        </UniformGrid>
+                                        <WrapPanel>
+                                            <ComboBox x:Name="HostileSelBox" Width="235" VerticalAlignment="Center" Margin="0,2,10,2"
+                                                      ToolTip="Faction filter for Aggressive / Defensive: engage anything, or only mobs whose /con reads scowls or glares threateningly.">
+                                                <ComboBoxItem Content="engage anything the mode finds" IsSelected="True"/>
+                                                <ComboBoxItem Content="only scowls / threatening cons"/>
+                                            </ComboBox>
+                                            <StackPanel x:Name="DirectiveRow" Orientation="Horizontal" Visibility="Collapsed">
+                                                <TextBlock Text="Directive targets:" VerticalAlignment="Center" Margin="0,0,6,0" Foreground="{StaticResource TextDim}"/>
+                                                <TextBox x:Name="TargetMobsBox" Width="230" Height="42" AcceptsReturn="True" FontSize="11"
+                                                         FontFamily="Consolas" VerticalScrollBarVisibility="Auto" VerticalAlignment="Center" Margin="0,0,8,0"
+                                                         ToolTip="One mob name per line."/>
+                                                <Button Content="pick from Game Data →" Click="GrindData_Click" VerticalAlignment="Center"
+                                                        ToolTip="Browse the bestiary and press '☠ Target with Grind' on any mob."/>
+                                            </StackPanel>
+                                        </WrapPanel>
+                                    </StackPanel>
+                                </Border>
+
+                                <!-- TETHER -->
+                                <Border Style="{StaticResource SectionCard}">
+                                    <StackPanel>
+                                        <Grid ClipToBounds="True" Height="80">
+                                            <Image x:Name="ArtTether" Stretch="UniformToFill"/>
+                                            <Border VerticalAlignment="Bottom" HorizontalAlignment="Left" Background="#C8060B10" Padding="10,4" CornerRadius="0,8,0,0">
+                                                <StackPanel Orientation="Horizontal">
+                                                    <TextBlock Text="TETHER" FontWeight="Bold" FontSize="12" Foreground="#7FB2D9" VerticalAlignment="Center"/>
+                                                    <CheckBox x:Name="TetherBox" Content="leash her to the start point" VerticalAlignment="Center" Margin="14,0,0,0"
+                                                              Foreground="{StaticResource Text}"
+                                                              ToolTip="Anchors where the run starts (first /loc). She walks straight back inside whenever she crosses the radius; the circle shows on the Maps page + overlay. Tight radii want a /loc key bound so her position stays fresh."/>
+                                                </StackPanel>
+                                            </Border>
+                                        </Grid>
+                                        <Grid Margin="0,8,0,0">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="Auto"/>
+                                                <ColumnDefinition Width="*"/>
+                                            </Grid.ColumnDefinitions>
+                                            <Border Width="58" Height="58" CornerRadius="29" ClipToBounds="True" BorderBrush="#4FC3F7" BorderThickness="1.6" VerticalAlignment="Center">
+                                                <Image x:Name="ArtTetherFace" Stretch="UniformToFill"
+                                                       ToolTip="How she feels about the leash length. Short = worried. Long = won the lottery."/>
+                                            </Border>
+                                            <ui:TetherRope x:Name="TetherRope" Grid.Column="1" Margin="10,0,0,0" VerticalAlignment="Center" Height="52"/>
+                                        </Grid>
+                                        <TextBlock x:Name="TetherLabel" Text="300 units" Visibility="Collapsed"/>
+                                    </StackPanel>
+                                </Border>
+
+                                <!-- SETTINGS -->
+                                <Expander IsExpanded="False" Foreground="{StaticResource Text}" Margin="0,0,0,10">
+                                    <Expander.Header>
+                                        <StackPanel Orientation="Horizontal">
+                                            <Border Width="120" Height="44" CornerRadius="7" ClipToBounds="True" Margin="0,0,10,0">
+                                                <Image x:Name="ArtSettings" Stretch="UniformToFill"/>
+                                            </Border>
+                                            <TextBlock Text="GRIND SETTINGS" FontWeight="Bold" FontSize="12" Foreground="#7FB2D9" VerticalAlignment="Center"/>
+                                            <TextBlock Text="keybinds · bard melody · levitate" FontSize="10.5" Foreground="{StaticResource TextDim}" VerticalAlignment="Center" Margin="10,0,0,0"/>
+                                        </StackPanel>
+                                    </Expander.Header>
+                                    <Border Style="{StaticResource SectionCard}" Margin="0,6,0,0">
+                                        <StackPanel>
+                                            <WrapPanel>
+                                                <TextBlock Text="fwd" VerticalAlignment="Center" Foreground="{StaticResource TextDim}" Margin="0,0,3,8"/>
+                                                <TextBox x:Name="HuntForwardKeyBox" Text="W" Width="44" VerticalAlignment="Center" Margin="0,0,8,8"/>
+                                                <TextBlock Text="back" VerticalAlignment="Center" Foreground="{StaticResource TextDim}" Margin="0,0,3,8"/>
+                                                <TextBox x:Name="HuntBackKeyBox" Text="S" Width="44" VerticalAlignment="Center" Margin="0,0,8,8"/>
+                                                <TextBlock Text="strafe L" VerticalAlignment="Center" Foreground="{StaticResource TextDim}" Margin="0,0,3,8"/>
+                                                <TextBox x:Name="HuntLeftKeyBox" Text="A" Width="44" VerticalAlignment="Center" Margin="0,0,8,8"/>
+                                                <TextBlock Text="strafe R" VerticalAlignment="Center" Foreground="{StaticResource TextDim}" Margin="0,0,3,8"/>
+                                                <TextBox x:Name="HuntRightKeyBox" Text="D" Width="44" VerticalAlignment="Center" Margin="0,0,8,8"/>
+                                                <TextBlock Text="target" VerticalAlignment="Center" Foreground="{StaticResource TextDim}" Margin="0,0,3,8"/>
+                                                <TextBox x:Name="HuntTargetKeyBox" Text="Tab" Width="54" VerticalAlignment="Center" Margin="0,0,8,8"
+                                                         ToolTip="Bind 'target nearest NPC' to this in-game. Can be a mouse button."/>
+                                                <TextBlock Text="con" VerticalAlignment="Center" Foreground="{StaticResource TextDim}" Margin="0,0,3,8"/>
+                                                <TextBox x:Name="HuntConsiderKeyBox" Text="C" Width="64" VerticalAlignment="Center" Margin="0,0,8,8"
+                                                         ToolTip="Consider the target. mouse5 works."/>
+                                                <TextBlock Text="/loc" VerticalAlignment="Center" Foreground="{StaticResource TextDim}" Margin="0,0,3,8"/>
+                                                <TextBox x:Name="HuntLocKeyBox" Text="" Width="54" VerticalAlignment="Center" Margin="0,0,8,8"
+                                                         ToolTip="A key bound to a /loc macro — the bot taps it to keep position live. Strongly recommended for tether / camp / waypoints."/>
+                                                <TextBlock Text="rest s" VerticalAlignment="Center" Foreground="{StaticResource TextDim}" Margin="0,0,3,8"/>
+                                                <TextBox x:Name="HuntRestBox" Text="8" Width="40" VerticalAlignment="Center" Margin="0,0,8,8"/>
+                                            </WrapPanel>
+                                            <WrapPanel>
+                                                <CheckBox x:Name="BardBox" Content="bard melody mode" Margin="0,0,14,4" Foreground="{StaticResource Text}" VerticalAlignment="Center"
+                                                          ToolTip="For bards running /melody: the FIRST rotation line is your melody hotkey. It fires once and keeps singing — recast ONLY when the log says the melody stopped."/>
+                                                <CheckBox x:Name="LevBox" Content="keep Levitate up" VerticalAlignment="Center" Margin="0,0,6,4" Foreground="{StaticResource Text}"
+                                                          ToolTip="Casts your Levitate hotkey at the start and re-casts when the log says it wore off. While levitating she rides her view just above the horizon and floats over pits and water."/>
+                                                <TextBlock Text="cast key" VerticalAlignment="Center" Margin="0,0,4,4" Foreground="{StaticResource TextDim}"/>
+                                                <TextBox x:Name="LevKeyBox" Width="46" VerticalAlignment="Center" Margin="0,0,8,4"/>
+                                                <TextBlock Text="buff name" VerticalAlignment="Center" Margin="0,0,4,4" Foreground="{StaticResource TextDim}"/>
+                                                <TextBox x:Name="LevNameBox" Width="90" VerticalAlignment="Center" Margin="0,0,4,4"/>
+                                            </WrapPanel>
+                                        </StackPanel>
+                                    </Border>
+                                </Expander>
+
+                                <!-- COMPASS -->
+                                <Expander IsExpanded="False" Foreground="{StaticResource Text}" Margin="0,0,0,10">
+                                    <Expander.Header>
+                                        <StackPanel Orientation="Horizontal">
+                                            <Border Width="120" Height="44" CornerRadius="7" ClipToBounds="True" Margin="0,0,10,0">
+                                                <Image x:Name="ArtCompass" Stretch="UniformToFill"/>
+                                            </Border>
+                                            <TextBlock Text="COMPASS" FontWeight="Bold" FontSize="12" Foreground="#7FB2D9" VerticalAlignment="Center"/>
+                                            <Border x:Name="CompassVerdict" Background="#2A2410" BorderBrush="#7A6320" BorderThickness="1" CornerRadius="6" Padding="8,2" Margin="10,0,0,0" VerticalAlignment="Center">
+                                                <TextBlock x:Name="CompassVerdictText" Text="not set" FontSize="10.5" Foreground="#FFE1A6"/>
+                                            </Border>
+                                        </StackPanel>
+                                    </Expander.Header>
+                                    <Border Style="{StaticResource SectionCard}" Margin="0,6,0,0">
+                                        <WrapPanel>
+                                            <Button Content="Pick region" Click="CompassPick_Click" Margin="0,0,6,4" Padding="10,3"
+                                                    ToolTip="Captures the game and lets you drag a box around the compass strip (make it fully opaque in-game). One-time; survives window moves."/>
+                                            <Button x:Name="CompassSpinBtn" Content="Spin-calibrate" Click="CompassSpin_Click" Margin="0,0,8,4" Padding="10,3"
+                                                    ToolTip="Stand somewhere safe with EQ on screen; she turns up to two circles (~5–25s) to fingerprint the compass and measure exactly how many mouse-pixels make 360°."/>
+                                            <TextBlock x:Name="CompassStatus" Text="not set" VerticalAlignment="Center" Foreground="{StaticResource TextDim}" Margin="0,0,4,4"/>
+                                        </WrapPanel>
+                                    </Border>
+                                </Expander>
+
+                                <!-- COMBAT ROTATION -->
+                                <Expander x:Name="RotationExpander" IsExpanded="False" Foreground="{StaticResource Text}" Margin="0,0,0,10">
+                                    <Expander.Header>
+                                        <StackPanel Orientation="Horizontal">
+                                            <Border Width="120" Height="44" CornerRadius="7" ClipToBounds="True" Margin="0,0,10,0">
+                                                <Image x:Name="ArtRotation" Stretch="UniformToFill"/>
+                                            </Border>
+                                            <TextBlock Text="COMBAT ROTATION" FontWeight="Bold" FontSize="12" Foreground="#7FB2D9" VerticalAlignment="Center"/>
+                                            <TextBlock x:Name="RotationSummary" Text="empty — click to set up" FontSize="10.5" Foreground="{StaticResource TextDim}" VerticalAlignment="Center" Margin="10,0,0,0"/>
+                                        </StackPanel>
+                                    </Expander.Header>
+                                    <Border Style="{StaticResource SectionCard}" Margin="0,6,0,0">
+                                        <Grid>
+                                            <TextBox x:Name="GrindRotation" AcceptsReturn="True" FontFamily="Consolas" FontSize="12" MinHeight="88"
+                                                     Background="#0C0F13" BorderBrush="{StaticResource AccentDim}"
+                                                     VerticalScrollBarVisibility="Auto" TextChanged="RotationText_Changed" Text=""/>
+                                            <TextBlock x:Name="RotationHint" IsHitTestVisible="False" Margin="8,6,8,6" Foreground="#5D6878" FontFamily="Consolas" FontSize="11.5"
+                                                       Text="one key,delayMs per line — e.g.&#10;4,1400&#10;keys: 0-9, A-Z, F1-F24, Tab, Home/End/PgUp/PgDn, mouse1-5&#10;bard melody mode: the FIRST line is your /melody hotkey"/>
+                                        </Grid>
+                                    </Border>
+                                </Expander>
+
+                                <TextBlock x:Name="GrindStatsLabel" Margin="0,0,0,4" FontFamily="Consolas"
+                                           Foreground="{StaticResource Text}" Text="idle — keys 0 · kills 0 · xp 0 · loops 0"/>
+
+                                <TextBox x:Name="GrindLog" Height="96" IsReadOnly="True"
+                                         Background="#0C0F13" Foreground="{StaticResource Good}" FontFamily="Consolas" FontSize="11"
+                                         VerticalScrollBarVisibility="Auto" TextWrapping="Wrap"/>
+
+                                <Expander Margin="0,8,0,0" Foreground="{StaticResource Text}" IsExpanded="False"
+                                          Expanded="GrindSess_Expanded">
+                                    <Expander.Header>
+                                        <TextBlock Text="PREVIOUS GRIND SESSIONS" FontSize="11.5" FontWeight="Bold" Foreground="#7FB2D9"/>
+                                    </Expander.Header>
+                                    <StackPanel Margin="0,6,0,0">
+                                        <WrapPanel Margin="0,0,0,4">
+                                            <TextBlock Text="filter" VerticalAlignment="Center" Foreground="{StaticResource TextDim}" Margin="0,0,5,0"/>
+                                            <TextBox x:Name="GrindSessFilter" Width="180" TextChanged="GrindSessFilter_Changed"
+                                                     ToolTip="Type to filter by mode or zone. Click any column header to sort."/>
+                                        </WrapPanel>
+                                        <DataGrid x:Name="GrindSessGrid" AutoGenerateColumns="False" IsReadOnly="True" MaxHeight="240"
+                                                  Background="#0C0F13" RowBackground="#0F141C" AlternatingRowBackground="#111A26"
+                                                  Foreground="{StaticResource Text}" BorderBrush="#26405A" BorderThickness="1"
+                                                  GridLinesVisibility="None" HeadersVisibility="Column" CanUserAddRows="False"
+                                                  FontSize="11.5" ColumnHeaderHeight="26">
+                                            <DataGrid.Columns>
+                                                <DataGridTextColumn Header="When" Binding="{Binding When, StringFormat='{}{0:MMM d HH:mm}'}" Width="105" SortDirection="Descending"/>
+                                                <DataGridTextColumn Header="Mode" Binding="{Binding Mode}" Width="90"/>
+                                                <DataGridTextColumn Header="Zone" Binding="{Binding Zone}" Width="130"/>
+                                                <DataGridTextColumn Header="Duration" Binding="{Binding Duration}" Width="75"/>
+                                                <DataGridTextColumn Header="Kills" Binding="{Binding Kills}" Width="55"/>
+                                                <DataGridTextColumn Header="XP" Binding="{Binding Xp}" Width="50"/>
+                                                <DataGridTextColumn Header="AA" Binding="{Binding Aa}" Width="45"/>
+                                                <DataGridTextColumn Header="Deaths" Binding="{Binding Deaths}" Width="60"/>
+                                                <DataGridTextColumn Header="Dmg dealt" Binding="{Binding Dealt, StringFormat=N0}" Width="85"/>
+                                                <DataGridTextColumn Header="Dmg taken" Binding="{Binding Taken, StringFormat=N0}" Width="*"/>
+                                            </DataGrid.Columns>
+                                        </DataGrid>
+                                        <Border Background="#13243B" CornerRadius="6" Padding="10,6" Margin="0,4,0,0">
+                                            <TextBlock x:Name="GrindSessTally" FontFamily="Consolas" FontSize="11.5" Foreground="#9FB6CC"
+                                                       Text="no sessions yet"/>
+                                        </Border>
+                                    </StackPanel>
+                                </Expander>
+
                             </StackPanel>
-                        </Expander>
+                        </ScrollViewer>
                     </Grid>
 
                     <!-- ===== COMBAT (live DPS meter + per-fight parse from the log) ===== -->

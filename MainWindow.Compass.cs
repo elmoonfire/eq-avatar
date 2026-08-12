@@ -27,6 +27,21 @@ public partial class MainWindow
             : !c.Ready ? "region set — spin-calibrate next"
             : c.MappingLearned ? $"ready · {c.PxPerDeg:0.0} px/° · mapped"
             : $"ready · {c.PxPerDeg:0.0} px/° (mapping locks in while hunting)";
+        if (CompassVerdict is null || CompassVerdictText is null) return;
+        if (c.Ready)
+        {
+            CompassVerdict.Background = Hex("#12261B");
+            CompassVerdict.BorderBrush = Hex("#2C8C55");
+            CompassVerdictText.Foreground = Hex("#B6F2C9");
+            CompassVerdictText.Text = c.MappingLearned ? "calibrated — good to go" : "calibrated — mapping learns on first hunt";
+        }
+        else
+        {
+            CompassVerdict.Background = Hex("#2A2410");
+            CompassVerdict.BorderBrush = Hex("#7A6320");
+            CompassVerdictText.Foreground = Hex("#FFE1A6");
+            CompassVerdictText.Text = c.HasRect ? "recalibrate needed — run Spin-calibrate" : "not set — pick the region";
+        }
     }
 
     private void CompassPick_Click(object sender, RoutedEventArgs e)
