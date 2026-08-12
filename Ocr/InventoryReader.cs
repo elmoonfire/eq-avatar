@@ -1,12 +1,12 @@
 using System;
 using System.Collections.Generic;
 using System.Drawing;
-using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Threading.Tasks;
 using Windows.Graphics.Imaging;
 using Windows.Media.Ocr;
@@ -15,28 +15,49 @@ namespace EQAvatar.Spike.Ocr;
 
 /// <summary>
 /// Reads the in-game Inventory window (default_modern skin) off the screen — the most-trusted
-/// source of character data, because it is literally what the game displays. Nothing is entered
-/// by hand: vitals, attributes (with caps + heroic bonus), resists, regens, weight, currency,
-/// and the name / level / class header all come from one capture.
+/// source of character data, because it is literally what the game displays.
 ///
-/// HOW IT FINDS THE WINDOW: not by pixel offsets. The inventory is a movable child window, so
-/// the reader OCRs the whole game frame once and looks for the text anchors the skin always
-/// draws — "Character Vitals" and "Stats and Resists". Their positions define the crop, which
-/// makes the whole thing resolution- and position-independent. The crop is then UPSCALED 3×
-/// (the stat text is small; Windows OCR reads the enlarged copy far more reliably) and parsed
-/// by walking each OCR line: known label → the numbers that follow it, until the next label.
-/// A "5263/5263" token is two numbers; "295/510 + 0" is current / cap / heroic.
+/// HOW IT WORKS NOW (rewritten 0.9.28). The old reader OCR'd the whole window and then walked
+/// each OCR line looking for "label, then numbers". That could never work: the skin draws the
+/// label at x=0 and the value at x=58 of a 175-wide row, and Windows OCR reliably splits that
+/// gap into two separate lines — so "HP" and "1486/1486" were never on the same line and the
+/// parse scored zero rows every time. Worse, adjacent value boxes ran together ("226" and
+/// "1312" arriving as "2261312") and thin glyphs were lost to HDR washout ("861/861" → "8611861").
+///
+/// The rewrite reads the grid by GEOMETRY instead, using the client's own layout (see
+/// <see cref="InventoryLayout"/>, transcribed from EQUI_InventoryWindow.xml). It OCRs the frame
+/// once to find the two column headers — "Character Vitals" and "Stats and Resists" — which sit
+/// exactly one column stride apart by construction. That measurement gives the origin and the
+/// column offset directly in pixels; the vertical scale is seeded from it and then confirmed
+/// against three probe boxes at the corners of the grid. Every one of the ~50 value boxes can
+/// then be located to the pixel and read on its own. One box holds one number, which makes merged values and lost slashes impossible: current
+/// and max are read separately and never needed a "/" between them in the first place.
+///
+/// Every crop goes through <see cref="ImagePrep"/> first, so Auto HDR washout is corrected
+/// before the OCR engine sees it and nobody has to turn HDR off to use the app.
+///
+/// If the geometry pass comes up short (an unexpected skin, a scaled or clipped window), the
+/// reader falls back to a row-band parse: cluster OCR words into rows by their Y centres and
+/// pair each label with the numbers to its right. That is the same idea the old parser was
+/// reaching for, done on word boxes instead of OCR's arbitrary line grouping.
 /// </summary>
 public sealed class InventorySnapshot
 {
     public string? Name;
     public int? Level;
-    public string? Classes;                                  // "WAR/DRU/BRD"
+    public string? Classes;                                  // "PAL/MNK/ENC"
     public readonly Dictionary<string, List<double>> Fields = new();   // label -> numbers, raw
     public long? Plat, Gold, Silver, Copper;
     public DateTime CapturedAt = DateTime.Now;
     public readonly List<string> Warnings = new();
     public string RawSeen = "";                              // every OCR line, for remote debugging
+
+    /// <summary>UI units → screen pixels, solved from the two column headers. 1.0 at 100% scale.</summary>
+    public double UiScale = 1.0;
+    /// <summary>How the grid was read, for the log: "geometry", "geometry+bands" or "bands".</summary>
+    public string Method = "";
+    /// <summary>Folder the diagnostic dump landed in, when one was requested.</summary>
+    public string? DiagPath;
 
     public double? First(string label) =>
         Fields.TryGetValue(label, out List<double>? n) && n.Count > 0 ? n[0] : null;
@@ -52,22 +73,16 @@ public static class InventoryReader
     private static OcrEngine? _engine;
     private static OcrEngine? Engine => _engine ??= OcrEngine.TryCreateFromUserProfileLanguages();
 
-    // Longest-match-first label set. Normalized: lowercase, no dots/colons/parens.
-    private static readonly string[][] Labels =
-    {
-        new[]{"attack","speed","%"}, new[]{"attack","speed"},
-        new[]{"hp","regen"}, new[]{"mana","regen"}, new[]{"end","regen"},
-        new[]{"primary","dps"}, new[]{"secondary","dps"}, new[]{"ranged","dps"},
-        new[]{"weight","worn"}, new[]{"next","level"}, new[]{"next","aa"},
-        new[]{"sv","magic"}, new[]{"sv","fire"}, new[]{"sv","cold"},
-        new[]{"sv","disease"}, new[]{"sv","poison"}, new[]{"sv","void"},
-        new[]{"strength"}, new[]{"stamina"}, new[]{"intelligence"}, new[]{"wisdom"},
-        new[]{"agility"}, new[]{"dexterity"}, new[]{"charisma"},
-        new[]{"velocity"}, new[]{"weight"}, new[]{"attack"},
-        new[]{"hp"}, new[]{"mana"}, new[]{"end"}, new[]{"ac"},
-    };
+    /// <summary>Padding around each value box, in UI units, so a slightly-off origin still lands.</summary>
+    private const double BoxPad = 2.0;
+    /// <summary>Value boxes are 14 units tall; blow them up to at least this many pixels to read.</summary>
+    private const int MinBoxPixels = 56;
 
-    public static async Task<InventorySnapshot?> ReadAsync(IntPtr gameHwnd, Action<string>? log = null)
+    /// <param name="diagnostics">Force the diagnostic dump. Left null it writes itself whenever a
+    /// read comes back incomplete — which is exactly when the artefacts are worth having, and
+    /// costs nothing on the reads that worked.</param>
+    public static async Task<InventorySnapshot?> ReadAsync(IntPtr gameHwnd, Action<string>? log = null,
+                                                           bool? diagnostics = null)
     {
         if (gameHwnd == IntPtr.Zero || !GetWindowRect(gameHwnd, out RECT r)) { log?.Invoke("No game window."); return null; }
         int w = Math.Max(1, r.Right - r.Left), h = Math.Max(1, r.Bottom - r.Top);
@@ -77,113 +92,318 @@ public static class InventoryReader
         using (Graphics g = Graphics.FromImage(frame))
             g.CopyFromScreen(r.Left, r.Top, 0, 0, new Size(w, h), CopyPixelOperation.SourceCopy);
 
-        // Pass 1 — find the anchors anywhere in the frame.
-        OcrResult pass1 = await Recognize(frame);
-        (Rect? vitals, Rect? stats) = FindAnchors(pass1);
+        // ---- Pass 1: find the two column headers on a contrast-corrected copy of the frame.
+        // Scale 1.0 keeps OCR coordinates in frame space, so no mapping is needed afterwards.
+        using Bitmap flat = ImagePrep.Prepare(frame, new Rectangle(0, 0, w, h), 1.0);
+        OcrResult pass1 = await Recognize(flat);
+
+        var snap = new InventorySnapshot();
+        var rawLines = new List<string>();
+        foreach (OcrLine l in pass1.Lines) rawLines.Add(l.Text);
+
+        (RectangleF? vitals, RectangleF? stats) = FindAnchors(pass1);
         if (vitals is null)
         {
+            snap.RawSeen = string.Join("\n", rawLines);
             log?.Invoke("Inventory window not found — open your Inventory (default_modern skin) and try again.");
             return null;
         }
-        Rect v = vitals.Value;
-        double lineH = v.H * 1.55;                                  // row pitch, in anchor units
-        double colSpan = stats is Rect s ? s.X - v.X : v.W * 3.4;   // vitals column → stats column
 
-        // Generous crop: left of "Character Vitals", up past the header (name/level/weight),
-        // right past the third column, down past the currency row. Clamped to the frame.
-        int cx0 = (int)Math.Max(0, v.X - lineH * 1.2);
-        int cy0 = (int)Math.Max(0, v.Y - lineH * 10.5);
-        int cx1 = (int)Math.Min(w, v.X + colSpan * 3.3);
-        int cy1 = (int)Math.Min(h, v.Y + lineH * 17.5);
-        if (cx1 - cx0 < 40 || cy1 - cy0 < 40) { log?.Invoke("Inventory crop came out degenerate — is the window near the screen edge?"); return null; }
+        // ---- Solve the grid.
+        // The two headers are exactly one column stride apart, so their measured X distance IS
+        // the column offset in pixels — used directly, with no assumption about UI scale. The
+        // vertical scale is then seeded from that same measurement and refined by probing, so a
+        // few percent of error in the stride can't accumulate into a half-row drift by the
+        // bottom of the grid.
+        RectangleF v = vitals.Value;
+        bool haveStats = stats is RectangleF st && st.X - v.X > 20;
+        double seed = haveStats
+            ? (stats!.Value.X - v.X) / InventoryLayout.ColumnStride
+            : v.Height / 11.0;                                   // fallback: glyph height in a 14-unit row
+        seed = Math.Clamp(seed, 0.4, 6.0);
+        double colPx = haveStats ? stats!.Value.X - v.X : InventoryLayout.ColumnStride * seed;
 
-        const int ScaleFactor = 3;
-        using var crop = new Bitmap((cx1 - cx0) * ScaleFactor, (cy1 - cy0) * ScaleFactor, PixelFormat.Format32bppArgb);
-        using (Graphics g = Graphics.FromImage(crop))
+        double originX = v.X;                                    // column 0, field X = 0
+        double originY = v.Y;                                    // top of row 0's text
+        if (!haveStats) snap.Warnings.Add("Only one column header found — scale is estimated, values may be off.");
+
+        double scale = await CalibrateVerticalScale(frame, originX, originY, seed, colPx, log);
+        snap.UiScale = scale;
+
+        // ---- Pass 2: one OCR per value box.
+        var diag = new StringBuilder();
+        diag.AppendLine($"window {w}x{h} @ {r.Left},{r.Top}   scale {scale:0.000}   origin {originX:0},{originY:0}");
+        int read = 0;
+        foreach (InventoryLayout.Row row in InventoryLayout.Rows)
         {
-            g.InterpolationMode = InterpolationMode.HighQualityBicubic;
-            g.DrawImage(frame, new Rectangle(0, 0, crop.Width, crop.Height),
-                        new Rectangle(cx0, cy0, cx1 - cx0, cy1 - cy0), GraphicsUnit.Pixel);
-        }
-
-        // Pass 2 — the real read, on the enlarged copy.
-        OcrResult pass2 = await Recognize(crop);
-        var snap = new InventorySnapshot();
-        Parse(pass2, snap);
-
-        // The vitals column is the one that matters — if HP didn't land, try once more at 4×.
-        if (!snap.Fields.ContainsKey("hp"))
-        {
-            log?.Invoke("hp row missed at 3× — retrying the read at 4× upscale…");
-            using var crop4 = new Bitmap((cx1 - cx0) * 4, (cy1 - cy0) * 4, PixelFormat.Format32bppArgb);
-            using (Graphics g = Graphics.FromImage(crop4))
+            if (row.Fields.Length == 0 || row.Key.Length == 0) continue;
+            int col = InventoryLayout.ColumnOf(row.Order), ri = InventoryLayout.RowInColumn(row.Order);
+            var values = new List<double>();
+            bool any = false;
+            foreach (InventoryLayout.Field f in row.Fields)
             {
-                g.InterpolationMode = InterpolationMode.HighQualityBicubic;
-                g.DrawImage(frame, new Rectangle(0, 0, crop4.Width, crop4.Height),
-                            new Rectangle(cx0, cy0, cx1 - cx0, cy1 - cy0), GraphicsUnit.Pixel);
+                Rectangle box = Box(originX, originY, scale, colPx, col, ri, f);
+                (double? num, string seen) = await ReadNumberBox(frame, box);
+                diag.AppendLine($"  {row.Key,-14} [{f.Index}] {box.X},{box.Y} {box.Width}x{box.Height} -> {seen,-12} = {(num?.ToString("0.##") ?? "—")}");
+                if (num is double d) { values.Add(d); any = true; }
+                else values.Add(double.NaN);
             }
-            var snap4 = new InventorySnapshot();
-            Parse(await Recognize(crop4), snap4);
-            foreach ((string k2, List<double> v2) in snap4.Fields)
-                if (!snap.Fields.ContainsKey(k2)) snap.Fields[k2] = v2;
-            snap.Level ??= snap4.Level; snap.Classes ??= snap4.Classes; snap.Name ??= snap4.Name;
-            snap.Plat ??= snap4.Plat; snap.Gold ??= snap4.Gold; snap.Silver ??= snap4.Silver; snap.Copper ??= snap4.Copper;
+            while (values.Count > 0 && double.IsNaN(values[^1])) values.RemoveAt(values.Count - 1);
+            if (any && values.Count > 0 && !double.IsNaN(values[0]))
+            {
+                snap.Fields[row.Key] = values.Where(x => !double.IsNaN(x)).ToList();
+                read++;
+            }
         }
+        snap.Method = "geometry";
+
+        // ---- Insurance: if the grid read came up thin, fall back to row-band pairing over the
+        // whole window and merge anything the geometry pass missed.
+        if (read < 8)
+        {
+            log?.Invoke($"Geometry pass read only {read} rows — falling back to a row-band parse.");
+            Rectangle winBox = WindowBox(originX, originY, scale, colPx, w, h);
+            using Bitmap crop = ImagePrep.Prepare(frame, winBox, 3.0);
+            OcrResult pass3 = await Recognize(crop);
+            foreach (OcrLine l in pass3.Lines) rawLines.Add(l.Text);
+            int added = RowBandParse(pass3, snap);
+            snap.Method = read > 0 ? "geometry+bands" : "bands";
+            log?.Invoke($"Row-band parse added {added} rows.");
+        }
+
+        // ---- Header (name / level / classes) and the coin row still come from text.
+        ParseHeaderAndCoins(pass1, snap, originX, originY, scale);
+
+        snap.RawSeen = string.Join("\n", rawLines);
+
         if (snap.Fields.Count < 6)
-            snap.Warnings.Add($"Only {snap.Fields.Count} stat rows parsed — OCR may have struggled at this resolution.");
+            snap.Warnings.Add($"Only {snap.Fields.Count} stat rows parsed — is the Inventory window fully visible?");
         foreach (string need in new[] { "hp", "mana", "ac", "strength", "sv magic" })
             if (!snap.Fields.ContainsKey(need)) snap.Warnings.Add($"'{need}' was not read.");
+
+        log?.Invoke($"parsed {snap.Fields.Count} rows via {snap.Method} at UI scale {snap.UiScale:0.00}"
+                  + (snap.Warnings.Count > 0 ? $" — {snap.Warnings.Count} warning(s)" : ""));
+
+        // A thin read is the one worth keeping evidence for; a good one needs no artefacts.
+        bool wantDump = diagnostics ?? (snap.Fields.Count < 20);
+        if (wantDump) snap.DiagPath = DumpDiagnostics(frame, originX, originY, scale, colPx, diag, snap, log);
         return snap;
     }
 
-    private readonly record struct Rect(double X, double Y, double W, double H);
+    // ---------------------------------------------------------------- geometry
+
+    /// <summary>
+    /// Pin down the vertical scale by trying the seed and a few nearby values, and keeping
+    /// whichever one actually lands on numbers. Three probe boxes are used, spread to the
+    /// corners of the grid — HP (column 0, row 1), Strength (column 1, row 1) and SV. Void
+    /// (column 1, row 13) — because a wrong scale still hits the top rows and only misses at
+    /// the bottom. A 3% error in the assumed column stride would drift half a row by SV. Void,
+    /// so this is what stops a plausible-looking read from being quietly wrong.
+    /// </summary>
+    private static async Task<double> CalibrateVerticalScale(Bitmap frame, double ox, double oy,
+                                                             double seed, double colPx, Action<string>? log)
+    {
+        (int Order, int Field)[] probes = { (1, 0), (15, 0), (27, 0) };
+        double best = seed; int bestHits = -1;
+
+        foreach (double k in new[] { 1.0, 0.985, 1.015, 0.97, 1.03 })
+        {
+            double sc = seed * k;
+            int hits = 0;
+            foreach ((int order, int fi) in probes)
+            {
+                InventoryLayout.Row row = InventoryLayout.Rows[order];
+                if (row.Fields.Length <= fi) continue;
+                Rectangle b = Box(ox, oy, sc, colPx, InventoryLayout.ColumnOf(order),
+                                  InventoryLayout.RowInColumn(order), row.Fields[fi]);
+                (double? num, _) = await ReadNumberBox(frame, b);
+                if (num is not null) hits++;
+            }
+            if (hits > bestHits) { bestHits = hits; best = sc; }
+            if (hits == probes.Length) break;               // nothing to improve on
+        }
+        if (bestHits < probes.Length)
+            log?.Invoke($"Scale calibration settled at {best:0.000} ({bestHits}/{probes.Length} probes hit).");
+        return best;
+    }
+
+    private static Rectangle Box(double ox, double oy, double s, double colPx, int col, int rowInCol, InventoryLayout.Field f)
+    {
+        double x = ox + col * colPx + (f.X - BoxPad) * s;
+        double y = oy + (rowInCol * InventoryLayout.RowPitch - BoxPad) * s;
+        double bw = (f.W + BoxPad * 2) * s;
+        double bh = (InventoryLayout.RowHeight + BoxPad * 2) * s;
+        return new Rectangle((int)Math.Round(x), (int)Math.Round(y), (int)Math.Round(bw), (int)Math.Round(bh));
+    }
+
+    /// <summary>The whole stat grid plus a margin, for the fallback parse and the diagnostic image.</summary>
+    private static Rectangle WindowBox(double ox, double oy, double s, double colPx, int w, int h)
+    {
+        int x0 = (int)Math.Max(0, ox - 12 * s);
+        int y0 = (int)Math.Max(0, oy - 12 * s);
+        int x1 = (int)Math.Min(w, ox + colPx + (InventoryLayout.ColumnPitch + 24) * s);
+        int y1 = (int)Math.Min(h, oy + (InventoryLayout.RowsPerColumn * InventoryLayout.RowPitch + 24) * s);
+        return new Rectangle(x0, y0, Math.Max(8, x1 - x0), Math.Max(8, y1 - y0));
+    }
+
+    // ---------------------------------------------------------------- OCR plumbing
 
     private static async Task<OcrResult> Recognize(Bitmap bmp)
     {
         using var ms = new MemoryStream();
-        bmp.Save(ms, System.Drawing.Imaging.ImageFormat.Bmp);
+        bmp.Save(ms, ImageFormat.Bmp);
         ms.Position = 0;
         BitmapDecoder dec = await BitmapDecoder.CreateAsync(ms.AsRandomAccessStream());
         using SoftwareBitmap sw = await dec.GetSoftwareBitmapAsync(BitmapPixelFormat.Bgra8, BitmapAlphaMode.Premultiplied);
         return await Engine!.RecognizeAsync(sw);
     }
 
-    private static (Rect?, Rect?) FindAnchors(OcrResult ocr)
+    /// <summary>OCR one value box and pull a single number out of it.</summary>
+    private static async Task<(double?, string)> ReadNumberBox(Bitmap frame, Rectangle box)
     {
-        Rect? vitals = null, stats = null;
+        if (box.Width < 2 || box.Height < 2) return (null, "");
+        using Bitmap prepped = ImagePrep.Prepare(frame, box, 6.0, MinBoxPixels);
+        OcrResult res = await Recognize(prepped);
+        string text = string.Join(" ", res.Lines.Select(l => l.Text)).Trim();
+        return (ParseNumber(text), text);
+    }
+
+    /// <summary>
+    /// A value box holds exactly one number, so anything else in the string is OCR noise.
+    /// Common confusions are folded back (O→0, l/I→1, S→5, B→8) before the digits are taken.
+    /// </summary>
+    private static double? ParseNumber(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return null;
+        var sb = new StringBuilder();
+        bool neg = text.TrimStart().StartsWith("-", StringComparison.Ordinal);
+        foreach (char c in text)
+        {
+            char k = c switch
+            {
+                'O' or 'o' or 'Q' or 'D' => '0',
+                'l' or 'I' or 'i' or '|' or '!' => '1',
+                'S' or 's' => '5',
+                'B' => '8',
+                'Z' or 'z' => '2',
+                'G' => '6',
+                _ => c,
+            };
+            if (char.IsDigit(k)) sb.Append(k);
+            else if (k == ',' || k == '.') continue;
+            else if (sb.Length > 0) break;              // stop at the first junk after the number
+        }
+        if (sb.Length == 0) return null;
+        if (!double.TryParse(sb.ToString(), NumberStyles.Integer, CultureInfo.InvariantCulture, out double d)) return null;
+        return neg ? -d : d;
+    }
+
+    private static (RectangleF?, RectangleF?) FindAnchors(OcrResult ocr)
+    {
+        RectangleF? vitals = null, stats = null;
         foreach (OcrLine line in ocr.Lines)
         {
             string t = line.Text.ToLowerInvariant();
-            var words = line.Words.ToList();
-            int iv = t.IndexOf("character vitals", StringComparison.Ordinal);
-            if (iv >= 0 && vitals is null && words.Count > 0)
+            List<OcrWord> words = line.Words.ToList();
+            if (words.Count == 0) continue;
+
+            if (vitals is null && t.Contains(InventoryLayout.VitalsAnchor, StringComparison.Ordinal))
             {
-                OcrWord anchor = words.FirstOrDefault(x => x.Text.StartsWith("Character", StringComparison.OrdinalIgnoreCase)) ?? words[0];
-                vitals = new Rect(anchor.BoundingRect.X, anchor.BoundingRect.Y, anchor.BoundingRect.Width, anchor.BoundingRect.Height);
+                OcrWord a = words.FirstOrDefault(x => x.Text.StartsWith("Character", StringComparison.OrdinalIgnoreCase)) ?? words[0];
+                vitals = new RectangleF((float)a.BoundingRect.X, (float)a.BoundingRect.Y,
+                                        (float)a.BoundingRect.Width, (float)a.BoundingRect.Height);
             }
-            if (t.Contains("stats and resists") && stats is null && words.Count > 0)
+            if (stats is null && t.Contains(InventoryLayout.StatsAnchor, StringComparison.Ordinal))
             {
-                OcrWord anchor = words.FirstOrDefault(x => x.Text.StartsWith("Stats", StringComparison.OrdinalIgnoreCase)) ?? words[0];
-                stats = new Rect(anchor.BoundingRect.X, anchor.BoundingRect.Y, anchor.BoundingRect.Width, anchor.BoundingRect.Height);
+                OcrWord a = words.FirstOrDefault(x => x.Text.StartsWith("Stats", StringComparison.OrdinalIgnoreCase)) ?? words[0];
+                stats = new RectangleF((float)a.BoundingRect.X, (float)a.BoundingRect.Y,
+                                       (float)a.BoundingRect.Width, (float)a.BoundingRect.Height);
+            }
+        }
+        // Both headers sit on the same row; if OCR merged them into one line, split by X instead.
+        if (vitals is not null && stats is null)
+        {
+            foreach (OcrLine line in ocr.Lines)
+            {
+                string t = line.Text.ToLowerInvariant();
+                if (!t.Contains(InventoryLayout.VitalsAnchor, StringComparison.Ordinal)) continue;
+                OcrWord? a = line.Words.FirstOrDefault(x => x.Text.StartsWith("Stats", StringComparison.OrdinalIgnoreCase));
+                if (a is not null)
+                    stats = new RectangleF((float)a.BoundingRect.X, (float)a.BoundingRect.Y,
+                                           (float)a.BoundingRect.Width, (float)a.BoundingRect.Height);
+                break;
             }
         }
         return (vitals, stats);
     }
 
-    private static string Norm(string word) =>
-        word.ToLowerInvariant().Trim().Trim('.', ':', ',', '(', ')', ';');
+    // ---------------------------------------------------------------- fallback parse
 
-    private static bool IsNumericish(string norm) =>
-        norm.Length > 0 && norm.All(c => char.IsDigit(c) || c is '/' or ',' or '.' or '+' or '-' or '%' or '|');
-
-    /// <summary>Same length, at most one differing character — catches single OCR misreads.</summary>
-    private static bool OneOff(string a, string b)
+    private static readonly (string Key, string[] Words)[] BandLabels =
     {
-        if (a.Length != b.Length) return false;
-        int diff = 0;
-        for (int i = 0; i < a.Length; i++) if (a[i] != b[i] && ++diff > 1) return false;
-        return diff <= 1;
+        ("attack speed", new[]{ "attack", "speed" }),
+        ("hp regen", new[]{ "hp", "regen" }), ("mana regen", new[]{ "mana", "regen" }), ("end regen", new[]{ "end", "regen" }),
+        ("primary dps", new[]{ "primary", "dps" }), ("secondary dps", new[]{ "secondary", "dps" }), ("ranged dps", new[]{ "ranged", "dps" }),
+        ("sv magic", new[]{ "sv", "magic" }), ("sv fire", new[]{ "sv", "fire" }), ("sv cold", new[]{ "sv", "cold" }),
+        ("sv disease", new[]{ "sv", "disease" }), ("sv poison", new[]{ "sv", "poison" }), ("sv void", new[]{ "sv", "void" }),
+        ("strength", new[]{ "strength" }), ("stamina", new[]{ "stamina" }), ("intelligence", new[]{ "intelligence" }),
+        ("wisdom", new[]{ "wisdom" }), ("agility", new[]{ "agility" }), ("dexterity", new[]{ "dexterity" }),
+        ("charisma", new[]{ "charisma" }), ("velocity", new[]{ "velocity" }),
+        ("attack", new[]{ "attack" }), ("hp", new[]{ "hp" }), ("mana", new[]{ "mana" }), ("end", new[]{ "end" }), ("ac", new[]{ "ac" }),
+    };
+
+    /// <summary>
+    /// Cluster every OCR word into rows by its Y centre, then walk each row left to right pairing
+    /// a label with the numbers that follow it. Unlike the old line walk this doesn't care how
+    /// OCR chose to group words into lines, so a wide label→value gap no longer breaks the pair.
+    /// </summary>
+    private static int RowBandParse(OcrResult ocr, InventorySnapshot snap)
+    {
+        var words = new List<(string Norm, double X, double CY, double H)>();
+        foreach (OcrLine line in ocr.Lines)
+            foreach (OcrWord wd in line.Words)
+                words.Add((Norm(wd.Text), wd.BoundingRect.X, wd.BoundingRect.Y + wd.BoundingRect.Height / 2.0, wd.BoundingRect.Height));
+        if (words.Count == 0) return 0;
+
+        double medianH = words.Select(t => t.H).OrderBy(x => x).ElementAt(words.Count / 2);
+        double tol = Math.Max(3.0, medianH * 0.6);
+
+        var bands = new List<List<(string Norm, double X, double CY, double H)>>();
+        foreach ((string Norm, double X, double CY, double H) wd in words.OrderBy(t => t.CY))
+        {
+            if (bands.Count > 0 && Math.Abs(bands[^1][0].CY - wd.CY) <= tol) bands[^1].Add(wd);
+            else bands.Add(new List<(string Norm, double X, double CY, double H)> { wd });
+        }
+
+        int added = 0;
+        foreach (var band in bands)
+        {
+            List<(string Norm, double X, double CY, double H)> row = band.OrderBy(t => t.X).ToList();
+            int i = 0;
+            while (i < row.Count)
+            {
+                string? key = null; int span = 0;
+                foreach ((string k, string[] lw) in BandLabels)
+                {
+                    if (i + lw.Length > row.Count) continue;
+                    bool ok = true;
+                    for (int j = 0; j < lw.Length; j++) if (row[i + j].Norm != lw[j]) { ok = false; break; }
+                    if (ok) { key = k; span = lw.Length; break; }
+                }
+                if (key is null) { i++; continue; }
+                i += span;
+                var nums = new List<double>();
+                while (i < row.Count && IsNumericish(row[i].Norm)) { nums.AddRange(NumbersIn(row[i].Norm)); i++; }
+                if (nums.Count > 0 && !snap.Fields.ContainsKey(key)) { snap.Fields[key] = nums; added++; }
+            }
+        }
+        return added;
     }
+
+    private static string Norm(string word) => word.ToLowerInvariant().Trim().Trim('.', ':', ',', '(', ')', ';');
+
+    private static bool IsNumericish(string n) =>
+        n.Length > 0 && n.All(c => char.IsDigit(c) || c is '/' or ',' or '.' or '+' or '-' or '%' or '|');
 
     private static IEnumerable<double> NumbersIn(string norm)
     {
@@ -195,97 +415,109 @@ public static class InventoryReader
         }
     }
 
-    private static void Parse(OcrResult ocr, InventorySnapshot snap)
+    // ---------------------------------------------------------------- header + coins
+
+    /// <summary>
+    /// Name, level and class combination ("16 PAL/MNK/ENC") and the coin row. Both are drawn
+    /// outside the stat grid, so they are still recovered from text — but only from lines that
+    /// fall inside the inventory window's own band, which keeps the rest of the screen out.
+    /// </summary>
+    private static void ParseHeaderAndCoins(OcrResult ocr, InventorySnapshot snap,
+                                            double ox, double oy, double scale)
     {
-        var raw = new List<string>();
-        var numberRows = new List<(double y, List<long> nums)>();
+        double left = ox - 24 * scale, right = ox + (InventoryLayout.ColumnPitch * 2 + 140) * scale;
+        double top = oy - 200 * scale, bottom = oy + 260 * scale;
+        var coinRows = new List<(double Y, List<long> Nums)>();
 
         foreach (OcrLine line in ocr.Lines)
         {
-            raw.Add(line.Text);
-            var words = line.Words.Select(x => (norm: Norm(x.Text), x.Text, y: x.BoundingRect.Y)).ToList();
+            if (line.Words.Count == 0) continue;
+            double x = line.Words[0].BoundingRect.X, y = line.Words[0].BoundingRect.Y;
+            if (x < left || x > right || y < top || y > bottom) continue;
 
-            // 1) label → numbers walk
-            int i = 0;
-            while (i < words.Count)
-            {
-                string[]? matched = null;
-                foreach (string[] lab in Labels)
-                {
-                    if (i + lab.Length > words.Count) continue;
-                    bool ok = true;
-                    for (int k = 0; k < lab.Length; k++) if (words[i + k].norm != lab[k]) { ok = false; break; }
-                    if (ok) { matched = lab; break; }
-                }
-                string mergedRest = "";
-                if (matched is null)
-                {
-                    // OCR sometimes glues the label to its number ("hp5263/5263") — peel it apart.
-                    foreach (string[] lab in Labels)
-                    {
-                        if (lab.Length != 1) continue;
-                        string wn = words[i].norm;
-                        if (wn.Length > lab[0].Length && wn.StartsWith(lab[0], StringComparison.Ordinal)
-                            && IsNumericish(wn[lab[0].Length..]))
-                        { matched = lab; mergedRest = wn[lab[0].Length..]; break; }
-                    }
-                    // Light fuzz for LONG labels only (strength/stamina/…): one wrong character.
-                    if (matched is null)
-                        foreach (string[] lab in Labels)
-                        {
-                            if (lab.Length != 1 || lab[0].Length < 5) continue;
-                            if (OneOff(words[i].norm, lab[0])) { matched = lab; break; }
-                        }
-                }
-                if (matched is null) { i++; continue; }
-                if (mergedRest.Length == 0) i += matched.Length; else i++;
-                var nums = new List<double>();
-                if (mergedRest.Length > 0) nums.AddRange(NumbersIn(mergedRest));
-                while (i < words.Count && IsNumericish(words[i].norm))
-                {
-                    nums.AddRange(NumbersIn(words[i].norm));
-                    i++;
-                }
-                string key = string.Join(" ", matched).TrimEnd('%').Trim();
-                if (nums.Count > 0 && !snap.Fields.ContainsKey(key)) snap.Fields[key] = nums;
-            }
-
-            // 2) character header: "50 WAR/DRU/BRD" (+ the name on the line above or same line)
-            var m = System.Text.RegularExpressions.Regex.Match(line.Text, @"\b(\d{1,2})\s+([A-Z]{2,4}(?:/[A-Z]{2,4}){0,2})\b");
+            var m = System.Text.RegularExpressions.Regex.Match(
+                line.Text, @"\b(\d{1,2})\s+([A-Z]{2,4}(?:/[A-Z]{2,4}){0,2})\b");
             if (m.Success && snap.Level is null)
             {
                 snap.Level = int.Parse(m.Groups[1].Value);
                 snap.Classes = m.Groups[2].Value;
                 string before = line.Text[..m.Index].Trim();
-                if (before.Length >= 2 && before.All(c => char.IsLetter(c))) snap.Name ??= before;
+                if (before.Length >= 2 && before.All(char.IsLetter)) snap.Name ??= before;
             }
-            else if (snap.Level is null && line.Words.Count == 1 && line.Text.Length is >= 3 and <= 14
+            else if (snap.Name is null && line.Words.Count == 1 && line.Text.Length is >= 3 and <= 14
                      && line.Text.All(char.IsLetter) && char.IsUpper(line.Text[0]))
             {
-                snap.Name ??= line.Text;      // a lone capitalized word just above the level line
+                snap.Name = line.Text;
             }
 
-            // 3) currency candidate: a row of ≥3 plain numbers and nothing else
             var pure = new List<long>();
-            bool onlyNumbers = words.Count > 0;
-            foreach ((string norm, _, _) in words)
+            bool onlyNumbers = true;
+            foreach (OcrWord wd in line.Words)
             {
-                string p = norm.Replace(",", "");
-                if (p.Length > 0 && p.All(char.IsDigit) && long.TryParse(p, out long v)) pure.Add(v);
-                else if (p.Length > 0) { onlyNumbers = false; break; }
+                string p = Norm(wd.Text).Replace(",", "");
+                if (p.Length > 0 && p.All(char.IsDigit) && long.TryParse(p, out long val)) pure.Add(val);
+                else { onlyNumbers = false; break; }
             }
-            if (onlyNumbers && pure.Count >= 3 && pure.All(v => v < 10_000_000))
-                numberRows.Add((line.Words[0].BoundingRect.Y, pure));
+            if (onlyNumbers && pure.Count >= 3 && pure.All(val => val < 10_000_000))
+                coinRows.Add((y, pure));
         }
 
-        // The lowest all-number row inside the window is the coin row: plat gold silver copper.
-        if (numberRows.Count > 0)
+        if (coinRows.Count > 0)
         {
-            List<long> coins = numberRows.OrderByDescending(t => t.y).First().nums;
+            List<long> coins = coinRows.OrderByDescending(t => t.Y).First().Nums;
             if (coins.Count >= 4) { snap.Plat = coins[0]; snap.Gold = coins[1]; snap.Silver = coins[2]; snap.Copper = coins[3]; }
             else if (coins.Count == 3) { snap.Plat = coins[0]; snap.Gold = coins[1]; snap.Silver = coins[2]; snap.Warnings.Add("Only 3 coin values read."); }
         }
+    }
 
-        snap.RawSeen = string.Join("\n", raw);
+    // ---------------------------------------------------------------- diagnostics
+
+    /// <summary>
+    /// Drop the located window, the box grid drawn over it, and the per-box read log into
+    /// %AppData%\EQAvatar\logs\ocr\&lt;timestamp&gt;. When a read goes wrong these three
+    /// artefacts say exactly where the geometry landed and what each box actually contained.
+    /// </summary>
+    private static string? DumpDiagnostics(Bitmap frame, double ox, double oy, double scale, double colPx,
+                                           StringBuilder log, InventorySnapshot snap, Action<string>? note)
+    {
+        try
+        {
+            string dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+                                      "EQAvatar", "logs", "ocr", DateTime.Now.ToString("yyyyMMdd-HHmmss"));
+            Directory.CreateDirectory(dir);
+
+            Rectangle win = WindowBox(ox, oy, scale, colPx, frame.Width, frame.Height);
+            using (var shot = new Bitmap(win.Width, win.Height, PixelFormat.Format32bppArgb))
+            {
+                using (Graphics g = Graphics.FromImage(shot))
+                {
+                    g.DrawImage(frame, new Rectangle(0, 0, win.Width, win.Height), win, GraphicsUnit.Pixel);
+                    using var pen = new Pen(Color.Magenta, 1);
+                    foreach (InventoryLayout.Row row in InventoryLayout.Rows)
+                    {
+                        int col = InventoryLayout.ColumnOf(row.Order), ri = InventoryLayout.RowInColumn(row.Order);
+                        foreach (InventoryLayout.Field f in row.Fields)
+                        {
+                            Rectangle b = Box(ox, oy, scale, colPx, col, ri, f);
+                            b.Offset(-win.X, -win.Y);
+                            g.DrawRectangle(pen, b);
+                        }
+                    }
+                }
+                shot.Save(Path.Combine(dir, "window-boxes.png"), ImageFormat.Png);
+            }
+
+            var report = new StringBuilder();
+            report.AppendLine($"EQ Avatar inventory read — {snap.CapturedAt:yyyy-MM-dd HH:mm:ss}");
+            report.AppendLine($"method {snap.Method}   rows {snap.Fields.Count}   scale {snap.UiScale:0.000}");
+            if (snap.Warnings.Count > 0) report.AppendLine("warnings: " + string.Join(" · ", snap.Warnings));
+            report.AppendLine().AppendLine("--- per-box reads ---").Append(log);
+            report.AppendLine().AppendLine("--- every OCR line seen ---").AppendLine(snap.RawSeen);
+            File.WriteAllText(Path.Combine(dir, "report.txt"), report.ToString());
+
+            note?.Invoke("Diagnostics written to " + dir);
+            return dir;
+        }
+        catch (Exception ex) { note?.Invoke("Couldn't write diagnostics: " + ex.Message); return null; }
     }
 }
