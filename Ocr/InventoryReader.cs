@@ -148,6 +148,20 @@ public static class InventoryReader
                 if (num is double d) { values.Add(d); any = true; }
                 else values.Add(double.NaN);
             }
+            // Safety net for divider bleed. Every paired row is current-then-maximum, so a
+            // current value several times its own maximum means a stray glyph was appended.
+            // Re-read that box with the right edge pulled in and keep the result only if it
+            // now makes sense.
+            if (values.Count >= 2 && !double.IsNaN(values[0]) && !double.IsNaN(values[1])
+                && values[1] > 0 && values[0] > values[1] * 2)
+            {
+                Rectangle tight = Box(originX, originY, scale, colPx, col, ri, row.Fields[0], trim: 2);
+                (double? retry, string seenAgain) = await ReadNumberBox(frame, tight);
+                diag.AppendLine($"  {row.Key,-14} [0] RETRY tighter -> {seenAgain,-12} = {(retry?.ToString("0.##") ?? "—")}");
+                if (retry is double rv && rv <= values[1] * 2) values[0] = rv;
+                else snap.Warnings.Add($"'{row.Key}' current ({values[0]:0}) exceeds its maximum — suspect a misread.");
+            }
+
             while (values.Count > 0 && double.IsNaN(values[^1])) values.RemoveAt(values.Count - 1);
             if (any && values.Count > 0 && !double.IsNaN(values[0]))
             {
@@ -170,6 +184,9 @@ public static class InventoryReader
             snap.Method = read > 0 ? "geometry+bands" : "bands";
             log?.Invoke($"Row-band parse added {added} rows.");
         }
+
+        // ---- Weight hangs off the window's right edge, not the stat grid.
+        await ReadWeight(frame, pass1, snap, scale, diag);
 
         // ---- Header (name / level / classes) and the coin row still come from text.
         ParseHeaderAndCoins(pass1, snap, originX, originY, scale);
@@ -227,13 +244,22 @@ public static class InventoryReader
         return best;
     }
 
-    private static Rectangle Box(double ox, double oy, double s, double colPx, int col, int rowInCol, InventoryLayout.Field f)
+    /// <summary>
+    /// The screen rectangle for one value box. Horizontal bounds come from the field's clip span
+    /// and are NEVER padded outwards: one unit of overshoot clips the neighbouring "/" divider,
+    /// which OCRs as a "1" and turns 257 into 2571. Vertical padding is safe and stays.
+    /// </summary>
+    /// <param name="trim">Extra units shaved off the right edge, used by the retry pass when a
+    /// value comes back implausibly larger than its own maximum.</param>
+    private static Rectangle Box(double ox, double oy, double s, double colPx,
+                                 int col, int rowInCol, InventoryLayout.Field f, double trim = 0)
     {
-        double x = ox + col * colPx + (f.X - BoxPad) * s;
+        double x0 = ox + col * colPx + f.ClipL * s;
+        double x1 = ox + col * colPx + (f.ClipR - trim) * s;
         double y = oy + (rowInCol * InventoryLayout.RowPitch - BoxPad) * s;
-        double bw = (f.W + BoxPad * 2) * s;
         double bh = (InventoryLayout.RowHeight + BoxPad * 2) * s;
-        return new Rectangle((int)Math.Round(x), (int)Math.Round(y), (int)Math.Round(bw), (int)Math.Round(bh));
+        return new Rectangle((int)Math.Round(x0), (int)Math.Round(y),
+                             Math.Max(2, (int)Math.Round(x1 - x0)), (int)Math.Round(bh));
     }
 
     /// <summary>The whole stat grid plus a margin, for the fallback parse and the diagnostic image.</summary>
@@ -335,6 +361,63 @@ public static class InventoryReader
             }
         }
         return (vitals, stats);
+    }
+
+    /// <summary>
+    /// Weight and worn weight. Their labels are anchored to the window's RIGHT edge and the
+    /// window is resizable, so there is no fixed offset from the stat grid to reach them by.
+    /// Instead the "Weight" caption is located by OCR: it is left-aligned exactly
+    /// <see cref="InventoryLayout.WeightCaptionFromRight"/> units in from the right edge, so
+    /// finding it fixes the edge, and the value boxes are simple offsets back from there. The
+    /// caption's own line also gives the row's Y, and "Weight (Worn)" gives the row below it.
+    /// Reading current and max as separate boxes is what recovers the "/" the OCR loses.
+    /// </summary>
+    private static async Task ReadWeight(Bitmap frame, OcrResult pass1, InventorySnapshot snap,
+                                         double s, StringBuilder diag)
+    {
+        RectangleF? caption = null, worn = null;
+        foreach (OcrLine line in pass1.Lines)
+        {
+            foreach (OcrWord wd in line.Words)
+            {
+                if (!wd.Text.StartsWith("Weight", StringComparison.OrdinalIgnoreCase)) continue;
+                var rc = new RectangleF((float)wd.BoundingRect.X, (float)wd.BoundingRect.Y,
+                                        (float)wd.BoundingRect.Width, (float)wd.BoundingRect.Height);
+                // "Weight (Worn)" sits on the line below plain "Weight"; OCR may read the
+                // bracketed part as (Wom)/(Wor) so the caption word alone is matched and the
+                // lower of the two occurrences is taken as the worn row.
+                if (caption is null) caption = rc;
+                else if (rc.Y > caption.Value.Y + rc.Height * 0.5) worn ??= rc;
+                else if (rc.Y < caption.Value.Y - rc.Height * 0.5) { worn = caption; caption = rc; }
+            }
+        }
+        if (caption is not RectangleF cap) return;
+
+        double right = cap.X + InventoryLayout.WeightCaptionFromRight * s;
+        double top = cap.Y - BoxPad * s;
+        double h = (InventoryLayout.RowHeight + BoxPad * 2) * s;
+
+        Rectangle Span(int fromRight, int toRight, double y) => new(
+            (int)Math.Round(right - fromRight * s), (int)Math.Round(y),
+            Math.Max(2, (int)Math.Round((fromRight - toRight) * s)), (int)Math.Round(h));
+
+        var vals = new List<double>();
+        (double? cur, string a) = await ReadNumberBox(frame,
+            Span(InventoryLayout.WeightCurFromRight, InventoryLayout.WeightCurToRight, top));
+        (double? max, string b) = await ReadNumberBox(frame,
+            Span(InventoryLayout.WeightMaxFromRight, InventoryLayout.WeightMaxToRight, top));
+        diag.AppendLine($"  {"weight",-14} cur -> {a,-12} = {(cur?.ToString("0.##") ?? "—")}   max -> {b,-12} = {(max?.ToString("0.##") ?? "—")}");
+        if (cur is double c) vals.Add(c);
+        if (max is double m && cur is not null) vals.Add(m);
+        if (vals.Count > 0) snap.Fields["weight"] = vals;
+
+        if (worn is RectangleF wr)
+        {
+            (double? wv, string t) = await ReadNumberBox(frame,
+                Span(InventoryLayout.WornWeightFromRight, InventoryLayout.WornWeightToRight, wr.Y - BoxPad * s));
+            diag.AppendLine($"  {"weight worn",-14} -> {t,-12} = {(wv?.ToString("0.##") ?? "—")}");
+            if (wv is double w2) snap.Fields["weight worn"] = new List<double> { w2 };
+        }
     }
 
     // ---------------------------------------------------------------- fallback parse

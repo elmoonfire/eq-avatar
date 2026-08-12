@@ -1188,6 +1188,18 @@ public partial class MainWindow : Window
             $"MR {Stat(snap, "sv magic")}  FR {Stat(snap, "sv fire")}  CR {Stat(snap, "sv cold")}  " +
             $"DR {Stat(snap, "sv disease")}  PR {Stat(snap, "sv poison")}  VR {Stat(snap, "sv void")}   Coin {coins}";
         OcrSendBtn.IsEnabled = snap.Fields.ContainsKey("hp");
+
+        // The sheet the game just showed us is the most trustworthy character data there is, so
+        // let it own the app's idea of who this is — not just the Licensing card it was read
+        // into. Without this the boxes above update and the Profile page and the title-bar chip
+        // keep showing whatever was there before, which is exactly how a stale 50 WAR/DRU/BRD
+        // survives a fresh read of a level 16 PAL/MNK/ENC loadout.
+        if (snap.Level is not null || snap.Classes is not null || snap.Name is not null)
+        {
+            ApplyLicensingFields();
+            _settings.Save();
+            UpdateChip();                 // repaints the title-bar bio and the Profile page
+        }
     }
 
     private static string Pair(Ocr.InventorySnapshot s, string k) =>
