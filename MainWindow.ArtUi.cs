@@ -38,6 +38,7 @@ public partial class MainWindow
         ArtCache.Bind(ArtSettings, "ui-settings.jpg");
         ArtCache.Bind(ArtCompass, "ui-compass.jpg");
         ArtCache.Bind(ArtRotation, "ui-rotation.jpg");
+        ArtCache.Bind(ArtVision, "ui-vision.jpg");           // the vitals + target-window panel
         ArtCache.Bind(ArtGhostLogo, "ghost-logo.png");       // the floating title-bar ghost
         TetherRope.ValueChanged += OnTetherRopeChanged;
         SyncModeTiles();

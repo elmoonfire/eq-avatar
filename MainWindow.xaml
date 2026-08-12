@@ -916,6 +916,9 @@
                                 <Expander IsExpanded="False" Foreground="{StaticResource Text}" Margin="0,0,0,10">
                                     <Expander.Header>
                                         <StackPanel Orientation="Horizontal">
+                                            <Border Width="480" Height="176" CornerRadius="7" ClipToBounds="True" Margin="0,0,10,0">
+                                                <Image x:Name="ArtVision" Stretch="UniformToFill"/>
+                                            </Border>
                                             <TextBlock Text="WHAT SHE CAN SEE — RESTING &amp; TARGETING" FontWeight="Bold" FontSize="12" Foreground="#7FB2D9" VerticalAlignment="Center"/>
                                             <Border x:Name="VitalsVerdict" Background="#2A2410" BorderBrush="#7A6320" BorderThickness="1" CornerRadius="6" Padding="8,2" Margin="10,0,0,0" VerticalAlignment="Center">
                                                 <TextBlock x:Name="VitalsVerdictText" Text="not set" FontSize="10.5" Foreground="#FFE1A6"/>

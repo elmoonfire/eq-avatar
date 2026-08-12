@@ -10,7 +10,7 @@
     <AssemblyName>EQAvatar.Spike</AssemblyName>
     <!-- Local-build default only. CI overrides this with -p:Version=<tag> so a release build's
          reported version always equals the tag it was built from. -->
-    <Version>0.9.38</Version>
+    <Version>0.9.39</Version>
     <RootNamespace>EQAvatar.Spike</RootNamespace>
     <LangVersion>latest</LangVersion>
     <ApplicationManifest>app.manifest</ApplicationManifest>
