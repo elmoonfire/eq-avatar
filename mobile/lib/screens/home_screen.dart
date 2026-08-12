@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../api.dart';
 import '../models.dart';
 import '../theme.dart';
+import 'pair_tv_screen.dart';
 import 'stream_screen.dart';
 
 /// The live screen: what the character is doing right now, plus the controls
@@ -138,8 +139,14 @@ class _HomeScreenState extends State<HomeScreen> {
             icon: const Icon(Icons.more_vert, color: Eq.dim),
             onSelected: (v) {
               if (v == 'signout') widget.onSignOut();
+              if (v == 'pairtv') {
+                Navigator.of(context).push(MaterialPageRoute(
+                  builder: (_) => PairTvScreen(api: widget.api),
+                ));
+              }
             },
             itemBuilder: (_) => const [
+              PopupMenuItem(value: 'pairtv', child: Text('Pair a TV')),
               PopupMenuItem(value: 'signout', child: Text('Unpair this device')),
             ],
           ),

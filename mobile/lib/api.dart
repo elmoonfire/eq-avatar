@@ -98,6 +98,15 @@ class HubApi {
     return sendCommand('farm_mob', payload);
   }
 
+  /// Approve an Apple TV that is showing a pairing code.
+  ///
+  /// The TV is issued a viewer-only token by the hub, so a screen in the living room
+  /// can watch the session but can never issue commands.
+  Future<String> claimTvCode(String code) async {
+    final j = await _post('pair.php', {'op': 'claim', 'code': code.trim().toUpperCase()});
+    return (j['device'] ?? 'TV').toString();
+  }
+
   Future<List<SessionSummary>> sessions() async {
     final j = await _get('sessions.php');
     final list = (j['sessions'] as List?) ?? const [];

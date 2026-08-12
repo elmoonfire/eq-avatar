@@ -8,7 +8,11 @@ on:
   workflow_dispatch:
     inputs:
       ios:
-        description: 'Also build and upload to TestFlight'
+        description: 'Also build and upload iOS to TestFlight'
+        type: boolean
+        default: false
+      tvos:
+        description: 'Also build and upload Apple TV to TestFlight'
         type: boolean
         default: false
 
@@ -156,3 +160,116 @@ jobs:
           rm -rf "$HOME/private_keys" \
                  "$HOME/Library/MobileDevice/Provisioning Profiles/eqavatar.mobileprovision" || true
           security delete-keychain "$RUNNER_TEMP/signing.keychain-db" || true
+
+  tvos:
+    # Apple TV app. Native Swift, because tvOS has no web view (so the phone's webview
+    # player cannot run there) and Flutter has no official tvOS support. Same signing
+    # certificate and App Store Connect record as iOS — only the profile differs.
+    if: startsWith(github.ref, 'refs/tags/') || inputs.tvos
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: tvos
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate brand assets and the Xcode project
+        run: |
+          set -euo pipefail
+          # Both are generated, never committed: the layered tvOS icon/top-shelf art
+          # (derived PNGs) and the .xcodeproj (a file that rots silently by hand).
+          python3 -m pip install --quiet --upgrade pillow
+          python3 tools/make_brand_assets.py
+          brew install xcodegen
+          xcodegen generate --spec project.yml
+
+      - name: Install signing assets
+        env:
+          P12: ${{ secrets.IOS_DIST_P12_BASE64 }}
+          P12_PASSWORD: ${{ secrets.IOS_DIST_P12_PASSWORD }}
+          PROFILE: ${{ secrets.TVOS_PROVISION_PROFILE_BASE64 }}
+          ASC_KEY: ${{ secrets.ASC_KEY_P8_BASE64 }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+        run: |
+          set -euo pipefail
+          KEYCHAIN="$RUNNER_TEMP/tv-signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(uuidgen)"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 3600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+
+          echo "$P12" | base64 --decode > "$RUNNER_TEMP/dist.p12"
+          security import "$RUNNER_TEMP/dist.p12" -k "$KEYCHAIN" -P "$P12_PASSWORD" \
+            -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" >/dev/null
+          security list-keychain -d user -s "$KEYCHAIN" login.keychain-db
+
+          PROFILE_DIR="$HOME/Library/MobileDevice/Provisioning Profiles"
+          mkdir -p "$PROFILE_DIR"
+          echo "$PROFILE" | base64 --decode > "$PROFILE_DIR/eqavatar-tvos.mobileprovision"
+
+          mkdir -p "$HOME/private_keys"
+          echo "$ASC_KEY" | base64 --decode > "$HOME/private_keys/AuthKey_${ASC_KEY_ID}.p8"
+          rm -f "$RUNNER_TEMP/dist.p12"
+
+      - name: Archive and export
+        env:
+          TEAM_ID: ${{ secrets.IOS_TEAM_ID }}
+          PROFILE_UUID: ${{ secrets.TVOS_PROFILE_UUID }}
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#tv-v}"
+          [ "$VERSION" = "$GITHUB_REF_NAME" ] && VERSION="0.1.0"
+
+          xcodebuild archive \
+            -project EQAvatarTV.xcodeproj \
+            -scheme EQAvatarTV \
+            -configuration Release \
+            -destination "generic/platform=tvOS" \
+            -archivePath "$RUNNER_TEMP/EQAvatarTV.xcarchive" \
+            MARKETING_VERSION="$VERSION" \
+            CURRENT_PROJECT_VERSION="$GITHUB_RUN_NUMBER" \
+            DEVELOPMENT_TEAM="$TEAM_ID" \
+            PROVISIONING_PROFILE_SPECIFIER="$PROFILE_UUID" \
+            CODE_SIGN_IDENTITY="Apple Distribution" \
+            CODE_SIGN_STYLE=Manual
+
+          cat > ExportOptions.plist <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>method</key><string>app-store-connect</string>
+            <key>teamID</key><string>${TEAM_ID}</string>
+            <key>signingStyle</key><string>manual</string>
+            <key>uploadSymbols</key><true/>
+            <key>provisioningProfiles</key>
+            <dict>
+              <key>com.hokedesigns.eqavatar</key><string>${PROFILE_UUID}</string>
+            </dict>
+          </dict>
+          </plist>
+          PLIST
+
+          xcodebuild -exportArchive \
+            -archivePath "$RUNNER_TEMP/EQAvatarTV.xcarchive" \
+            -exportPath "$RUNNER_TEMP/export" \
+            -exportOptionsPlist ExportOptions.plist
+
+      - name: Upload to TestFlight
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          IPA="$(find "$RUNNER_TEMP/export" -name '*.ipa' | head -1)"
+          echo "uploading $IPA"
+          xcrun altool --upload-app -f "$IPA" -t tvos \
+            --apiKey "$ASC_KEY_ID" --apiIssuer "$ASC_ISSUER_ID"
+
+      - name: Clean up secrets from the runner
+        if: always()
+        run: |
+          rm -rf "$HOME/private_keys" \
+                 "$HOME/Library/MobileDevice/Provisioning Profiles/eqavatar-tvos.mobileprovision" || true
+          security delete-keychain "$RUNNER_TEMP/tv-signing.keychain-db" || true
