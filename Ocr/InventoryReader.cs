@@ -58,6 +58,11 @@ public sealed class InventorySnapshot
     public string Method = "";
     /// <summary>Folder the diagnostic dump landed in, when one was requested.</summary>
     public string? DiagPath;
+    /// <summary>Screen position of the "Character Vitals" anchor — the origin every other part
+    /// of the window is measured from, including the equipment grid.</summary>
+    public double AnchorX, AnchorY;
+    /// <summary>The 23 equipment slots, captured in the same pass. Null if the grid wasn't read.</summary>
+    public EquipmentSnapshot? Equipment;
 
     public double? First(string label) =>
         Fields.TryGetValue(label, out List<double>? n) && n.Count > 0 ? n[0] : null;
@@ -129,6 +134,8 @@ public static class InventoryReader
 
         double scale = await CalibrateVerticalScale(frame, originX, originY, seed, colPx, log);
         snap.UiScale = scale;
+        snap.AnchorX = originX;
+        snap.AnchorY = originY;
 
         // ---- Pass 2: one OCR per value box.
         var diag = new StringBuilder();
@@ -190,6 +197,15 @@ public static class InventoryReader
 
         // ---- Header (name / level / classes) and the coin row still come from text.
         ParseHeaderAndCoins(pass1, snap, originX, originY, scale);
+
+        // ---- The equipment grid hangs off the same window, so the anchor we just solved
+        // locates it for free — no second search.
+        try
+        {
+            snap.Equipment = EquipmentReader.Read(gameHwnd, originX, originY, scale, log,
+                                                  diagnostics ?? false);
+        }
+        catch (Exception ex) { log?.Invoke("Equipment read failed: " + ex.Message); }
 
         snap.RawSeen = string.Join("\n", rawLines);
 
