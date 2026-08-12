@@ -25,6 +25,60 @@ public partial class MainWindow
         if (_planHooked) return;
         _planHooked = true;
         MapsView.MapClicked += OnPlanClick;
+        MapsView.MapRightClicked += OnPlanRightClick;
+    }
+
+    /// <summary>Right-click while editing = "not that one". Removes the waypoint under the cursor
+    /// (or the last in-progress shape corner), so a mis-click costs one click instead of clearing
+    /// the whole route and starting over. Everything after it renumbers automatically, because the
+    /// numbers are just list positions.</summary>
+    private void OnPlanRightClick(double mapX, double mapY)
+    {
+        if (_mapZone is not { } zone) return;
+
+        // Mid-draw on a shape: drop the last corner placed.
+        if (MapsView.EditMode is "poly" or "circle" or "rect" && _shapeDraft.Count > 0)
+        {
+            _shapeDraft.RemoveAt(_shapeDraft.Count - 1);
+            MapsEditHint.Text = _shapeDraft.Count == 0 ? "corner removed — start again" : $"{_shapeDraft.Count} corner(s) left";
+            RefreshPlanOverlay();
+            return;
+        }
+
+        ZonePlan plan = PlanForCurrentZone();
+        if (plan.Waypoints.Count == 0) { MapsEditHint.Text = "no waypoints to remove"; return; }
+
+        // Hit test in MAP space, with a radius that's a constant ~14 px on screen at any zoom.
+        double ew = -mapX, ns = -mapY;
+        double radius = 14 / Math.Max(0.0005, MapsView.PixelsPerUnit);
+        int best = -1;
+        double bestD2 = radius * radius;
+        for (int i = 0; i < plan.Waypoints.Count; i++)
+        {
+            double dx = plan.Waypoints[i][0] - ew, dy = plan.Waypoints[i][1] - ns;
+            double d2 = dx * dx + dy * dy;
+            if (d2 <= bestD2) { bestD2 = d2; best = i; }
+        }
+        if (best < 0) { MapsEditHint.Text = "right-click ON a waypoint to remove it"; return; }
+
+        plan.Waypoints.RemoveAt(best);
+        plan.Save(zone);
+        MapsEditHint.Text = $"waypoint {best + 1} removed — {plan.Waypoints.Count} left";
+        Diag.BotLog.Log("plan", $"{zone}: waypoint {best + 1} removed ({plan.Waypoints.Count} left)");
+        RefreshPlanOverlay();
+    }
+
+    /// <summary>Undo the most recently placed waypoint — the keyboard-free version of the same
+    /// thing, for when the pin is under another pin.</summary>
+    private void MapsUndoWp_Click(object sender, RoutedEventArgs e)
+    {
+        if (_mapZone is not { } zone) return;
+        ZonePlan plan = PlanForCurrentZone();
+        if (plan.Waypoints.Count == 0) { MapsEditHint.Text = "no waypoints to undo"; return; }
+        plan.Waypoints.RemoveAt(plan.Waypoints.Count - 1);
+        plan.Save(zone);
+        MapsEditHint.Text = $"last waypoint removed — {plan.Waypoints.Count} left";
+        RefreshPlanOverlay();
     }
 
     private ZonePlan PlanForCurrentZone()
@@ -50,7 +104,7 @@ public partial class MainWindow
         EditPolyCloseBtn.Visibility = MapsView.EditMode == "poly" ? Visibility.Visible : Visibility.Collapsed;
         MapsEditHint.Text = MapsView.EditMode switch
         {
-            "wp" => "click the map to drop waypoints in order",
+            "wp" => "click to drop waypoints in order · right-click one to remove it",
             "circle" => "click the CENTER, then the EDGE",
             "rect" => "click two opposite corners",
             "poly" => "click each corner, then press 'close'",
@@ -149,7 +203,7 @@ public partial class MainWindow
             type = MapsView.EditMode is "circle" or "rect" or "poly" ? MapsView.EditMode : type;
             shape = _shapeDraft.Select(p => new Point(-p[0], -p[1])).ToList();
         }
-        MapsView.SetPlanOverlay(wps, type, shape);
+        MapsView.SetPlanOverlay(wps, type, shape, loop: WaypointOrderBox?.SelectedIndex == 2);
     }
 
     // ---------------- grind mode selector ----------------
@@ -172,6 +226,51 @@ public partial class MainWindow
         if (GrindModeBox.SelectedIndex == 3) EditWpBtn.IsChecked = true;
         else EditRectBtn.IsChecked = true;
         MapsEdit_Changed(GrindModeBox.SelectedIndex == 3 ? EditWpBtn : EditRectBtn, new RoutedEventArgs());
+    }
+
+    /// <summary>Say up front whether the mode about to run actually has what it needs.
+    ///
+    /// Waypoints and hunting zones both depend on two things the user can silently be missing: a
+    /// saved plan for the zone the character is really in, and a live position fix. Without either
+    /// the engine degrades to plain roaming, which looks exactly like "it ignored my route" — so
+    /// this prints the truth at the moment Start is pressed rather than leaving it to be guessed.</summary>
+    private void ReportPlanReadiness()
+    {
+        int i = GrindModeBox.SelectedIndex;
+        if (i is not (2 or 3)) return;                        // only zone + waypoint modes need a plan
+        string mode = i == 3 ? "Waypoints" : "Hunting Zone";
+
+        string? stem = _charZoneStem ?? _mapZone;
+        if (stem is null)
+        { GrindLogLine($"{mode} mode: no zone identified yet. Open the Maps page and load the zone you're standing in, or zone once so the log names it."); return; }
+
+        ZonePlan? plan = ZonePlan.Load(stem);
+        string zoneName = ZoneTable.NameFor(stem);
+        if (_charZoneStem != null && _mapZone != null && _charZoneStem != _mapZone)
+            GrindLogLine($"Heads up: you're in {ZoneTable.NameFor(_charZoneStem)} but the map is showing {ZoneTable.NameFor(_mapZone)} — plans are saved per zone, so she'll use {ZoneTable.NameFor(_charZoneStem)}'s.");
+
+        if (i == 3)
+        {
+            int n = plan?.Waypoints.Count ?? 0;
+            GrindLogLine(n >= 2
+                ? $"Waypoints: {n} loaded for {zoneName} ({(WaypointOrderBox.SelectedIndex == 2 ? "looping" : WaypointOrderBox.SelectedIndex == 1 ? "random order" : "in sequence, ping-pong")})."
+                : $"Waypoints mode, but {zoneName} has {n} saved waypoint(s) — she needs at least 2. Draw the route on the Maps page with that zone loaded, or she'll just roam.");
+        }
+        else
+        {
+            GrindLogLine(plan is { HasShape: true }
+                ? $"Hunting zone: a {plan.ShapeType} is loaded for {zoneName}."
+                : $"Hunting Zone mode, but no shape is saved for {zoneName} — draw one on the Maps page, or she'll just roam.");
+        }
+
+        if (string.IsNullOrWhiteSpace(_settings.HuntLocKey))
+            GrindLogLine($"⚠ {mode} mode steers by your position, and no /loc key is set — set one in the Grind keybinds (or keep a repeating /loc macro running in-game), otherwise she can't navigate and will walk blind.");
+    }
+
+    /// <summary>Route order changed — the map overlay draws (or drops) the closing leg to match.</summary>
+    private void WaypointOrder_Changed(object sender, SelectionChangedEventArgs e)
+    {
+        if (_planHooked) RefreshPlanOverlay();
     }
 
     private string GrindModeSetting() => GrindModeBox.SelectedIndex switch

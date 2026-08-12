@@ -81,6 +81,8 @@ public sealed class HuntRole
 
     // --- compass, levitation + fall recovery (0.9.16) --------------------------------------
     private readonly CompassReader? _compass;                // real heading reads off the game UI
+    private readonly VitalsReader? _vitals;                  // HP/mana bar reads off the game UI
+    private readonly Func<string?>? _fallbackZone;           // map page's zone, when the log hasn't said
     private DateTime _levAt = DateTime.MinValue;
     private volatile bool _levNeeded;
     private DateTime _lastPitchFix = DateTime.MinValue;
@@ -92,9 +94,11 @@ public sealed class HuntRole
 
     public bool Running => _cts is { IsCancellationRequested: false };
 
-    public HuntRole(IInputSink sink, List<(InputKey, int)> rotation, string? logPath, AppSettings s, HeatmapModel heat, CompassReader? compass = null)
+    public HuntRole(IInputSink sink, List<(InputKey, int)> rotation, string? logPath, AppSettings s, HeatmapModel heat,
+                    CompassReader? compass = null, VitalsReader? vitals = null, Func<string?>? fallbackZone = null)
     {
         _sink = sink; _rotation = rotation; _s = s; _heat = heat; _compass = compass;
+        _vitals = vitals; _fallbackZone = fallbackZone;
         if (!string.IsNullOrEmpty(logPath)) _watcher = new EqLogWatcher(logPath);
         _fwd = InputKey.Parse(s.HuntForwardKey);
         _left = InputKey.Parse(s.HuntLeftKey);
@@ -123,11 +127,19 @@ public sealed class HuntRole
     private string? _planZone;
     private int _wpIndex = -1, _wpStep = 1;
     private double _wpTx, _wpTy;
-    private bool _wpHave, _noPlanWarned;
+    private bool _wpHave, _noPlanWarned, _noLocWarned;
 
     private ZonePlan? CurrentPlan()
     {
-        string? stem = ZoneTable.ShortFor(_heat.Current ?? "");
+        // The log only names the zone on a "You have entered …" line, so a bot started while
+        // already standing in the zone has NO zone at all — which used to silently mean "no plan",
+        // and waypoint routes just never ran. Fall back to whatever zone the Maps page has open,
+        // which is by definition the zone the route was drawn on.
+        //
+        // The fallback is consulted ONLY until a plan zone sticks (_planZone). Otherwise browsing
+        // to another zone's map mid-run would swap the route under the bot's feet and send it
+        // walking toward another zone's coordinates.
+        string? stem = ZoneTable.ShortFor(_heat.Current ?? "") ?? _planZone ?? _fallbackZone?.Invoke();
         if (stem is null) return _plan;                      // zone unknown yet — keep last known
         if (stem != _planZone)
         {
@@ -661,15 +673,69 @@ public sealed class HuntRole
                 if (_mobDead) { Stats.Kills++; Log?.Invoke($"Kill #{Stats.Kills}."); }
                 _attacked = false;                          // a fight resolves the defensive trigger
 
-                // 3) REST — time-based (no HP/mana in the log; see class notes)
-                Stats.State = "resting";
-                int rest = Math.Max(0, _s.HuntRestSeconds);
-                for (int t = 0; t < rest && !ct.IsCancellationRequested; t++) await Task.Delay(1000, ct);
+                // 3) REST — need-based when the HUD bars are set up, blind timer when they aren't.
+                await Rest(ct);
             }
         }
         catch (OperationCanceledException) { }
         catch (Exception ex) { Log?.Invoke("Hunt error: " + ex.Message); }
         finally { ReleaseKeys(); }
+    }
+
+    /// <summary>Rest between fights.
+    ///
+    /// With the HP/mana bars picked, this is need-based: a character that finished the fight at
+    /// full simply doesn't sit around, and one that took a beating rests until it's actually
+    /// recovered rather than for an arbitrary count of seconds. Without the bars (or with gating
+    /// switched off) it falls back to the old blind <see cref="AppSettings.HuntRestSeconds"/> pause,
+    /// because the log carries no HP or mana and guessing is worse than waiting.</summary>
+    private async Task Rest(CancellationToken ct)
+    {
+        int blind = Math.Max(0, _s.HuntRestSeconds);
+        if (!_s.RestGateEnabled || _vitals is not { Ready: true } v)
+        {
+            Stats.State = "resting";
+            for (int t = 0; t < blind && !ct.IsCancellationRequested; t++) await Task.Delay(1000, ct);
+            return;
+        }
+
+        double hpWant = Math.Clamp(_s.RestHpPercent, 0, 100) / 100.0;
+        double manaWant = Math.Clamp(_s.RestManaPercent, 0, 100) / 100.0;
+
+        // Both readable and both healthy → straight back to hunting, no pause at all.
+        (bool need, string why, string reading) = Vitals(v, hpWant, manaWant);
+        if (!need) { Stats.State = "healthy — hunting on"; return; }
+
+        Log?.Invoke($"Resting — {why}.");
+        int cap = Math.Max(5, _s.RestMaxSeconds);
+        int rested = 0;
+        while (!ct.IsCancellationRequested && rested < cap)
+        {
+            if (_selfDead) return;
+            Stats.State = "resting — " + reading;
+            await Task.Delay(1000, ct);
+            // Time spent tabbed away isn't rest and isn't recovery — don't spend the cap on it.
+            if (!_sink.Ready) continue;
+            rested++;
+            if (_attacked) { Log?.Invoke("Something attacked while resting — back up."); return; }
+            (need, _, reading) = Vitals(v, hpWant, manaWant);
+            if (!need) { Log?.Invoke($"Recovered ({reading}) — hunting on."); return; }
+        }
+        Log?.Invoke($"Rest hit the {cap}s cap at {reading} — carrying on anyway.");
+    }
+
+    /// <summary>One read of both bars: is either below its threshold, why, and a printable form.
+    /// A bar that can't be read right now counts as fine, so an occluded or mis-picked bar can
+    /// never wedge the bot in a permanent rest — it just falls back to hunting.</summary>
+    private static (bool need, string why, string reading) Vitals(Ocr.VitalsReader v, double hpWant, double manaWant)
+    {
+        double? hp = v.HealthFraction(), mana = v.ManaFraction();
+        string reading = (hp is double a ? $"hp {a * 100:0}%" : "hp —") + " · " + (mana is double b ? $"mana {b * 100:0}%" : "mana —");
+        if (hpWant > 0 && hp is double h && h < hpWant)
+            return (true, $"health {h * 100:0}% is under {hpWant * 100:0}%", reading);
+        if (manaWant > 0 && mana is double m && m < manaWant)
+            return (true, $"mana {m * 100:0}% is under {manaWant * 100:0}%", reading);
+        return (false, "", reading);
     }
 
     /// <summary>Periodically fire the user's /loc macro key so position stays live for bounds/heatmap.
@@ -712,12 +778,31 @@ public sealed class HuntRole
         if (plan is null || plan.Waypoints.Count < 2)
         {
             if (!_noPlanWarned)
-            { _noPlanWarned = true; Log?.Invoke("Waypoints mode, but this zone has fewer than 2 saved waypoints — draw a route on the Maps page. Roaming instead."); }
+            {
+                _noPlanWarned = true;
+                string where = _planZone ?? ZoneTable.ShortFor(_heat.Current ?? "") ?? _fallbackZone?.Invoke() ?? "an unidentified zone";
+                Log?.Invoke($"Waypoints mode, but \"{where}\" has {(plan?.Waypoints.Count ?? 0)} saved waypoint(s) — a route needs at least 2. "
+                          + "Open the Maps page, make sure the zone shown is the one you're standing in, and draw the route there. Roaming instead.");
+            }
             await Wander(ct);
             return;
         }
         if (_x is not double x || _y is not double y)
-        { await FreshLoc(ct); await HoldKey(_fwd, Vary(500), ct); return; }
+        {
+            // No position = no navigation. This is THE thing that quietly turns a waypoint run
+            // into aimless walking, so say it out loud (once) instead of shuffling forward.
+            if (!_noLocWarned)
+            {
+                _noLocWarned = true;
+                Log?.Invoke(_loc.IsNone
+                    ? "Waypoints need to know where you are, and no /loc key is set — put your /loc macro key in the Grind settings (or keep a repeating /loc macro running in-game). Walking blind until then."
+                    : "Waypoints are waiting on the first /loc fix — check that your /loc key really prints a location line to the log.");
+            }
+            await FreshLoc(ct);
+            await HoldKey(_fwd, Vary(500), ct);
+            return;
+        }
+        _noLocWarned = false;
 
         if (!_wpHave) NextWaypoint(plan, announce: true);
         double dist = Math.Sqrt((x - _wpTx) * (x - _wpTx) + (y - _wpTy) * (y - _wpTy));
@@ -744,11 +829,18 @@ public sealed class HuntRole
     private void NextWaypoint(ZonePlan plan, bool announce)
     {
         int n = plan.Waypoints.Count;
-        if ((_s.WaypointOrder ?? "sequence").StartsWith("rand", StringComparison.OrdinalIgnoreCase))
+        string order = (_s.WaypointOrder ?? "sequence").Trim().ToLowerInvariant();
+        if (order.StartsWith("rand"))
         {
             int nxt;
             do { nxt = _rng.Next(n); } while (n > 1 && nxt == _wpIndex);
             _wpIndex = nxt;
+        }
+        else if (order.StartsWith("loop"))
+        {
+            // Closed circuit: …N-1, N, 1, 2… The last leg walks back to the first waypoint, so a
+            // route drawn as a ring is patrolled as a ring instead of being retraced backwards.
+            _wpIndex = _wpIndex < 0 ? 0 : (_wpIndex + 1) % n;
         }
         else
         {
@@ -764,7 +856,7 @@ public sealed class HuntRole
         _wpTy = wp[1] + (_rng.NextDouble() * 2 - 1) * 10;
         _wpHave = true;
         if (announce)
-            Log?.Invoke($"Patrolling {n} waypoints ({((_s.WaypointOrder ?? "sequence").StartsWith("rand", StringComparison.OrdinalIgnoreCase) ? "random order" : "in sequence, ping-pong")}).");
+            Log?.Invoke($"Patrolling {n} waypoints ({(order.StartsWith("rand") ? "random order" : order.StartsWith("loop") ? "looping 1→N→1" : "in sequence, ping-pong")}).");
     }
 
     /// <summary>Run forward with strafes, an occasional back-step, and right-mouse look-around;

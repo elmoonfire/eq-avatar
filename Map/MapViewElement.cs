@@ -47,6 +47,10 @@ public sealed class MapViewElement : FrameworkElement
 
     public event Action? ViewChanged;
 
+    /// <summary>Screen pixels per map unit at the current zoom — lets callers express a hit radius
+    /// in pixels ("within 14 px of the pin") no matter how far in or out the view is.</summary>
+    public double PixelsPerUnit => _scale;
+
     public MapViewElement()
     {
         ClipToBounds = true;
@@ -183,14 +187,29 @@ public sealed class MapViewElement : FrameworkElement
     /// <summary>Raised with MAP-space coords when the user clicks while an edit mode is armed.</summary>
     public event Action<double, double>? MapClicked;
 
+    /// <summary>Raised with MAP-space coords on a RIGHT-click while an edit mode is armed — the
+    /// "take that one back" gesture (removes the waypoint you clicked).</summary>
+    public event Action<double, double>? MapRightClicked;
+
+    protected override void OnMouseRightButtonUp(MouseButtonEventArgs e)
+    {
+        if (_map is null || EditMode.Length == 0) return;
+        (double mx, double my) = Unproject(e.GetPosition(this));
+        MapRightClicked?.Invoke(mx, my);
+        e.Handled = true;
+    }
+
     private IReadOnlyList<Point> _planWps = Array.Empty<Point>();
     private string _planShapeType = "";
     private IReadOnlyList<Point> _planShapePts = Array.Empty<Point>();
+    private bool _planLoop;
 
-    /// <summary>Show the zone plan (all MAP space): numbered waypoints + the hunting-zone shape.</summary>
-    public void SetPlanOverlay(IReadOnlyList<Point> waypoints, string shapeType, IReadOnlyList<Point> shapePts)
+    /// <summary>Show the zone plan (all MAP space): numbered waypoints + the hunting-zone shape.
+    /// <paramref name="loop"/> draws the closing leg from the last waypoint back to the first, so a
+    /// looping route looks like the circuit it actually walks.</summary>
+    public void SetPlanOverlay(IReadOnlyList<Point> waypoints, string shapeType, IReadOnlyList<Point> shapePts, bool loop = false)
     {
-        _planWps = waypoints; _planShapeType = shapeType; _planShapePts = shapePts;
+        _planWps = waypoints; _planShapeType = shapeType; _planShapePts = shapePts; _planLoop = loop;
         InvalidateVisual();
     }
 
@@ -247,6 +266,13 @@ public sealed class MapViewElement : FrameworkElement
             var line = new Pen(new SolidColorBrush(Color.FromArgb(0x66, amber.R, amber.G, amber.B)), 1.3);
             for (int i = 1; i < _planWps.Count; i++)
                 dc.DrawLine(line, Project(_planWps[i - 1].X, _planWps[i - 1].Y), Project(_planWps[i].X, _planWps[i].Y));
+            if (_planLoop && _planWps.Count > 2)
+            {
+                // The closing leg is dashed so it reads as "and back round again", not as an edge.
+                var close = new Pen(new SolidColorBrush(Color.FromArgb(0x66, amber.R, amber.G, amber.B)), 1.3)
+                { DashStyle = new DashStyle(new double[] { 4, 3 }, 0) };
+                dc.DrawLine(close, Project(_planWps[^1].X, _planWps[^1].Y), Project(_planWps[0].X, _planWps[0].Y));
+            }
             for (int i = 0; i < _planWps.Count; i++)
             {
                 Point s = Project(_planWps[i].X, _planWps[i].Y);

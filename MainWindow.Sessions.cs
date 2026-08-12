@@ -158,7 +158,9 @@ public partial class MainWindow
         ["rotation"] = string.Join(" | ", GrindRotation.Text.Split('\n').Select(l => l.Trim()).Where(l => l.Length > 0 && !l.StartsWith("#"))),
         ["keys fwd/back/L/R"] = $"{_settings.HuntForwardKey}/{_settings.HuntBackKey}/{_settings.HuntLeftKey}/{_settings.HuntRightKey}",
         ["target / con / loc"] = $"{_settings.HuntTargetKey} / {_settings.HuntConsiderKey} / {(_settings.HuntLocKey.Length == 0 ? "—" : _settings.HuntLocKey)}",
-        ["rest s"] = _settings.HuntRestSeconds.ToString(),
+        ["rest"] = _settings.RestGateEnabled && VitalsSvc.Ready
+            ? $"until {_settings.RestHpPercent}% hp / {_settings.RestManaPercent}% mana (cap {_settings.RestMaxSeconds}s)"
+            : $"{_settings.HuntRestSeconds}s fixed",
         ["max fight s"] = _settings.HuntMaxFightSeconds.ToString(),
         ["run burst ms"] = $"{_settings.HuntRunMsMin}–{_settings.HuntRunMsMax}",
         ["variance %"] = _settings.RandomVariancePercent.ToString("0"),

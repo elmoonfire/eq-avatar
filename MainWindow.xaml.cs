@@ -700,7 +700,7 @@ public partial class MainWindow : Window
         {
             ApplyHuntFields();
             _settings.Save();
-            _hunt = new HuntRole(sink, rotation, _currentLog, _settings, _heat, CompassSvc);
+            _hunt = new HuntRole(sink, rotation, _currentLog, _settings, _heat, CompassSvc, VitalsSvc, () => _mapZone);
             _hunt.Log += m => Dispatcher.Invoke(() => GrindLogLine(m));
             _hunt.Stopped += () => Dispatcher.Invoke(() => { _grindTimer.Stop(); UpdateGrindStats(); EndRoleSession(); });
             _hunt.Start();
@@ -708,6 +708,7 @@ public partial class MainWindow : Window
             Recorder.Begin(GrindModeLabel(), SnapshotGrindSettings(hunt: true));
             if (_mapsWatcher is null) StartMapsWatcher();
             GrindLogLine("HUNT mode (EXPERIMENTAL). In-game: bind 'target nearest NPC' to your Hunt target key, keep a /loc macro running, walk the area once so bounds are known — and WATCH it. F12 or tab away to stop.");
+            ReportPlanReadiness();
             return;
         }
 
@@ -753,8 +754,9 @@ public partial class MainWindow : Window
         _settings.LevEnabled = LevBox.IsChecked == true;
         _settings.LevCastKey = LevKeyBox.Text.Trim();
         if (!string.IsNullOrWhiteSpace(LevNameBox.Text)) _settings.LevBuffName = LevNameBox.Text.Trim();
+        ApplyVitalsFields();
         _settings.GrindMode = GrindModeSetting();
-        _settings.WaypointOrder = WaypointOrderBox.SelectedIndex == 1 ? "random" : "sequence";
+        _settings.WaypointOrder = WaypointOrderBox.SelectedIndex switch { 1 => "random", 2 => "loop", _ => "sequence" };
     }
 
     /// <summary>Fill the Grind keybind boxes from saved settings on load.</summary>
@@ -783,9 +785,11 @@ public partial class MainWindow : Window
         LevNameBox.Text = _settings.LevBuffName;
         GrindModeBox.SelectedIndex = !_settings.HuntMode ? 4 : (_settings.GrindMode ?? "hunt") switch
         { "camp" => 1, "zone" => 2, "waypoints" => 3, _ => 0 };
-        WaypointOrderBox.SelectedIndex = (_settings.WaypointOrder ?? "sequence").StartsWith("rand", StringComparison.OrdinalIgnoreCase) ? 1 : 0;
+        WaypointOrderBox.SelectedIndex = (_settings.WaypointOrder ?? "sequence").Trim().ToLowerInvariant() switch
+        { var o when o.StartsWith("rand") => 1, var o when o.StartsWith("loop") => 2, _ => 0 };
         UpdateCompassStatus();
-        InitArtUi();                                 // mascot scenes, tether face, tile sync
+        InitVitalsUi();
+        InitArtUi();                               // mascot scenes, tether face, tile sync
         OcrAutoBox.IsChecked = _settings.OcrAutoScan;
         if (_settings.OcrAutoScan) StartOcrAuto();
         if (!string.IsNullOrWhiteSpace(_settings.HubServer)) LoginServerBox.Text = _settings.HubServer;

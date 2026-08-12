@@ -28,7 +28,6 @@ public sealed class CompassPickWindow : Window
     };
     private readonly TextBlock _hint = new()
     {
-        Text = "Drag a box around the COMPASS strip (make it opaque in-game first), then press Enter.",
         Foreground = new SolidColorBrush(Color.FromRgb(0xEA, 0xF6, 0xFF)),
         Background = new SolidColorBrush(Color.FromArgb(0xC8, 0x0B, 0x12, 0x1E)),
         Padding = new Thickness(10, 6, 10, 6), FontSize = 13,
@@ -42,9 +41,15 @@ public sealed class CompassPickWindow : Window
     /// <summary>Normalized selection, valid when ShowDialog() returned true.</summary>
     public double NX, NY, NW, NH;
 
-    public CompassPickWindow(System.Drawing.Bitmap frame)
+    /// <param name="frame">A captured game frame to draw the box on.</param>
+    /// <param name="title">Window title — names whatever is being picked.</param>
+    /// <param name="hint">The one line of instruction shown above the frame.</param>
+    public CompassPickWindow(System.Drawing.Bitmap frame,
+                             string title = "Pick the compass region",
+                             string hint = "Drag a box around the COMPASS strip (make it opaque in-game first), then press Enter.")
     {
-        Title = "Pick the compass region";
+        Title = title;
+        _hint.Text = hint;
         Width = Math.Min(1280, frame.Width + 40);
         Height = Math.Min(860, frame.Height + 120);
         WindowStartupLocation = WindowStartupLocation.CenterScreen;
@@ -97,7 +102,9 @@ public sealed class CompassPickWindow : Window
         _canvas.MouseLeftButtonUp += (_, _) =>
         {
             _dragging = false; _canvas.ReleaseMouseCapture();
-            _ok.IsEnabled = _band.Width > 12 && _band.Height > 4;
+            // Small on purpose: this picker is also used for HP/mana bars, and a vertical bar is
+            // only a few pixels wide on screen.
+            _ok.IsEnabled = _band.Width > 5 && _band.Height > 3;
         };
         KeyDown += (_, e) => { if (e.Key == Key.Enter && _ok.IsEnabled) Accept(); if (e.Key == Key.Escape) { DialogResult = false; Close(); } };
     }

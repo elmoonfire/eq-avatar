@@ -740,9 +740,11 @@
                                             </ComboBox>
                                             <CheckBox x:Name="HuntBox" IsChecked="True" Visibility="Collapsed"/>
                                             <ComboBox x:Name="WaypointOrderBox" Width="150" VerticalAlignment="Center" Margin="0,0,8,4" Visibility="Collapsed"
-                                                      ToolTip="Sequence walks 1→N then back again (ping-pong). Random hops between waypoints like a player with no plan.">
+                                                      ToolTip="Sequence walks 1→N then back again (ping-pong). Loop walks 1→N then straight back to 1 and round again — use this for a circuit. Random hops between waypoints like a player with no plan."
+                                                      SelectionChanged="WaypointOrder_Changed">
                                                 <ComboBoxItem Content="In sequence ⇄" IsSelected="True"/>
                                                 <ComboBoxItem Content="Random order"/>
+                                                <ComboBoxItem Content="Loop ↻"/>
                                             </ComboBox>
                                             <Button x:Name="GrindPlanBtn" Content="Draw on map →" Visibility="Collapsed" Margin="0,0,10,4"
                                                     Click="GrindPlan_Click" ToolTip="Opens the Maps page with the drawing tools for this mode."/>
@@ -907,6 +909,46 @@
                                                     ToolTip="Stand somewhere safe with EQ on screen; she turns up to two circles (~5–25s) to fingerprint the compass and measure exactly how many mouse-pixels make 360°."/>
                                             <TextBlock x:Name="CompassStatus" Text="not set" VerticalAlignment="Center" Foreground="{StaticResource TextDim}" Margin="0,0,4,4"/>
                                         </WrapPanel>
+                                    </Border>
+                                </Expander>
+
+                                <!-- VITALS (rest gating) -->
+                                <Expander IsExpanded="False" Foreground="{StaticResource Text}" Margin="0,0,0,10">
+                                    <Expander.Header>
+                                        <StackPanel Orientation="Horizontal">
+                                            <TextBlock Text="VITALS — WHEN TO REST" FontWeight="Bold" FontSize="12" Foreground="#7FB2D9" VerticalAlignment="Center"/>
+                                            <Border x:Name="VitalsVerdict" Background="#2A2410" BorderBrush="#7A6320" BorderThickness="1" CornerRadius="6" Padding="8,2" Margin="10,0,0,0" VerticalAlignment="Center">
+                                                <TextBlock x:Name="VitalsVerdictText" Text="not set" FontSize="10.5" Foreground="#FFE1A6"/>
+                                            </Border>
+                                        </StackPanel>
+                                    </Expander.Header>
+                                    <Border Style="{StaticResource SectionCard}" Margin="0,6,0,0">
+                                        <StackPanel>
+                                            <TextBlock TextWrapping="Wrap" Foreground="{StaticResource TextDim}" Margin="0,0,0,7"
+                                                       Text="EQ's log never reports health or mana, so she reads your HUD bars directly. Stand at FULL health and mana, then pick each bar once — she learns what a full bar looks like and measures the fill from then on. With this set she stops resting after fights she walked away from clean, and when she does rest she gets up the moment she's recovered instead of sitting out a fixed timer."/>
+                                            <WrapPanel>
+                                                <Button Content="Pick HP bar" Click="VitalsPickHp_Click" Margin="0,0,6,4" Padding="10,3"
+                                                        ToolTip="Captures the game and lets you drag a box over your health bar. Be at FULL health when you do it."/>
+                                                <Button Content="Pick mana bar" Click="VitalsPickMana_Click" Margin="0,0,6,4" Padding="10,3"
+                                                        ToolTip="Same for mana. Skip this one for a melee character and set the mana threshold to 0."/>
+                                                <Button Content="Test read" Click="VitalsTest_Click" Margin="0,0,10,4" Padding="10,3"
+                                                        ToolTip="Reads both bars right now and prints the percentages, so you can check them against what the game shows."/>
+                                                <TextBlock x:Name="VitalsStatus" Text="not set" VerticalAlignment="Center" Foreground="{StaticResource TextDim}" Margin="0,0,4,4"/>
+                                            </WrapPanel>
+                                            <WrapPanel Margin="0,6,0,0">
+                                                <CheckBox x:Name="RestGateBox" Content="only rest when below" IsChecked="True" VerticalAlignment="Center" Margin="0,0,8,4"
+                                                          Checked="VitalsGate_Changed" Unchecked="VitalsGate_Changed"
+                                                          Foreground="{StaticResource Text}"
+                                                          ToolTip="Off = the old behaviour: a fixed pause after every fight regardless of how it went."/>
+                                                <TextBox x:Name="RestHpBox" Width="44" Text="80" VerticalAlignment="Center" Margin="0,0,4,4"/>
+                                                <TextBlock Text="% health   or" VerticalAlignment="Center" Foreground="{StaticResource TextDim}" Margin="0,0,8,4"/>
+                                                <TextBox x:Name="RestManaBox" Width="44" Text="80" VerticalAlignment="Center" Margin="0,0,4,4"/>
+                                                <TextBlock Text="% mana   ·  give up after" VerticalAlignment="Center" Foreground="{StaticResource TextDim}" Margin="0,0,8,4"/>
+                                                <TextBox x:Name="RestMaxBox" Width="48" Text="180" VerticalAlignment="Center" Margin="0,0,4,4"
+                                                         ToolTip="Safety cap: however low the bars read, she never rests longer than this before carrying on."/>
+                                                <TextBlock Text="s" VerticalAlignment="Center" Foreground="{StaticResource TextDim}" Margin="0,0,4,4"/>
+                                            </WrapPanel>
+                                        </StackPanel>
                                     </Border>
                                 </Expander>
 
@@ -1300,6 +1342,8 @@
                                           ToolTip="Hunting zone as any shape: click each corner, then press 'close'."/>
                             <Button x:Name="EditPolyCloseBtn" Content="close" Padding="8,3" Margin="0,0,6,4" Visibility="Collapsed" Click="MapsPolyClose_Click"
                                     ToolTip="Close the polygon with the points placed so far (needs at least 3)."/>
+                            <Button Content="↶ undo point" Padding="8,3" Margin="0,0,2,4" Click="MapsUndoWp_Click"
+                                    ToolTip="Remove the last waypoint you placed. You can also right-click any waypoint on the map to remove that one — the rest renumber themselves."/>
                             <Button Content="clear route" Padding="8,3" Margin="0,0,2,4" Click="MapsClearWp_Click"
                                     ToolTip="Delete this zone's saved waypoints."/>
                             <Button Content="clear zone" Padding="8,3" Margin="0,0,6,4" Click="MapsClearShape_Click"

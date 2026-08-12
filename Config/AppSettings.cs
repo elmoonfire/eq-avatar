@@ -109,7 +109,18 @@ public sealed class AppSettings
     public bool HuntLookAround { get; set; } = true;
     public int HuntRunMsMin { get; set; } = 1200;            // forward-burst length range
     public int HuntRunMsMax { get; set; } = 2600;
-    public int HuntRestSeconds { get; set; } = 8;            // pause between fights (see note: HP/mana isn't in the log)
+    public int HuntRestSeconds { get; set; } = 8;            // blind pause between fights, used only when the vitals bars aren't set up
+    /// <summary>Rest gating: with the HP/mana bars picked (see <see cref="Ocr.VitalsReader"/>), skip
+    /// the rest entirely while both are above their thresholds, and when one isn't, rest until it
+    /// recovers instead of burning a fixed timer. Falls back to <see cref="HuntRestSeconds"/> when
+    /// no bars are configured.</summary>
+    public bool RestGateEnabled { get; set; } = true;
+    /// <summary>Rest below this much health (percent).</summary>
+    public int RestHpPercent { get; set; } = 80;
+    /// <summary>Rest below this much mana (percent). Set to 0 to ignore mana entirely.</summary>
+    public int RestManaPercent { get; set; } = 80;
+    /// <summary>Safety cap on a need-based rest, so a bad bar read can never park the bot forever.</summary>
+    public int RestMaxSeconds { get; set; } = 180;
     public int HuntMaxFightSeconds { get; set; } = 25;       // bail on a fight that never ends (keeps it roaming)
     /// <summary>Skip mobs whose consider reads as too hard (flee / challenge).</summary>
     public bool HuntSkipHardCons { get; set; } = true;
