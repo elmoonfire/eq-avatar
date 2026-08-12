@@ -1,0 +1,158 @@
+name: mobile-release
+
+# Deliberately a SEPARATE tag namespace from the desktop app (which builds on `v*`),
+# so shipping the Windows client never triggers a mobile build and vice versa.
+on:
+  push:
+    tags: ['mobile-v*']
+  workflow_dispatch:
+    inputs:
+      ios:
+        description: 'Also build and upload to TestFlight'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mobile
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Dependencies
+        run: flutter pub get
+      - name: Analyze
+        run: flutter analyze
+      - name: Test
+        run: flutter test
+
+      - name: Build APK
+        run: flutter build apk --release --build-name "${GITHUB_REF_NAME#mobile-v}" --build-number "${GITHUB_RUN_NUMBER}"
+
+      - name: Name the artifact
+        run: mv build/app/outputs/flutter-apk/app-release.apk "EQAvatar-${GITHUB_REF_NAME#mobile-v}.apk"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-apk
+          path: mobile/EQAvatar-*.apk
+
+      - name: Attach to the release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: mobile/EQAvatar-*.apk
+          body: |
+            **EQ Avatar companion — Android**
+
+            Download the APK below and open it on your phone (allow "install from
+            unknown sources" once). Pair it with the access token from the members portal.
+
+  ios:
+    # Only when a tag ships or the workflow is dispatched with ios=true, because
+    # macOS runner minutes bill at 10x.
+    if: startsWith(github.ref, 'refs/tags/') || inputs.ios
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: mobile
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Dependencies
+        run: flutter pub get
+
+      - name: Install signing assets
+        env:
+          P12: ${{ secrets.IOS_DIST_P12_BASE64 }}
+          P12_PASSWORD: ${{ secrets.IOS_DIST_P12_PASSWORD }}
+          PROFILE: ${{ secrets.IOS_PROVISION_PROFILE_BASE64 }}
+          ASC_KEY: ${{ secrets.ASC_KEY_P8_BASE64 }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+        run: |
+          set -euo pipefail
+          # A throwaway keychain scoped to this runner, unlocked for the build only.
+          KEYCHAIN="$RUNNER_TEMP/signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(uuidgen)"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 3600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+
+          echo "$P12" | base64 --decode > "$RUNNER_TEMP/dist.p12"
+          security import "$RUNNER_TEMP/dist.p12" -k "$KEYCHAIN" -P "$P12_PASSWORD" \
+            -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" >/dev/null
+          security list-keychain -d user -s "$KEYCHAIN" login.keychain-db
+
+          PROFILE_DIR="$HOME/Library/MobileDevice/Provisioning Profiles"
+          mkdir -p "$PROFILE_DIR"
+          echo "$PROFILE" | base64 --decode > "$PROFILE_DIR/eqavatar.mobileprovision"
+
+          # altool/xcodebuild look for the App Store Connect key here by convention.
+          mkdir -p "$HOME/private_keys"
+          echo "$ASC_KEY" | base64 --decode > "$HOME/private_keys/AuthKey_${ASC_KEY_ID}.p8"
+
+          rm -f "$RUNNER_TEMP/dist.p12"
+
+      - name: Build signed IPA
+        env:
+          TEAM_ID: ${{ secrets.IOS_TEAM_ID }}
+          PROFILE_UUID: ${{ secrets.IOS_PROFILE_UUID }}
+        run: |
+          set -euo pipefail
+          cat > ExportOptions.plist <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>method</key><string>app-store-connect</string>
+            <key>teamID</key><string>${TEAM_ID}</string>
+            <key>signingStyle</key><string>manual</string>
+            <key>uploadSymbols</key><true/>
+            <key>provisioningProfiles</key>
+            <dict>
+              <key>com.hokedesigns.eqavatar</key><string>${PROFILE_UUID}</string>
+            </dict>
+          </dict>
+          </plist>
+          PLIST
+
+          flutter build ipa --release \
+            --build-name "${GITHUB_REF_NAME#mobile-v}" \
+            --build-number "${GITHUB_RUN_NUMBER}" \
+            --export-options-plist=ExportOptions.plist
+
+      - name: Upload to TestFlight
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          IPA="$(find build/ios/ipa -name '*.ipa' | head -1)"
+          echo "uploading $IPA"
+          xcrun altool --upload-app -f "$IPA" -t ios \
+            --apiKey "$ASC_KEY_ID" --apiIssuer "$ASC_ISSUER_ID"
+
+      - name: Clean up secrets from the runner
+        if: always()
+        run: |
+          rm -rf "$HOME/private_keys" \
+                 "$HOME/Library/MobileDevice/Provisioning Profiles/eqavatar.mobileprovision" || true
+          security delete-keychain "$RUNNER_TEMP/signing.keychain-db" || true
