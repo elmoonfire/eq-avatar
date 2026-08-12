@@ -191,7 +191,7 @@ TETHER
 Leashes the bot to where the run started (the first /loc). It curves back inside before the line, and walks STRAIGHT home if it crosses — heading comes from the compass when calibrated, else from /loc movement. The circle draws on the Maps page and the in-game overlay. Slider: 10-unit steps below 50 for tight camps, 50-unit steps above.
 
 COMBAT ROTATION
-One 'key,delayMs' per line — keys 0-9, A-Z, F1-F24, Tab, Home/End/PgUp/PgDn, mouse1-5. A single in-game macro key is one line (e.g. 4,1400). BARD MELODY MODE: the FIRST line is your /melody hotkey — it fires once and keeps singing, recast only when the log says the melody stopped (stun, fizzled note, song end).
+One key per line, delay optional: '4,1400' presses 4 then waits 1.4s; a bare '4' waits 3.2s (the 3s global cooldown + 200ms latency). Keys 0-9, A-Z, F1-F24, Tab, Home/End/PgUp/PgDn, mouse1-5; a single in-game macro key is one line; '#' starts a comment. BARD MELODY MODE (checkbox in this section): the FIRST line is your /melody hotkey — it fires once and keeps singing, recast only when the log says the melody stopped (stun, fizzled note, song end).
 
 KEYBINDS + /loc
 Set your movement keys in Grind Settings. Bind 'target nearest NPC' in-game to the target key (Tab by default; mouse buttons work). Bind a key to a macro whose LAST line is /loc — the bot taps it to keep its position live (essential for tether, camp and waypoints). Tip: make a new chat tab and filter Other (Misc) into it so /loc doesn't spam your main chat.

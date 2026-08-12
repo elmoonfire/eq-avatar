@@ -839,7 +839,7 @@
                                                 <Image x:Name="ArtSettings" Stretch="UniformToFill"/>
                                             </Border>
                                             <TextBlock Text="GRIND SETTINGS" FontWeight="Bold" FontSize="12" Foreground="#7FB2D9" VerticalAlignment="Center"/>
-                                            <TextBlock Text="keybinds · bard melody · levitate" FontSize="10.5" Foreground="{StaticResource TextDim}" VerticalAlignment="Center" Margin="10,0,0,0"/>
+                                            <TextBlock Text="keybinds · levitate" FontSize="10.5" Foreground="{StaticResource TextDim}" VerticalAlignment="Center" Margin="10,0,0,0"/>
                                         </StackPanel>
                                     </Expander.Header>
                                     <Border Style="{StaticResource SectionCard}" Margin="0,6,0,0">
@@ -866,8 +866,6 @@
                                                 <TextBox x:Name="HuntRestBox" Text="8" Width="40" VerticalAlignment="Center" Margin="0,0,8,8"/>
                                             </WrapPanel>
                                             <WrapPanel>
-                                                <CheckBox x:Name="BardBox" Content="bard melody mode" Margin="0,0,14,4" Foreground="{StaticResource Text}" VerticalAlignment="Center"
-                                                          ToolTip="For bards running /melody: the FIRST rotation line is your melody hotkey. It fires once and keeps singing — recast ONLY when the log says the melody stopped."/>
                                                 <CheckBox x:Name="LevBox" Content="keep Levitate up" VerticalAlignment="Center" Margin="0,0,6,4" Foreground="{StaticResource Text}"
                                                           ToolTip="Casts your Levitate hotkey at the start and re-casts when the log says it wore off. While levitating she rides her view just above the horizon and floats over pits and water."/>
                                                 <TextBlock Text="cast key" VerticalAlignment="Center" Margin="0,0,4,4" Foreground="{StaticResource TextDim}"/>
@@ -915,13 +913,28 @@
                                         </StackPanel>
                                     </Expander.Header>
                                     <Border Style="{StaticResource SectionCard}" Margin="0,6,0,0">
-                                        <Grid>
-                                            <TextBox x:Name="GrindRotation" AcceptsReturn="True" FontFamily="Consolas" FontSize="12" MinHeight="88"
-                                                     Background="#0C0F13" BorderBrush="{StaticResource AccentDim}"
-                                                     VerticalScrollBarVisibility="Auto" TextChanged="RotationText_Changed" Text=""/>
-                                            <TextBlock x:Name="RotationHint" IsHitTestVisible="False" Margin="8,6,8,6" Foreground="#5D6878" FontFamily="Consolas" FontSize="11.5"
-                                                       Text="one key,delayMs per line — e.g.&#10;4,1400&#10;keys: 0-9, A-Z, F1-F24, Tab, Home/End/PgUp/PgDn, mouse1-5&#10;bard melody mode: the FIRST line is your /melody hotkey"/>
-                                        </Grid>
+                                        <StackPanel>
+                                            <CheckBox x:Name="BardBox" Content="bard melody mode" Margin="0,0,0,7" Foreground="{StaticResource Text}"
+                                                      ToolTip="For bards running /melody: the FIRST rotation line is your melody hotkey. It fires once and keeps singing — the bot recasts ONLY when the log says the melody stopped (stun, missed note, song end)."/>
+                                            <Grid>
+                                                <TextBox x:Name="GrindRotation" AcceptsReturn="True" FontFamily="Consolas" FontSize="12" MinHeight="88"
+                                                         Background="#0C0F13" BorderBrush="{StaticResource AccentDim}"
+                                                         VerticalScrollBarVisibility="Auto" TextChanged="RotationText_Changed" Text=""
+                                                         ToolTip="One key per line, with an optional delay: '4,1400' presses 4 then waits 1.4s. Leave the delay off ('4' alone) and 3.2 seconds is assumed — the 3s global cooldown plus 200ms for latency. Keys: 0-9, A-Z, F1-F24, Tab, Home/End/PgUp/PgDn, mouse1-5. An in-game macro key counts as one line. Lines starting with # are comments."/>
+                                                <TextBlock x:Name="RotationHint" IsHitTestVisible="False" Margin="8,6,8,6" Foreground="#5D6878" FontFamily="Consolas" FontSize="11.5"
+                                                           Text="one key per line — e.g.&#10;4&#10;delay optional: '4,1400' waits 1.4s; none = 3.2s (GCD + latency)"/>
+                                            </Grid>
+                                            <StackPanel Orientation="Horizontal" Margin="0,7,0,0">
+                                                <Border Background="#16202E" BorderBrush="#2A4A57" BorderThickness="1" CornerRadius="999"
+                                                        Width="22" Height="22" Cursor="Hand" MouseLeftButtonUp="GrindInfo_Click"
+                                                        ToolTip="Open the full guide — every key name, delays, bard melody mode, macro tips.">
+                                                    <TextBlock Text="i" FontFamily="Georgia" FontStyle="Italic" FontWeight="Bold" FontSize="13"
+                                                               Foreground="#7FB2D9" HorizontalAlignment="Center" VerticalAlignment="Center" Margin="0,-1,0,0"/>
+                                                </Border>
+                                                <TextBlock Text="hover a field for help — or press the info button for the full guide"
+                                                           FontSize="10.5" Foreground="{StaticResource TextDim}" VerticalAlignment="Center" Margin="8,0,0,0"/>
+                                            </StackPanel>
+                                        </StackPanel>
                                     </Border>
                                 </Expander>
 

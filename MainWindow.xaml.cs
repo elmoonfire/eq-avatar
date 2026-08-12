@@ -114,7 +114,8 @@ public partial class MainWindow : Window
         }
         if (_settings.WindowMaximized) WindowState = WindowState.Maximized;
         Loaded += (_, _) => OnLoadedInit();
-        Loaded += (_, _) => { try { new Ui.SplashWindow(this).Show(); } catch { /* art missing = no splash */ } };
+        // (0.9.22) The second splash that used to launch here is gone — App.OnStartup already
+        // covers the window with the robot splash; two opaque splashes were fighting each other.
         SourceInitialized += OnSourceInitialized;
         _fgTimer.Tick += (_, _) => TickUi();
         _fgTimer.Start();

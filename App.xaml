@@ -32,24 +32,9 @@
             <Setter Property="Padding" Value="6,4"/>
         </Style>
 
-        <!-- Custom tooltip: light blue, white text, no border, user-adjustable opacity.
-             (The default was dark text on a near-white bg — unreadable on this theme.) -->
-        <sys:Double x:Key="TooltipOpacity">0.92</sys:Double>
-        <Style TargetType="ToolTip">
-            <Setter Property="Foreground" Value="#FFFFFF"/>
-            <Setter Property="OverridesDefaultStyle" Value="True"/>
-            <Setter Property="HasDropShadow" Value="True"/>
-            <Setter Property="Template">
-                <Setter.Value>
-                    <ControlTemplate TargetType="ToolTip">
-                        <Border CornerRadius="8" Padding="10,7" Background="#4FB4EE"
-                                Opacity="{DynamicResource TooltipOpacity}" MaxWidth="360">
-                            <ContentPresenter TextElement.Foreground="#FFFFFF"/>
-                        </Border>
-                    </ControlTemplate>
-                </Setter.Value>
-            </Setter>
-        </Style>
+        <!-- (0.9.22) The old light-blue ToolTip style that lived here was REMOVED: together with
+             the dark ToolTip style below it made two implicit styles with the same key in this
+             dictionary — a runtime ArgumentException that killed the app at launch (v0.9.21). -->
 
         <!-- Readable dark tabs (the default chrome washed out on the dark theme). -->
         <Style TargetType="TabItem">

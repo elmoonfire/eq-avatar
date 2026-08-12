@@ -162,8 +162,13 @@ public sealed class GrindRole
         }
     }
 
+    /// <summary>The delay assumed when a rotation line has no ",delayMs" part: the 3.0s global
+    /// cooldown plus 200ms of latency headroom. "4" alone means press 4, wait 3.2s.</summary>
+    public const int DefaultDelayMs = 3200;
+
     /// <summary>Parse "4,1400" style lines into (InputKey, delayMs) pairs. Keys: 0-9, A-Z, F1-F24,
-    /// Tab/Space/Enter, arrows, and mouse1..mouse5 (so "mouse5,1200" works).</summary>
+    /// Tab/Space/Enter, arrows, and mouse1..mouse5 (so "mouse5,1200" works). The delay is
+    /// optional — a bare "4" implies <see cref="DefaultDelayMs"/>.</summary>
     public static List<(InputKey key, int delayMs)> ParseRotation(string text)
     {
         var list = new List<(InputKey, int)>();
@@ -173,7 +178,7 @@ public sealed class GrindRole
             if (line.Length == 0 || line.StartsWith("#")) continue;
             string[] parts = line.Split(',');
             string key = parts[0].Trim();
-            int delay = parts.Length > 1 && int.TryParse(parts[1].Trim(), out int d) ? d : 1000;
+            int delay = parts.Length > 1 && int.TryParse(parts[1].Trim(), out int d) ? d : DefaultDelayMs;
             InputKey ik = InputKey.Parse(key);
             if (ik.IsNone) continue;
             list.Add((ik, delay));
