@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -33,8 +34,27 @@ public sealed class MergePlan
     public double BagY { get; set; }
     public double BagW { get; set; }
     public double BagH { get; set; }
+    /// <summary>Legacy grid, kept only as the fallback for a plan made before the icon scan. The
+    /// UI no longer asks for these: counting slots was a question with no good answer, and the
+    /// answer it produced was clicked whether or not anything was in the square.</summary>
     public int Columns { get; set; } = 5;
     public int Rows { get; set; } = 2;
+
+    /// <summary>The copy's icon, learned from a tight box round one of them — the same 6×6×3
+    /// signature the Quest Runner uses, matched with the same code.</summary>
+    public double[]? IconSig { get; set; }
+    public double IconW { get; set; }
+    public double IconH { get; set; }
+    /// <summary>Pictures of what each pick learned, keyed "place"/"merge"/"bag"/"tier"/"item".</summary>
+    public Dictionary<string, PickShot> Shots { get; set; } = new();
+    /// <summary>The item's name, used to look its real stats up so the forecast can show what the
+    /// projected tier is actually WORTH, not just which number it reaches.</summary>
+    public string ItemName { get; set; } = "";
+
+    [JsonIgnore] public bool HasIcon => IconSig is { Length: 108 };
+    [JsonIgnore] public bool HasIconSize => IconW > 0.002 && IconH > 0.002;
+    /// <summary>True when the sweep can find copies by sight instead of walking a guessed grid.</summary>
+    [JsonIgnore] public bool ScanReady => BagSet && HasIcon && HasIconSize;
 
     /// <summary>The tier counter on the target item's window — the "4/32" line. This is the only
     /// thing that can tell us a merge actually happened.</summary>
@@ -43,9 +63,12 @@ public sealed class MergePlan
     public double TierW { get; set; }
     public double TierH { get; set; }
 
-    [JsonIgnore] public bool BagSet => BagW > 0.01 && BagH > 0.005 && Columns > 0 && Rows > 0;
+    [JsonIgnore] public bool BagSet => BagW > 0.01 && BagH > 0.005;
     [JsonIgnore] public bool TierSet => TierW > 0.005 && TierH > 0.003;
-    [JsonIgnore] public bool Ready => PlaceBox.Set && MergeButton.Set && BagSet;
+    /// <summary>ScanReady, not just BagSet: a plan whose icon never took is a plan that silently
+    /// falls back to a 5×2 grid this version's UI no longer even shows you, clicking ten arbitrary
+    /// points in your bags. Refusing is the honest answer.</summary>
+    [JsonIgnore] public bool Ready => PlaceBox.Set && MergeButton.Set && ScanReady;
 
     public string Missing()
     {
@@ -53,6 +76,8 @@ public sealed class MergePlan
         if (!PlaceBox.Set) gaps.Add("the Place Item box");
         if (!MergeButton.Set) gaps.Add("the Merge Item button");
         if (!BagSet) gaps.Add("the bag area holding the copies");
+        if (!HasIcon) gaps.Add("the copy's icon (drag a tight box round one)");
+        else if (!HasIconSize) gaps.Add("a re-pick of the copy's icon (the old one stored no size)");
         return gaps.Count == 0 ? "" : string.Join(", ", gaps);
     }
 
@@ -83,6 +108,10 @@ public sealed class MergePlan
                 {
                     p.PlaceBox ??= new ScreenPoint();
                     p.MergeButton ??= new ScreenPoint();
+                    p.Shots ??= new Dictionary<string, PickShot>();
+                    p.ItemName ??= "";
+                    if (p.Columns <= 0) p.Columns = 5;
+                    if (p.Rows <= 0) p.Rows = 2;
                     return p;
                 }
             }
@@ -210,6 +239,46 @@ public sealed class MergeRole
         return (r.Left + (int)(nx * w), r.Top + (int)(ny * ht));
     }
 
+    /// <summary>
+    /// Where the next copy actually is, right now. Null when the screen can't be read at all —
+    /// which the caller must NOT confuse with "there are none left", because one is a reason to
+    /// look again and the other is a reason to stop.
+    /// </summary>
+    private QuestFind.IconHit? FindCopy(List<(double X, double Y)>? skip = null)
+    {
+        if (!_plan.ScanReady) return null;
+        using System.Drawing.Bitmap? frame = QuestFind.Capture(_hwnd());
+        if (frame is null) return null;
+        List<QuestFind.IconHit> all = QuestFind.FindAllIcons(frame, _plan.BagX, _plan.BagY, _plan.BagW, _plan.BagH,
+            _plan.IconSig!, _plan.IconW, _plan.IconH, QuestFind.SlidingAcceptDistance);
+        foreach (QuestFind.IconHit h in all)
+        {
+            bool skipped = skip is not null && skip.Any(k =>
+                Math.Abs(k.X - h.X) < _plan.IconW * 0.5 && Math.Abs(k.Y - h.Y) < _plan.IconH * 0.5);
+            if (!skipped) return h;
+        }
+        // Nothing acceptable left. Report the closest thing on screen anyway, so the caller can
+        // tell "nothing here" (a number) from "couldn't look" (a null).
+        return QuestFind.FindIconInRect(frame, _plan.BagX, _plan.BagY, _plan.BagW, _plan.BagH,
+                                        _plan.IconSig!, _plan.IconW, _plan.IconH)
+               ?? new QuestFind.IconHit(0, 0, -1, -1, 999);
+    }
+
+    /// <summary>
+    /// Every copy visible in the bag area — the number the forecast is built on. Static so the
+    /// page can ask it without starting a run: "how far does what I already have get me?" is a
+    /// question you want answered BEFORE three thousand clicks, not after.
+    /// </summary>
+    public static int CountCopies(IntPtr hwnd, MergePlan plan)
+    {
+        if (!plan.ScanReady) return -1;
+        using System.Drawing.Bitmap? frame = QuestFind.Capture(hwnd);
+        if (frame is null) return -1;
+        return QuestFind.FindAllIcons(frame, plan.BagX, plan.BagY, plan.BagW, plan.BagH,
+                                      plan.IconSig!, plan.IconW, plan.IconH,
+                                      QuestFind.SlidingAcceptDistance).Count;
+    }
+
     private bool ClickAt(double nx, double ny, int settleMs, CancellationToken ct = default)
     {
         if (ct.IsCancellationRequested || !_sink.Ready) return false;
@@ -242,7 +311,12 @@ public sealed class MergeRole
             Stats.State = "holding an item — waiting for the game window";
             try { await Task.Delay(400, ct); } catch { return; }
         }
+        // Giving up here used to fall through and click the next bag square with the item still
+        // held, dropping it wherever that landed. The one thing a role must never do is act when it
+        // knows it cannot verify.
         Log?.Invoke("⚠ An item may still be on the cursor — check the bag before starting another sweep.");
+        Finish($"⚠ Stopped after {Stats.Merged} merge(s): couldn't put a held item back. Check your cursor "
+             + "and your bags before running again.");
     }
 
     /// <summary>Read the target item's "n/m" counter. Returns null when it can't be read.</summary>
@@ -250,10 +324,26 @@ public sealed class MergeRole
     {
         if (!_plan.TierSet) return null;
         string text = await ScreenText.ReadRectAsync(_hwnd(), _plan.TierX, _plan.TierY, _plan.TierW, _plan.TierH);
+        return ParseTier(text);
+    }
+
+    /// <summary>
+    /// Turn an OCR'd counter into numbers, with the same character repairs the sweep relies on
+    /// (OCR reads "l"/"I" as ones and "O" as zero often enough to matter at this size). Public and
+    /// static so the forecast can read the counter without starting a run — one parser, so the
+    /// number on the page and the number the sweep trusts can never disagree.
+    /// </summary>
+    public static (int Have, int Need)? ParseTier(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return null;
         Match m = TierRx.Match(text.Replace('l', '1').Replace('I', '1').Replace('O', '0'));
         if (!m.Success) return null;
         if (!int.TryParse(m.Groups[1].Value, out int have) || !int.TryParse(m.Groups[2].Value, out int need)) return null;
         if (need <= 0 || have < 0 || have > need) return null;
+        // The denominator IS the ladder step — 1, 2, 4 … 1024 — so anything else is OCR damage,
+        // not a tier. Accepting "4/1000" once tells the forecast you are already a +10, and inside
+        // a run a flickering denominator reads as "LEVELLED UP" for a merge that never happened.
+        if (need > 1024 || (need & (need - 1)) != 0) return null;
         return (have, need);
     }
 
@@ -307,7 +397,11 @@ public sealed class MergeRole
                 return;
             }
             Stats.Tier = $"{start.Value.Have}/{start.Value.Need}";
-            Log?.Invoke($"Auto Merge: target is at {Stats.Tier}. Walking {_plan.Columns}×{_plan.Rows} slots.");
+            Log?.Invoke(_plan.ScanReady
+                ? $"Auto Merge: target is at {Stats.Tier}. Finding copies by their icon — every slot in the bag "
+                  + "area gets looked at, and only squares that actually hold one get clicked."
+                : $"Auto Merge: target is at {Stats.Tier}. Walking the old {_plan.Columns}×{_plan.Rows} grid — "
+                  + "re-pick the copy's icon to switch to the precise scan.");
 
             // Compared against the PREVIOUS read, never against the opening one. A level-up resets
             // the counter and doubles the denominator (31/32 -> 0/64); baselining on the run's
@@ -319,13 +413,68 @@ public sealed class MergeRole
             int blindMisses = 0;
             bool cancelled = false;
 
-            foreach ((int col, int row, double sx, double sy) in _plan.Slots())
+            // The bag is READ, not walked. A guessed grid clicks every square whether or not it holds
+            // anything — which is how a sweep spends its night dropping the target item into empty
+            // slots. When the copy's icon is known, each pass finds the best-matching square that
+            // is actually there and clicks THAT; when nothing matches any more, the bag is empty of
+            // copies and the run is genuinely done rather than merely finished walking.
+            var grid = _plan.ScanReady ? null : new Queue<(int Col, int Row, double X, double Y)>(_plan.Slots());
+            int passes = 0, blindLooks = 0, deadEnds = 0;
+            // Squares that looked like a copy and did NOT move the counter. Without this the scan
+            // re-finds the same square forever: the item you are merging INTO usually sits in the
+            // same bag and carries the same icon, so once the real copies are gone the target
+            // itself becomes the best match and gets picked up and put back until the guard trips.
+            var tried = new List<(double X, double Y)>();
+            while (true)
             {
                 if (ct.IsCancellationRequested) { cancelled = true; break; }
                 if (!await WaitFocus(ct)) { cancelled = true; break; }
+                if (++passes > 4000) { Log?.Invoke("⚠ stopping: 4000 passes is not a bag, it is a loop."); break; }
+
+                double sx, sy;
+                string where;
+                if (grid is null)
+                {
+                    QuestFind.IconHit? copy = FindCopy(tried);
+                    if (copy is null || copy.Dist > QuestFind.SlidingAcceptDistance)
+                    {
+                        // ONE bad frame is not an empty bag. A tell window, a tooltip or a capture
+                        // that throws all look exactly like "no copies left" — and the old grid walk
+                        // was immune to this, because a bad frame cost it one slot instead of the
+                        // night. So look again before believing it, and if the LOOK is what failed,
+                        // never finish with the word "Done".
+                        blindLooks++;
+                        if (blindLooks < 3)
+                        {
+                            Log?.Invoke($"· nothing matched this look ({blindLooks} of 3) — looking again.");
+                            await Task.Delay(700, ct);
+                            continue;
+                        }
+                        if (copy is null)
+                        {
+                            HumanizedMouse.MoveInstant(home.x, home.y);
+                            Finish($"⚠ Stopped after {Stats.Merged} merge(s): couldn't read the bag area three "
+                                 + "looks running. Is the game on screen and the bag still open?");
+                            return;
+                        }
+                        Log?.Invoke($"No more copies in the bag area — closest match was {copy.Dist:0}, "
+                                  + $"and a real one scores under {QuestFind.SlidingAcceptDistance:0}.");
+                        break;
+                    }
+                    blindLooks = 0;
+                    sx = copy.X; sy = copy.Y;
+                    where = $"copy at {copy.X * 100:0.0}%, {copy.Y * 100:0.0}% (match {copy.Dist:0})";
+                }
+                else
+                {
+                    if (grid.Count == 0) break;
+                    (int c, int r, double gx, double gy) = grid.Dequeue();
+                    sx = gx; sy = gy;
+                    where = $"slot {r + 1},{c + 1}";
+                }
 
                 Stats.Attempts++;
-                Stats.State = $"slot {row + 1},{col + 1}";
+                Stats.State = where;
 
                 if (!ClickAt(sx, sy, 240, ct)) { await Task.Delay(400, ct); continue; }   // pick the copy up
 
@@ -342,7 +491,7 @@ public sealed class MergeRole
                 if (now is null)
                 {
                     blindMisses++;
-                    Log?.Invoke($"slot {row + 1},{col + 1}: couldn't read the tier counter ({blindMisses} of 3).");
+                    Log?.Invoke($"⚠ {where}: couldn't read the tier counter ({blindMisses} of 3).");
                     await ReturnHeldAsync(sx, sy, ct);
                     if (blindMisses >= 3)
                     {
@@ -364,6 +513,7 @@ public sealed class MergeRole
 
                 if (moved)
                 {
+                    deadEnds = 0;
                     Stats.Merged++;
                     Log?.Invoke(levelledUp
                         ? $"✔ merged — LEVELLED UP, now {Stats.Tier}"
@@ -372,18 +522,35 @@ public sealed class MergeRole
                 else
                 {
                     Stats.Skipped++;
-                    // Expected: the grid covers the whole bag and most runs have empty squares in
-                    // it. Put anything held back and move on without ceremony.
+                    // With the grid this was routine — it covers the whole bag, most of which is
+                    // empty. With the icon scan it is NOT routine: something that looked like a
+                    // copy did not merge, so say so rather than sliding past it.
+                    if (grid is null)
+                    {
+                        tried.Add((sx, sy));
+                        deadEnds++;
+                        Log?.Invoke($"⚠ {where} looked like a copy but the tier counter didn't move — "
+                                  + "not trying that square again.");
+                    }
                     await ReturnHeldAsync(sx, sy, ct);
+                    if (grid is null && deadEnds >= 5)
+                    {
+                        HumanizedMouse.MoveInstant(home.x, home.y);
+                        Finish($"⚠ Stopped after {Stats.Merged} merge(s): five squares in a row looked like copies "
+                             + "and merged nothing. Either the icon pick matches something else, or the Place/Merge "
+                             + "picks have moved. Check them before running again.");
+                        return;
+                    }
                 }
 
                 await Task.Delay(260 + _rng.Next(200), ct);
             }
 
             HumanizedMouse.MoveInstant(home.x, home.y);
+            string skipped = Stats.Skipped > 0 ? $", {Stats.Skipped} that didn't move the counter" : "";
             Finish(cancelled
-                ? $"Stopped part-way — {Stats.Merged} merged, {Stats.Skipped} empty slot(s) skipped. Target is at {Stats.Tier}."
-                : $"Done — {Stats.Merged} merged, {Stats.Skipped} empty slot(s) skipped. Target is at {Stats.Tier}.");
+                ? $"Stopped part-way — {Stats.Merged} merged{skipped}. Target is at {Stats.Tier}."
+                : $"Done — {Stats.Merged} merged{skipped}. Target is at {Stats.Tier}.");
         }
         catch (OperationCanceledException)
         {

@@ -2087,7 +2087,7 @@
                                     </StackPanel>
                                 </Grid>
 
-                                <Border Background="#121A28" BorderBrush="#26405A" BorderThickness="1"
+                                <Border x:Name="MrgCard" Background="#121A28" BorderBrush="#26405A" BorderThickness="1"
                                         CornerRadius="10" Padding="12,10" Margin="0,6,0,10">
                                     <StackPanel>
                                         <TextBlock TextWrapping="Wrap" FontSize="11.5" Foreground="#9FB6CC"
@@ -2099,33 +2099,20 @@
                                 <TextBlock Text="SHOW HER THE FOUR SPOTS" FontSize="9.5" FontWeight="Bold" Foreground="#5E7C9A" Margin="0,4,0,6"/>
                                 <StackPanel x:Name="MrgPickHost" Margin="0,0,0,10"/>
 
-                                <TextBlock Text="THE BAG GRID" FontSize="9.5" FontWeight="Bold" Foreground="#5E7C9A" Margin="0,4,0,6"/>
-                                <StackPanel Orientation="Horizontal" Margin="0,0,0,10">
-                                    <TextBlock Text="columns" Foreground="#9FB6CC" FontSize="11" VerticalAlignment="Center" Margin="0,0,6,0"/>
-                                    <TextBox x:Name="MrgCols" Width="52" FontSize="11.5" VerticalAlignment="Center" Margin="0,0,14,0"
-                                             ToolTip="How many slots across the box you dragged."/>
-                                    <TextBlock Text="rows" Foreground="#9FB6CC" FontSize="11" VerticalAlignment="Center" Margin="0,0,6,0"/>
-                                    <TextBox x:Name="MrgRows" Width="52" FontSize="11.5" VerticalAlignment="Center" Margin="0,0,14,0"
-                                             ToolTip="How many slots down the box you dragged."/>
-                                    <Button Content="Save grid" Click="MrgSaveGrid_Click" Padding="12,3" VerticalAlignment="Center" Margin="0,0,10,0"/>
-                                    <TextBlock x:Name="MrgGridText" Text="" Foreground="#5E7C9A" FontSize="10.5" VerticalAlignment="Center"/>
+                                <TextBlock Text="WHAT YOUR BAG IS WORTH" FontSize="9.5" FontWeight="Bold" Foreground="#5E7C9A" Margin="0,4,0,6"/>
+                                <StackPanel Orientation="Horizontal" Margin="0,0,0,6">
+                                    <TextBlock Text="item" Foreground="#9FB6CC" FontSize="11" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                                    <TextBox x:Name="MrgItemName" Width="240" FontSize="11.5" VerticalAlignment="Center" Margin="0,0,8,0"
+                                             ToolTip="The item's name exactly as the game spells it. Used to look its real stats up so the forecast can show what the projected tier is worth."/>
+                                    <Button x:Name="MrgLookupBtn" Content="Look it up" Click="MrgLookup_Click" Padding="10,3" VerticalAlignment="Center" Margin="0,0,10,0"
+                                            ToolTip="Fetch this item's stats from eqlwiki (cached afterwards, so it works offline next time)."/>
+                                    <Button x:Name="MrgScanBtn" Content="⟳  Count what's in the bags" Click="MrgScan_Click" Padding="10,3" VerticalAlignment="Center"
+                                            ToolTip="Look at the bag area right now and count the copies she can see, then work out how far they get you."/>
                                 </StackPanel>
+                                <StackPanel x:Name="MrgForecastHost" Margin="0,0,0,10"/>
 
-                                <TextBlock Text="HOW FAR THIS GETS YOU" FontSize="9.5" FontWeight="Bold" Foreground="#5E7C9A" Margin="0,4,0,6"/>
-                                <Border Background="#121A28" BorderBrush="#26405A" BorderThickness="1"
-                                        CornerRadius="10" Padding="12,10" Margin="0,0,0,10">
-                                    <StackPanel>
-                                        <StackPanel Orientation="Horizontal" Margin="0,0,0,6">
-                                            <TextBlock Text="current +" Foreground="#9FB6CC" FontSize="11" VerticalAlignment="Center" Margin="0,0,6,0"/>
-                                            <TextBox x:Name="MrgPlus" Width="46" FontSize="11.5" VerticalAlignment="Center" Margin="0,0,14,0"
-                                                     TextChanged="MrgMath_Changed" ToolTip="The plus level of the item you're merging into."/>
-                                            <TextBlock Text="target +" Foreground="#9FB6CC" FontSize="11" VerticalAlignment="Center" Margin="0,0,6,0"/>
-                                            <TextBox x:Name="MrgTarget" Width="46" FontSize="11.5" VerticalAlignment="Center" Margin="0,0,14,0"
-                                                     TextChanged="MrgMath_Changed" ToolTip="Where you're heading. The ladder doubles at every step."/>
-                                        </StackPanel>
-                                        <TextBlock x:Name="MrgMathText" Text="" TextWrapping="Wrap" FontSize="11.5" Foreground="#C6D2DE"/>
-                                    </StackPanel>
-                                </Border>
+                                <TextBlock Text="LIVE ACTIVITY" FontSize="9.5" FontWeight="Bold" Foreground="#5E7C9A" Margin="0,4,0,6"/>
+                                <StackPanel x:Name="MrgConsoleHost" Margin="0,0,0,10"/>
 
                                 <TextBlock x:Name="MrgHotkeyText" Text="" FontSize="10.5" Foreground="{StaticResource TextDim}" Margin="1,0,0,0"/>
                             </StackPanel>

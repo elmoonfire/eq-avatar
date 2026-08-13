@@ -136,6 +136,68 @@ public static class QuestFind
     public sealed record IconHit(double X, double Y, int Col, int Row, double Dist);
 
     /// <summary>
+    /// The sliding search, decoupled from any one role's script: a frame, a normalized bag rect,
+    /// a learned signature and the size it was learned at. Auto Merge counts copies with the same
+    /// code the Quest Runner finds them with — two implementations of "is this icon here?" would
+    /// be two chances to disagree about what the user is looking at.
+    /// </summary>
+    public static IconHit? FindIconInRect(Bitmap frame, double bx, double by, double bw, double bh,
+                                          double[] sig, double iw, double ih)
+    {
+        if (sig.Length != SigGrid * SigGrid * 3 || iw <= 0.002 || ih <= 0.002) return null;
+        double stepX = Math.Max(iw / 2, 0.002), stepY = Math.Max(ih / 2, 0.002);
+        IconHit? best = null;
+        int guard = 0;
+        for (double y = by; y + ih <= by + bh + 1e-9; y += stepY)
+            for (double x = bx; x + iw <= bx + bw + 1e-9; x += stepX)
+            {
+                if (++guard > 20000) return best;
+                double[]? probe = SigFromRegion(frame, x, y, iw, ih);
+                if (probe is null) continue;
+                double dist = SigDistance(probe, sig);
+                if (best is null || dist < best.Dist)
+                    best = new IconHit(x + iw / 2, y + ih / 2, -1, -1, dist);
+            }
+        return best;
+    }
+
+    /// <summary>
+    /// EVERY copy in the rect, as non-overlapping hits under the accept threshold — "how many of
+    /// these do I have?" answered by looking rather than by asking the user to count.
+    ///
+    /// Non-overlapping matters: the search steps in half-icon strides, so a single icon is hit
+    /// four times over. Claiming four copies where one sits would turn a forecast into a fiction.
+    /// </summary>
+    public static List<IconHit> FindAllIcons(Bitmap frame, double bx, double by, double bw, double bh,
+                                             double[] sig, double iw, double ih, double accept)
+    {
+        var hits = new List<IconHit>();
+        if (sig.Length != SigGrid * SigGrid * 3 || iw <= 0.002 || ih <= 0.002) return hits;
+        double stepX = Math.Max(iw / 3, 0.002), stepY = Math.Max(ih / 3, 0.002);
+        var raw = new List<IconHit>();
+        int guard = 0;
+        bool bailed = false;
+        for (double y = by; y + ih <= by + bh + 1e-9 && !bailed; y += stepY)
+            for (double x = bx; x + iw <= bx + bw + 1e-9; x += stepX)
+            {
+                // break exits the INNER loop only, which used to leave the outer one grinding on
+                // and return a partial count that the forecast then printed as a fact.
+                if (++guard > 40000) { bailed = true; break; }
+                double[]? probe = SigFromRegion(frame, x, y, iw, ih);
+                if (probe is null) continue;
+                double dist = SigDistance(probe, sig);
+                if (dist <= accept) raw.Add(new IconHit(x + iw / 2, y + ih / 2, -1, -1, dist));
+            }
+        // Best first, then greedily drop anything sitting on top of one already taken.
+        foreach (IconHit h in raw.OrderBy(h => h.Dist))
+        {
+            bool overlaps = hits.Any(k => Math.Abs(k.X - h.X) < iw * 0.7 && Math.Abs(k.Y - h.Y) < ih * 0.7);
+            if (!overlaps) hits.Add(h);
+        }
+        return hits;
+    }
+
+    /// <summary>
     /// Slide a window of the learned icon's OWN size across the bag area in half-icon steps and
     /// return the best-matching position. No columns, no rows, no questions for the user: the
     /// tight box they dragged around one copy already says how big a slot's icon is, and comparing
@@ -147,21 +209,8 @@ public static class QuestFind
         using Bitmap? frame = Capture(hwnd);
         if (frame is null) return null;
 
-        double bw = step.IconW, bh = step.IconH;
-        double stepX = Math.Max(bw / 2, 0.002), stepY = Math.Max(bh / 2, 0.002);
-        IconHit? best = null;
-        int guard = 0;
-        for (double y = script.BagY; y + bh <= script.BagY + script.BagH + 1e-9; y += stepY)
-            for (double x = script.BagX; x + bw <= script.BagX + script.BagW + 1e-9; x += stepX)
-            {
-                if (++guard > 20000) return best;              // a absurd bag/box ratio must not hang the gesture
-                double[]? sig = SigFromRegion(frame, x, y, bw, bh);
-                if (sig is null) continue;
-                double dist = SigDistance(sig, step.IconSig);
-                if (best is null || dist < best.Dist)
-                    best = new IconHit(x + bw / 2, y + bh / 2, -1, -1, dist);
-            }
-        return best;
+        return FindIconInRect(frame, script.BagX, script.BagY, script.BagW, script.BagH,
+                              step.IconSig, step.IconW, step.IconH);
     }
 
     /// <summary>
