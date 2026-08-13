@@ -61,7 +61,7 @@ public partial class MainWindow : Window
     private static readonly string[] Panels =
     {
         "PanelHome", "PanelLog", "PanelInput", "PanelMaps", "PanelData", "PanelSessions", "PanelCombat", "PanelGrind", "PanelFollower",
-        "PanelLogin", "PanelMouse", "PanelSequencer", "PanelKeymaps", "PanelProfile", "PanelLicensing", "PanelSettings"
+        "PanelLogin", "PanelMouse", "PanelSequencer", "PanelKeymaps", "PanelQuesting", "PanelProfile", "PanelLicensing", "PanelSettings"
     };
     private static readonly string[] EqClasses =
     {
@@ -188,6 +188,7 @@ public partial class MainWindow : Window
         if (name == "PanelGrind") { InitArtUi(); AutoTargetEq(); }
         if (name == "PanelSequencer") InitSequencerUi();
         if (name == "PanelKeymaps") InitKeymapsUi();
+        if (name == "PanelQuesting") InitQuestingUi();
         if (name == "PanelProfile") UpdateProfilePanel();
         if (name == "PanelData") EnsureDataLoaded();
         if (name == "PanelSessions") RefreshSessions();
@@ -722,7 +723,7 @@ public partial class MainWindow : Window
 
     private void StartGrind_Click(object sender, RoutedEventArgs e)
     {
-        if (_grind is { Running: true } || _hunt is { Running: true })
+        if (_grind is { Running: true } || _hunt is { Running: true } || _questRun is { Running: true })
         { ShowToast("Already running — Stop (F12) first"); return; }
         if (_grindTarget == IntPtr.Zero) AutoTargetEq();     // the game may have launched after this page opened
         if (_grindTarget == IntPtr.Zero)
@@ -1361,6 +1362,7 @@ public partial class MainWindow : Window
     {
         _grind?.Stop();
         _hunt?.Stop();
+        _questRun?.Stop();          // F12 reaches every role that can send input, not just the grind ones
         _grindTimer.Stop();
         UpdateGrindStats();
     }
@@ -2000,6 +2002,7 @@ public partial class MainWindow : Window
         _remote?.Stop();
         _grind?.Stop();
         _hunt?.Stop();
+        _questRun?.Stop();
         _follower?.Stop();
         EndRoleSession();                 // persist a session cut short by closing the app
         _login?.Stop();

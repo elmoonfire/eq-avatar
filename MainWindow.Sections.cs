@@ -145,7 +145,7 @@ public partial class MainWindow
         {
             ("Command", "", "PanelHome",
              "Everything that makes the character move on its own.",
-             new[] { NavHome, NavGrind, NavFollower, NavSequencer, NavMouse }),
+             new[] { NavHome, NavGrind, NavFollower, NavSequencer, NavQuesting, NavMouse }),
 
             ("Insight", "", "PanelSecInsight",
              "What actually happened — parsed out of the game's own log and your recorded runs.",

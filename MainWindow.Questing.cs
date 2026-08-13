@@ -1,0 +1,686 @@
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Threading.Tasks;
+using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Input;
+using System.Windows.Media;
+using EQAvatar.Spike.Data;
+using EQAvatar.Spike.Input;
+using EQAvatar.Spike.Ocr;
+using EQAvatar.Spike.Roles;
+using EQAvatar.Spike.Ui;
+
+namespace EQAvatar.Spike;
+
+/// <summary>
+/// The Questing page (partial class): every quest on the EQL wiki as a filterable table, and —
+/// for the ones that end in handing an item to an NPC — a per-quest automation you build once
+/// and she repeats.
+///
+/// The catalog itself is <see cref="QuestCatalog"/>: built on the hub from the wiki's own API,
+/// downloaded as one file and cached. That is what lets the START ZONE and END ZONE filters be
+/// dropdowns of real zone names rather than another box to type a guess into.
+///
+/// The rows are drawn by hand rather than bound to a ListView for the same reason the Key
+/// Mappings rows are: the column titles are pictures, the cells are pills and badges, and a row
+/// expands in place into a full walkthrough card. With 880-odd quests the drawn set is capped
+/// (see <see cref="RowCap"/>) and the count line always says when rows were left off — a silent
+/// truncation would read as "that's all there is".
+/// </summary>
+public partial class MainWindow
+{
+    private const int RowCap = 200;
+
+    private bool _qstInit;
+    private bool _qstFilling;                       // suppress filter events while dropdowns populate
+    private bool _qstBusy;
+    private string? _qstOpen;                       // the quest whose detail card is expanded
+    private QuestRole? _questRun;
+
+    private static readonly (string Label, int Lo, int Hi)[] LevelBands =
+    {
+        ("any level", 0, 999), ("1 – 9", 1, 9), ("10 – 19", 10, 19), ("20 – 29", 20, 29),
+        ("30 – 39", 30, 39), ("40 – 49", 40, 49), ("50 – 59", 50, 59), ("60+", 60, 999),
+    };
+
+    private void InitQuestingUi()
+    {
+        if (!_qstInit)
+        {
+            _qstInit = true;
+            ArtCache.Bind(ArtQuestingBanner, "ui-questing-banner.jpg");
+            ArtCache.Bind(ArtQColQuest, "ui-q-col-quest.jpg");
+            ArtCache.Bind(ArtQColZone, "ui-q-col-zone.jpg");
+            ArtCache.Bind(ArtQColStartNpc, "ui-q-col-startnpc.jpg");
+            ArtCache.Bind(ArtQColEndNpc, "ui-q-col-endnpc.jpg");
+            ArtCache.Bind(ArtQColLevel, "ui-q-col-level.jpg");
+            ArtCache.Bind(ArtQColReward, "ui-q-col-reward.jpg");
+            ArtCache.Bind(ArtQColAuto, "ui-q-col-auto.jpg");
+
+            _qstFilling = true;
+            QstFilterLevel.Items.Clear();
+            foreach ((string label, _, _) in LevelBands) QstFilterLevel.Items.Add(label);
+            QstFilterLevel.SelectedIndex = 0;
+            _qstFilling = false;
+
+            _ = LoadQuestsAsync(force: false);
+            return;
+        }
+        RenderQuests();
+    }
+
+    private async Task LoadQuestsAsync(bool force)
+    {
+        if (_qstBusy) return;
+        _qstBusy = true;
+        QstRefreshBtn.IsEnabled = false;
+        QstStatus.Text = QuestCatalog.Loaded ? "checking the hub for a newer catalog…" : "loading the quest catalog…";
+        try
+        {
+            (bool ok, string status) = await QuestCatalog.EnsureAsync(force);
+            QstStatus.Text = status;
+            QstStatus.Foreground = ok ? Hex("#7CE38B") : Hex("#FFCB6B");
+            FillZoneDropdowns();
+            RenderQuests();
+            Diag.BotLog.Log("quests", $"catalog: {status}");
+        }
+        catch (Exception ex)
+        {
+            // Reached from an async void handler otherwise, which lands in the app's fatal-error
+            // box. A catalog this page can't draw is a bad page, not a dead app.
+            QstStatus.Text = "Couldn't show the catalog: " + ex.Message;
+            QstStatus.Foreground = Hex("#FFCB6B");
+            Diag.BotLog.Log("quests", "render error: " + ex);
+        }
+        finally
+        {
+            _qstBusy = false;
+            QstRefreshBtn.IsEnabled = true;
+        }
+    }
+
+    /// <summary>The zone dropdowns list the zones actually present in the catalog, so a filter can
+    /// never select a zone with nothing behind it.</summary>
+    private void FillZoneDropdowns()
+    {
+        _qstFilling = true;
+        try
+        {
+            foreach (ComboBox box in new[] { QstFilterStartZone, QstFilterEndZone })
+            {
+                object? was = box.SelectedItem;
+                box.Items.Clear();
+                box.Items.Add(box == QstFilterEndZone ? "any end zone" : "any zone");
+                foreach (string z in QuestCatalog.Zones) box.Items.Add(z);
+                box.SelectedItem = was is string s && box.Items.Contains(s) ? was : box.Items[0];
+            }
+        }
+        finally { _qstFilling = false; }
+    }
+
+    // ---------------------------------------------------------------- filtering
+
+    private static bool QstCell(string cell, string filter) => CellMatches(cell ?? "", filter ?? "");
+
+    private static string PickedZone(ComboBox box) =>
+        box.SelectedIndex <= 0 ? "" : box.SelectedItem as string ?? "";
+
+    private IEnumerable<QuestInfo> FilteredQuests()
+    {
+        string fn = QstFilterName?.Text ?? "", fsn = QstFilterStartNpc?.Text ?? "";
+        string fen = QstFilterEndNpc?.Text ?? "", fr = QstFilterReward?.Text ?? "";
+        string sz = QstFilterStartZone is null ? "" : PickedZone(QstFilterStartZone);
+        string ez = QstFilterEndZone is null ? "" : PickedZone(QstFilterEndZone);
+        int band = Math.Clamp(QstFilterLevel?.SelectedIndex ?? 0, 0, LevelBands.Length - 1);
+        (_, int lo, int hi) = LevelBands[band];
+        bool autoOnly = QstAutoOnly?.IsChecked == true;
+
+        return QuestCatalog.Quests
+            .Where(q => QstCell(q.Name, fn))
+            .Where(q => sz.Length == 0 || string.Equals(q.StartZone, sz, StringComparison.OrdinalIgnoreCase))
+            .Where(q => QstCell(q.StartNpc, fsn))
+            .Where(q => QstCell(q.EndNpc, fen))
+            .Where(q => ez.Length == 0 || string.Equals(q.EndZone, ez, StringComparison.OrdinalIgnoreCase))
+            .Where(q => band == 0 || (q.LevelMin >= lo && q.LevelMin <= hi))
+            .Where(q => QstCell(q.RewardText == "—" ? "" : q.RewardText, fr))
+            .Where(q => !autoOnly || q.Automatable);
+    }
+
+    private bool QstFiltering() =>
+        (QstFilterName?.Text ?? "").Trim().Length > 0
+        || (QstFilterStartNpc?.Text ?? "").Trim().Length > 0
+        || (QstFilterEndNpc?.Text ?? "").Trim().Length > 0
+        || (QstFilterReward?.Text ?? "").Trim().Length > 0
+        || (QstFilterStartZone?.SelectedIndex ?? 0) > 0
+        || (QstFilterEndZone?.SelectedIndex ?? 0) > 0
+        || (QstFilterLevel?.SelectedIndex ?? 0) > 0
+        || QstAutoOnly?.IsChecked == true;
+
+    private void QstFilter_Changed(object sender, TextChangedEventArgs e)
+    {
+        if (QstListHost is null || _qstFilling) return;      // fires during InitializeComponent otherwise
+        RenderQuests();
+    }
+
+    private void QstFilterSel_Changed(object sender, SelectionChangedEventArgs e)
+    {
+        if (QstListHost is null || _qstFilling) return;
+        RenderQuests();
+    }
+
+    private void QstFilter_Click(object sender, RoutedEventArgs e)
+    {
+        if (QstListHost is null) return;
+        RenderQuests();
+    }
+
+    private void QstClear_Click(object sender, RoutedEventArgs e)
+    {
+        _qstFilling = true;
+        QstFilterName.Text = QstFilterStartNpc.Text = QstFilterEndNpc.Text = QstFilterReward.Text = "";
+        if (QstFilterStartZone.Items.Count > 0) QstFilterStartZone.SelectedIndex = 0;
+        if (QstFilterEndZone.Items.Count > 0) QstFilterEndZone.SelectedIndex = 0;
+        QstFilterLevel.SelectedIndex = 0;
+        QstAutoOnly.IsChecked = false;
+        _qstFilling = false;
+        RenderQuests();
+    }
+
+    private async void QstRefresh_Click(object sender, RoutedEventArgs e) => await LoadQuestsAsync(force: true);
+
+    // ---------------------------------------------------------------- rendering
+
+    private void RenderQuests()
+    {
+        if (QstListHost is null) return;
+
+        if (QuestCatalog.Generated is { } built)
+        {
+            QstStampBorder.Background = Hex("#10281A");
+            QstStampBorder.BorderBrush = Hex("#2E7D4F");
+            QstStampText.Foreground = Hex("#9FE0B8");
+            DateTime local = built.ToLocalTime();
+            QstStampText.Text = "built " + (local.Date == DateTime.Today ? $"today {local:HH:mm}" : local.ToString("MMM d, HH:mm"));
+        }
+        else
+        {
+            QstStampBorder.Background = Hex("#2A2410");
+            QstStampBorder.BorderBrush = Hex("#7A6320");
+            QstStampText.Foreground = Hex("#FFE1A6");
+            QstStampText.Text = "not loaded yet";
+        }
+
+        QstListHost.Children.Clear();
+        List<QuestInfo> shown = FilteredQuests().ToList();
+        int total = QuestCatalog.Quests.Count;
+        int automatable = QuestCatalog.Quests.Count(q => q.Automatable);
+        int scripted = QuestScriptStore.Current.Count;
+        bool capped = shown.Count > RowCap;
+
+        QstCountText.Text = total == 0
+            ? "no catalog loaded"
+            : $"{total} quests from {QuestCatalog.Source}"
+              + (QstFiltering() ? $" · {shown.Count} shown" : "")
+              + (capped ? $" · only the first {RowCap} are drawn — narrow a filter to reach the rest" : "")
+              + $" · {automatable} have an automatable hand-in"
+              + (scripted > 0 ? $" · {scripted} built" : "");
+
+        if (shown.Count == 0)
+        {
+            QstListHost.Children.Add(new TextBlock
+            {
+                Text = total == 0
+                    ? "No quest catalog yet. Press ⟳ Refresh from hub — it's one download, then it's cached and works offline."
+                    : "nothing matches these filters",
+                Foreground = Hex("#7E93A8"),
+                FontSize = 12,
+                TextWrapping = TextWrapping.Wrap,
+                Margin = new Thickness(4, 8, 4, 8),
+            });
+            return;
+        }
+
+        foreach (QuestInfo q in shown.Take(RowCap))
+        {
+            QstListHost.Children.Add(MakeQuestRow(q));
+            if (_qstOpen is not null && QuestCatalog.Norm(_qstOpen) == QuestCatalog.Norm(q.Name))
+                QstListHost.Children.Add(MakeQuestDetail(q));
+        }
+    }
+
+    private static Grid QuestGrid()
+    {
+        var grid = new Grid();
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1.5, GridUnitType.Star) });
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(150) });
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(140) });
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(150) });
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(94) });
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(76) });
+        return grid;
+    }
+
+    private FrameworkElement MakeQuestRow(QuestInfo q)
+    {
+        bool open = _qstOpen is not null && QuestCatalog.Norm(_qstOpen) == QuestCatalog.Norm(q.Name);
+        bool built = QuestScriptStore.Current.Find(q.Name) is not null;
+
+        Grid grid = QuestGrid();
+        grid.Margin = new Thickness(6, 0, 6, 0);
+
+        TextBlock Cell(string text, string colour, int col, double size = 12, string? tip = null) => new()
+        {
+            Text = text.Length == 0 ? "—" : text,
+            Foreground = text.Length == 0 ? Hex("#3C4C60") : Hex(colour),
+            FontSize = size,
+            VerticalAlignment = VerticalAlignment.Center,
+            TextTrimming = TextTrimming.CharacterEllipsis,
+            Margin = new Thickness(0, 0, 8, 0),
+            ToolTip = tip,
+        };
+
+        var name = Cell(q.Name, "#DDE7F0", 0, 12.5, q.Url);
+        name.FontWeight = open ? FontWeights.Bold : FontWeights.Normal;
+        Grid.SetColumn(name, 0); grid.Children.Add(name);
+
+        var sz = Cell(q.StartZone, "#9FE0FF", 1, 11.5); Grid.SetColumn(sz, 1); grid.Children.Add(sz);
+        var sn = Cell(q.StartNpc, "#C792EA", 2, 11.5); Grid.SetColumn(sn, 2); grid.Children.Add(sn);
+
+        var endCell = new StackPanel { VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 8, 0) };
+        endCell.Children.Add(Cell(q.EndNpc, "#FFCB6B", 3, 11.5));
+        if (!string.Equals(q.EndZone, q.StartZone, StringComparison.OrdinalIgnoreCase) && q.EndZone.Length > 0)
+            endCell.Children.Add(new TextBlock { Text = q.EndZone, Foreground = Hex("#7E93A8"), FontSize = 10 });
+        Grid.SetColumn(endCell, 3); grid.Children.Add(endCell);
+
+        var lvl = Cell(q.LevelText, "#7CE38B", 4, 11.5);
+        lvl.HorizontalAlignment = HorizontalAlignment.Center;
+        Grid.SetColumn(lvl, 4); grid.Children.Add(lvl);
+
+        var rew = Cell(q.RewardText == "—" ? "" : q.RewardText, "#FFB3D9", 5, 11.5, q.RewardText);
+        Grid.SetColumn(rew, 5); grid.Children.Add(rew);
+
+        FrameworkElement badge = q.Automatable
+            ? new Border
+            {
+                CornerRadius = new CornerRadius(999),
+                Background = built ? Hex("#12301F") : Hex("#2A1C10"),
+                BorderBrush = built ? Hex("#2E7D4F") : Hex("#7A4E20"),
+                BorderThickness = new Thickness(1),
+                Padding = new Thickness(8, 1, 8, 2),
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center,
+                Child = new TextBlock
+                {
+                    Text = built ? "built" : "can",
+                    Foreground = built ? Hex("#9FE0B8") : Hex("#FFC08A"),
+                    FontSize = 10.5,
+                },
+                ToolTip = built
+                    ? "An automation for this hand-in already exists — open the row to run it."
+                    : "This quest ends in a hand-in she can repeat. Open the row to build it.",
+            }
+            : new TextBlock
+            {
+                Text = "—",
+                Foreground = Hex("#3C4C60"),
+                FontSize = 11,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center,
+                ToolTip = "The wiki doesn't record a hand-in for this quest, so there's no fixed gesture to repeat.",
+            };
+        Grid.SetColumn(badge, 6); grid.Children.Add(badge);
+
+        var row = new Border
+        {
+            CornerRadius = new CornerRadius(7),
+            Padding = new Thickness(0, 6, 0, 6),
+            Margin = new Thickness(0, 0, 0, 3),
+            Background = open ? Hex("#14212F") : Brushes.Transparent,
+            BorderBrush = open ? Hex("#2A4A57") : Brushes.Transparent,
+            BorderThickness = new Thickness(1),
+            Cursor = Cursors.Hand,
+            Child = grid,
+            ToolTip = "Click for the walkthrough details" + (q.Automatable ? " and the hand-in automation." : "."),
+        };
+        row.MouseLeftButtonUp += (_, _) =>
+        {
+            _qstOpen = open ? null : q.Name;
+            RenderQuests();
+        };
+        return row;
+    }
+
+    // ---------------------------------------------------------------- the detail / automation card
+
+    private FrameworkElement MakeQuestDetail(QuestInfo q)
+    {
+        var stack = new StackPanel();
+
+        void Line(string label, string value, string colour = "#C6D2DE")
+        {
+            if (value.Trim().Length == 0) return;
+            var g = new Grid { Margin = new Thickness(0, 0, 0, 3) };
+            g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(112) });
+            g.ColumnDefinitions.Add(new ColumnDefinition());
+            var l = new TextBlock { Text = label, Foreground = Hex("#5E7C9A"), FontSize = 10.5, FontWeight = FontWeights.Bold };
+            var v = new TextBlock { Text = value, Foreground = Hex(colour), FontSize = 11.5, TextWrapping = TextWrapping.Wrap };
+            Grid.SetColumn(l, 0); Grid.SetColumn(v, 1);
+            g.Children.Add(l); g.Children.Add(v);
+            stack.Children.Add(g);
+        }
+
+        Line("STARTS", $"{q.StartNpc} in {q.StartZone}", "#9FE0FF");
+        Line("ENDS", $"{q.EndNpc} in {q.EndZone}", "#FFCB6B");
+        Line("LEVEL", q.LevelText, "#7CE38B");
+        Line("CLASSES", q.ClassText);
+        Line("HAND IN", q.TurnIns.Count == 0 ? "" : string.Join(", ", q.TurnIns.Select(t => $"{t.Qty}× {t.Item} → {t.Npc}")), "#FFC08A");
+        Line("REWARD", q.RewardText == "—" ? "" : q.RewardText, "#FFB3D9");
+        Line("EXPERIENCE", q.ExpText);
+        Line("FACTION", string.Join(", ", q.Factions.Select(f => $"{f.Faction} {(f.Delta > 0 ? "+" : "")}{f.Delta}")));
+        Line("ALSO SEE", string.Join(", ", q.RelatedNpcs));
+        Line("LOCATIONS", string.Join("   ·   ", q.Locs.Select(l => $"{l.Who}: {l.LocText}")), "#9FE0FF");
+        Line("ERA", q.Era);
+
+        var links = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 8, 0, 0) };
+        var wiki = new Button { Content = "Open the wiki page ↗", Padding = new Thickness(12, 4, 12, 4), Margin = new Thickness(0, 0, 8, 0) };
+        wiki.ToolTip = q.Url;
+        wiki.Click += (_, _) =>
+        {
+            try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(q.Url) { UseShellExecute = true }); }
+            catch (Exception ex) { QstStatus.Text = "Couldn't open the browser: " + ex.Message; }
+        };
+        links.Children.Add(wiki);
+        stack.Children.Add(links);
+
+        if (q.Automatable) stack.Children.Add(MakeAutomationCard(q));
+
+        return new Border
+        {
+            CornerRadius = new CornerRadius(10),
+            Background = Hex("#0E1622"),
+            BorderBrush = Hex("#26405A"),
+            BorderThickness = new Thickness(1),
+            Padding = new Thickness(14, 12, 14, 12),
+            Margin = new Thickness(6, 0, 6, 10),
+            Child = stack,
+        };
+    }
+
+    /// <summary>
+    /// The build-and-run card. Three picks, a couple of switches, and a start button.
+    ///
+    /// The picks exist because there is nothing to discover: the game has no addon API, the log
+    /// says nothing about inventory or about what is drawn on screen, and an inventory slot's
+    /// picture changes the moment the item leaves it — so a template match of the slot would work
+    /// once and fail forever after. A position doesn't change, so a position is what gets stored,
+    /// normalized to the game window so it survives the window moving.
+    /// </summary>
+    private FrameworkElement MakeAutomationCard(QuestInfo q)
+    {
+        // Look it up; only BUILD one in memory. Nothing is stored until the user changes something
+        // — expanding a row to read it must not leave an empty automation behind, or the AUTO
+        // column ends up claiming a dozen quests are "built" when none of them are.
+        QuestScript script = QuestScriptStore.Current.Find(q.Name) ?? QuestScript.FromQuest(q);
+        void Persist() => QuestScriptStore.Current.Adopt(script);
+        var stack = new StackPanel();
+
+        stack.Children.Add(new TextBlock
+        {
+            Text = "REPEAT THIS HAND-IN",
+            FontSize = 9.5, FontWeight = FontWeights.Bold,
+            Foreground = Hex("#5E7C9A"),
+            Margin = new Thickness(0, 14, 0, 6),
+        });
+        stack.Children.Add(new TextBlock
+        {
+            TextWrapping = TextWrapping.Wrap, FontSize = 11.5, Foreground = Hex("#9FB6CC"),
+            Margin = new Thickness(0, 0, 0, 8),
+            Text = $"She targets {script.Npc}, hails, gives {script.Item}, and does it again — checking the game's own log "
+                 + "after every hand-in and stopping when two in a row go unanswered (which is what running out of the item looks like). "
+                 + "Stand in front of the NPC with the items in your bags, show her the three spots below once, then press Run.",
+        });
+
+        // ---- the three picks ----
+        var picks = new StackPanel { Margin = new Thickness(0, 0, 0, 8) };
+
+        FrameworkElement Pick(string title, string hint, Func<ScreenPoint> get, string tip)
+        {
+            var g = new Grid { Margin = new Thickness(0, 0, 0, 4) };
+            g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(150) });
+            g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(96) });
+            g.ColumnDefinitions.Add(new ColumnDefinition());
+
+            var label = new TextBlock
+            {
+                Text = title, FontSize = 11.5, Foreground = Hex("#C6D2DE"),
+                VerticalAlignment = VerticalAlignment.Center, ToolTip = tip,
+            };
+            ScreenPoint pt = get();
+            var state = new TextBlock
+            {
+                Text = pt.Set ? "picked" : "not picked",
+                FontSize = 10.5,
+                Foreground = pt.Set ? Hex("#9FE0B8") : Hex("#FFC08A"),
+                VerticalAlignment = VerticalAlignment.Center,
+            };
+            var btn = new Button { Content = "◎  pick", Padding = new Thickness(10, 3, 10, 3), HorizontalAlignment = HorizontalAlignment.Left, ToolTip = tip };
+            btn.Click += (_, _) => { if (PickQuestPoint(get(), title, hint)) Persist(); RenderQuests(); };
+
+            Grid.SetColumn(label, 0); Grid.SetColumn(state, 1); Grid.SetColumn(btn, 2);
+            g.Children.Add(label); g.Children.Add(state); g.Children.Add(btn);
+            return g;
+        }
+
+        picks.Children.Add(Pick("① the item in your bag", $"Click ON the {script.Item} where it sits in your inventory, then press Enter.",
+            () => script.Layout.ItemSlot, "The inventory slot she picks the item up from. Keep that slot for this item."));
+        picks.Children.Add(Pick("② the NPC", $"Click ON {script.Npc}'s body in the game world, then press Enter.",
+            () => script.Layout.Npc, "Where she drops the held item to open the give window. Stand in the same spot each run."));
+        picks.Children.Add(Pick("③ the GIVE button", "Open a give window with the NPC, then click ON its GIVE button and press Enter.",
+            () => script.Layout.GiveButton, "The button that completes the hand-in."));
+        picks.Children.Add(Pick("④ confirm (optional)", "If a confirmation appears after GIVE, click ON its button. Otherwise skip this.",
+            () => script.Layout.Confirm, "Only needed if the server puts a second dialog up."));
+        stack.Children.Add(picks);
+
+        // ---- the switches ----
+        var opts = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 0, 0, 8) };
+        var hail = new CheckBox
+        {
+            Content = "hail first", IsChecked = script.HailFirst, Foreground = Hex("#9FB6CC"), FontSize = 11,
+            Margin = new Thickness(0, 0, 14, 0), VerticalAlignment = VerticalAlignment.Center,
+            ToolTip = "Say 'Hail, <NPC>' before each hand-in. Some quest NPCs won't take an item until hailed.",
+        };
+        hail.Click += (_, _) => { script.HailFirst = hail.IsChecked == true; Persist(); };
+
+        var targ = new CheckBox
+        {
+            Content = "/target by name", IsChecked = script.TargetByName, Foreground = Hex("#9FB6CC"), FontSize = 11,
+            Margin = new Thickness(0, 0, 14, 0), VerticalAlignment = VerticalAlignment.Center,
+            ToolTip = "Type /target <NPC> before hailing rather than trusting whatever is currently selected.",
+        };
+        targ.Click += (_, _) => { script.TargetByName = targ.IsChecked == true; Persist(); };
+
+        opts.Children.Add(hail);
+        opts.Children.Add(targ);
+        opts.Children.Add(new TextBlock { Text = "repeat", Foreground = Hex("#9FB6CC"), FontSize = 11, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 6, 0) });
+        var repeat = new TextBox
+        {
+            Text = script.Repeat.ToString(), Width = 56, FontSize = 11.5, VerticalAlignment = VerticalAlignment.Center,
+            ToolTip = "How many hand-ins to do. 0 = keep going until the item runs out.",
+        };
+        repeat.LostFocus += (_, _) =>
+        {
+            script.Repeat = int.TryParse(repeat.Text.Trim(), out int r) ? Math.Clamp(r, 0, 999) : 0;
+            repeat.Text = script.Repeat.ToString();
+            Persist();
+        };
+        opts.Children.Add(repeat);
+        opts.Children.Add(new TextBlock
+        {
+            Text = "0 = until it runs out", Foreground = Hex("#5E7C9A"), FontSize = 10,
+            VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(8, 0, 0, 0),
+        });
+        stack.Children.Add(opts);
+
+        // ---- run / stop ----
+        bool running = _questRun is { Running: true };
+        var bar = new StackPanel { Orientation = Orientation.Horizontal };
+        var run = new Button
+        {
+            Content = running ? "■  Stop" : "▶  Run the hand-in",
+            Padding = new Thickness(14, 5, 14, 5),
+            FontWeight = FontWeights.SemiBold,
+            Margin = new Thickness(0, 0, 10, 0),
+            ToolTip = running
+                ? "Stop the run. F12 and tabbing away from the game also stop it."
+                : "Start repeating this hand-in. The game must be the focused window; tab away and she pauses.",
+        };
+        run.Click += (_, _) => { if (_questRun is { Running: true }) _questRun.Stop(); else { Persist(); StartQuestRun(script); } };
+        bar.Children.Add(run);
+
+        var stats = new TextBlock
+        {
+            Foreground = Hex("#9FE0B8"), FontSize = 11, VerticalAlignment = VerticalAlignment.Center,
+            Text = running
+                ? $"{_questRun!.Stats.State} · {_questRun.Stats.Completed} confirmed"
+                : script.LifetimeCompleted > 0 ? $"{script.LifetimeCompleted} confirmed all time" : "",
+        };
+        bar.Children.Add(stats);
+        stack.Children.Add(bar);
+
+        return new Border
+        {
+            CornerRadius = new CornerRadius(10),
+            Background = Hex("#121A28"),
+            BorderBrush = Hex("#2A4A57"),
+            BorderThickness = new Thickness(1),
+            Padding = new Thickness(12, 4, 12, 12),
+            Margin = new Thickness(0, 10, 0, 0),
+            Child = stack,
+        };
+    }
+
+    // ---------------------------------------------------------------- picking + running
+
+    /// <summary>Show the shared region picker over a live frame of the game and store the CENTRE
+    /// of whatever box was dragged, normalized to the window.</summary>
+    private bool PickQuestPoint(ScreenPoint point, string what, string hint)
+    {
+        if (_grindTarget == IntPtr.Zero) AutoTargetEq();
+        // Disposed here, not by the picker: CaptureFrame allocates a full-window 32bpp bitmap
+        // (~15 MB at 1440p) and the picker only reads its size. Four picks a quest adds up fast.
+        using System.Drawing.Bitmap? frame = VitalsSvc.CaptureFrame();
+        if (frame is null)
+        {
+            QstStatus.Text = "No game window to capture — launch EQL and keep it on screen, then try again.";
+            QstStatus.Foreground = Hex("#FFCB6B");
+            return false;
+        }
+        var dlg = new CompassPickWindow(frame, "Pick " + what, hint + "  (drag a small box — she clicks its centre)")
+        { Owner = this };
+        if (dlg.ShowDialog() != true) return false;
+
+        point.X = dlg.NX + dlg.NW / 2;
+        point.Y = dlg.NY + dlg.NH / 2;
+        QstStatus.Text = $"Saved {what} at {point.X * 100:0.#}% across, {point.Y * 100:0.#}% down the game window.";
+        QstStatus.Foreground = Hex("#7CE38B");
+        return true;
+    }
+
+    private void StartQuestRun(QuestScript script)
+    {
+        if (_questRun is { Running: true }) { ShowToast("Already running — Stop first"); return; }
+        if (_grind is { Running: true } || _hunt is { Running: true })
+        { ShowToast("Grind is running — stop it first"); return; }
+
+        if (_grindTarget == IntPtr.Zero) AutoTargetEq();
+        if (_grindTarget == IntPtr.Zero)
+        {
+            QstStatus.Text = "EverQuest window not found — launch the game, then try again.";
+            QstStatus.Foreground = Hex("#FFCB6B");
+            return;
+        }
+        if (!script.Layout.Ready)
+        {
+            QstStatus.Text = "Still need a pick for: " + script.Layout.Missing() + ".";
+            QstStatus.Foreground = Hex("#FFCB6B");
+            return;
+        }
+
+        _currentLog ??= EQAvatar.Spike.Log.EqLogWatcher.FindNewestLog(LogFolderBox.Text.Trim());
+        var sink = new ForegroundSendInputSink(() => _grindTarget);
+        _questRun = new QuestRole(script, sink, _settings, () => _grindTarget, _currentLog);
+        _questRun.Log += m => Dispatcher.Invoke(() =>
+        {
+            QstStatus.Text = m;
+            QstStatus.Foreground = m.StartsWith("✖") ? Hex("#FFCB6B") : Hex("#7CE38B");
+            GrindLogLine("[quest] " + m);
+        });
+        _questRun.Stopped += () => Dispatcher.Invoke(RenderQuests);
+        _questRun.Start();
+        RenderQuests();
+    }
+
+    // ---------------------------------------------------------------- the ⓘ guide
+
+    private void QstInfo_Click(object sender, RoutedEventArgs e)
+    {
+        var text = new TextBlock
+        {
+            TextWrapping = TextWrapping.Wrap,
+            Foreground = Hex("#C6D2DE"),
+            FontSize = 12.5,
+            LineHeight = 19,
+            Margin = new Thickness(18),
+            Text = QuestingInfoText,
+        };
+        var win = new Window
+        {
+            Title = "How Questing works",
+            Owner = this,
+            Width = 660, Height = 560,
+            WindowStartupLocation = WindowStartupLocation.CenterOwner,
+            Background = Hex("#0B0F18"),
+            Content = new ScrollViewer { Content = text, VerticalScrollBarVisibility = ScrollBarVisibility.Auto },
+        };
+        win.ShowDialog();
+    }
+
+    private const string QuestingInfoText =
+        "WHERE THE DATA COMES FROM\n" +
+        "Every row is a page on eqlwiki.com. The wiki is a MediaWiki, so its pages are read through its own API and " +
+        "parsed into rows on the hub — once, for everyone — and this app downloads the result as a single file and " +
+        "caches it. That means the page works offline, filtering is instant, and the START ZONE and END ZONE dropdowns " +
+        "list the zones that are really in the data rather than a hand-typed list that drifts out of step with it.\n\n" +
+        "The stamp beside the title is when that catalog was BUILT from the wiki, not when you last opened this page. " +
+        "⟳ Refresh asks the hub whether there is a newer build and only downloads when there is.\n\n" +
+        "THE COLUMNS\n" +
+        "QUEST is the wiki's own page title. START ZONE / START NPC are who hands it out and where. END NPC is who you " +
+        "finish with — usually the same person, and when the zone differs it's printed underneath. LEVEL is the minimum " +
+        "the wiki lists. REWARD is what it pays. AUTO says whether the quest ends in a hand-in she can repeat, and " +
+        "whether you have built that automation yet.\n\n" +
+        "Every column filters on its own and they combine — 'quests in Kerra Island, level 1–9, that I can automate' is " +
+        "three controls. Click any row for the walkthrough details: coordinates, faction, related NPCs and a link " +
+        "straight to the page.\n\n" +
+        "WHAT SHE CAN AND CANNOT AUTOMATE\n" +
+        "A quest is mostly travel, dialogue and killing. Killing is what the Grind page already does and travel is what " +
+        "the Maps waypoints do. What is left — and what is genuinely tedious when a quest is farmed — is the HAND-IN: " +
+        "target, hail, pick the item up, drop it on the NPC, press GIVE, repeat. That is a fixed gesture, so that is what " +
+        "this automates. Quests with no recorded hand-in show a dash in the AUTO column.\n\n" +
+        "WHY YOU HAVE TO SHOW HER THREE SPOTS\n" +
+        "There is nothing to discover. EQL has no addon API; the log says nothing about your inventory or about what is " +
+        "drawn on the screen; and an inventory slot's picture changes the moment the item leaves it, so recognising the " +
+        "slot by sight would work once and fail forever after. A POSITION doesn't change, so a position is what gets " +
+        "stored — as a fraction of the game window, so moving or resizing the window doesn't break it.\n\n" +
+        "HOW SHE KNOWS IT WORKED\n" +
+        "She does not trust her own clicks. After each hand-in she waits for the server to say so in the log — " +
+        "'You offered …', 'has been updated', 'You have been given:', a faction adjustment, an experience line. A loop " +
+        "that clicks perfectly and confirms nothing is a FAILED loop. Two failures in a row stop the run, because the " +
+        "overwhelmingly likely cause is that you are out of the item, the next likeliest is that one of the three picks " +
+        "is wrong, and neither gets better by carrying on clicking.\n\n" +
+        "SAFETY\n" +
+        "Foreground only, like every other role: she only sends input while EQ Legends is the focused window, so tabbing " +
+        "away pauses her mid-run and F12 stops her. Nothing here is written to the game until you press Run.";
+}
