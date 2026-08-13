@@ -35,11 +35,18 @@ public sealed class TurnInStep
     public int Qty { get; set; } = 1;
     /// <summary>The quest this hand-in advances — used to match the confirming log line.</summary>
     public string Quest { get; set; } = "";
-    /// <summary>The inventory slot this item sits in.</summary>
+    /// <summary>The inventory slot this item sat in WHEN PICKED — the fallback when the icon
+    /// can't be found. The item itself migrates through the bag as copies are consumed.</summary>
     public ScreenPoint Slot { get; set; } = new();
+    /// <summary>6×6 colour signature of the item's icon, learned from the pick frame. This is what
+    /// lets the runner find the NEXT copy after this slot empties: an icon is a fixed sprite the UI
+    /// stamps into whatever slot holds the item — the one screen element that never changes.</summary>
+    public double[]? IconSig { get; set; }
+
+    [JsonIgnore] public bool HasIcon => IconSig is { Length: 108 };
 
     public TurnInStep Clone() => new()
-    { Item = Item, Qty = Qty, Quest = Quest, Slot = new ScreenPoint { X = Slot.X, Y = Slot.Y } };
+    { Item = Item, Qty = Qty, Quest = Quest, Slot = new ScreenPoint { X = Slot.X, Y = Slot.Y }, IconSig = IconSig?.ToArray() };
 }
 
 /// <summary>
@@ -93,6 +100,25 @@ public sealed class QuestScript
     public TurnInLayout Layout { get; set; } = new();
     /// <summary>Seconds to wait for the log to confirm a hand-in before calling it a miss.</summary>
     public int ConfirmSeconds { get; set; } = 12;
+
+    // ---- smart find (0.10.8): the picks that MOVE get found, not remembered ----
+    /// <summary>Find items by icon and the NPC by nameplate, falling back to the fixed picks.</summary>
+    public bool SmartFind { get; set; } = true;
+    /// <summary>The bag area the items live in (normalized rect + grid), scanned for icons.</summary>
+    public double BagX { get; set; }
+    public double BagY { get; set; }
+    public double BagW { get; set; }
+    public double BagH { get; set; }
+    public int BagCols { get; set; } = 2;
+    public int BagRows { get; set; } = 5;
+    [JsonIgnore] public bool BagSet => BagW > 0.01 && BagH > 0.005 && BagCols > 0 && BagRows > 0;
+    /// <summary>Where the NPC's nameplate was when the body point was picked, and the vector from
+    /// that nameplate to the picked body point. At run time: find the nameplate, add the vector.</summary>
+    public double NpcNameX { get; set; }
+    public double NpcNameY { get; set; }
+    public double NpcDx { get; set; }
+    public double NpcDy { get; set; }
+    public bool NpcAnchorLearned { get; set; }
     public DateTime? LastRun { get; set; }
     public int LifetimeCompleted { get; set; }
 
@@ -146,6 +172,8 @@ public sealed class QuestScript
         Layout.ItemSlot = null;
         foreach (TurnInStep s in Steps) { s.Item ??= ""; s.Quest ??= ""; s.Slot ??= new ScreenPoint(); }
         if (string.IsNullOrWhiteSpace(HailKey)) HailKey = "h";
+        if (BagCols <= 0) BagCols = 2;
+        if (BagRows <= 0) BagRows = 5;
     }
 
     public static QuestScript FromQuest(QuestInfo q)

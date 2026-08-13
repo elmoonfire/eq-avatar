@@ -8,6 +8,7 @@ using System.Windows.Input;
 using System.Windows.Media;
 using EQAvatar.Spike.Data;
 using EQAvatar.Spike.Input;
+using EQAvatar.Spike.Login;
 using EQAvatar.Spike.Ocr;
 using EQAvatar.Spike.Roles;
 using EQAvatar.Spike.Ui;
@@ -549,11 +550,16 @@ public partial class MainWindow
 
         // ---- the shared picks, as scene tiles ----
         var picks = new WrapPanel { Margin = new Thickness(0, 0, 0, 2) };
-        picks.Children.Add(MakePickTile("ui-pick-npc.jpg", "the NPC", "where the items land", "",
+        picks.Children.Add(MakePickTile("ui-pick-npc.jpg", "the NPC", 
+            script.NpcAnchorLearned ? "found by nameplate" : "where the items land", "",
             script.Layout.Npc.Set,
-            "Where she drops the held item to open the give window. Stand in the same spot each run. Click to pick.",
+            "Where she drops the held item. Target the NPC FIRST so the big name floats over his head — the pick "
+            + "then learns a nameplate anchor, and she finds him by name wherever he stands. Click to pick.",
             () => { if (PickQuestPoint(script.Layout.Npc, "the NPC",
-                        $"Click ON {script.Npc}'s body in the game world, then press Enter.")) Persist(); RenderQuests(); }));
+                        $"TARGET {script.Npc} so his name floats overhead, then click ON his body and press Enter.",
+                        (frame, _) => LearnNpcAnchorAsync(script, new System.Drawing.Bitmap(frame),
+                                                          script.Layout.Npc.X, script.Layout.Npc.Y)))
+                    Persist(); RenderQuests(); }));
         picks.Children.Add(MakePickTile("ui-pick-give.jpg", "GIVE button", "commits the trade", "",
             script.Layout.GiveButton.Set,
             "The button that completes the hand-in. The give window opens in the same place every time, so one pick covers every item. Click to pick.",
@@ -564,6 +570,16 @@ public partial class MainWindow
             "Only needed if the server puts a second dialog up after GIVE. The cycle runs without it. Click to pick.",
             () => { if (PickQuestPoint(script.Layout.Confirm, "the confirm button",
                         "If a confirmation appears after GIVE, click ON its button and press Enter.")) Persist(); RenderQuests(); }));
+        picks.Children.Add(MakePickTile("ui-pick-bag.jpg", "the bag area",
+            $"{script.BagCols}×{script.BagRows} slots, scanned for icons", "",
+            script.BagSet,
+            "Drag ONE box around the whole block of bag slots the quest items live in. At run time she scans its "
+            + "cells for each item's icon and clicks the copy that's actually there — the picked slots become "
+            + "fallbacks. Click to pick, then set columns × rows below.",
+            () => { if (PickQuestRect(r => { script.BagX = r.X; script.BagY = r.Y; script.BagW = r.W; script.BagH = r.H; },
+                        "the bag area",
+                        "Drag a box around the WHOLE block of bag slots holding the quest items — corner to corner — then press Enter."))
+                    Persist(); RenderQuests(); }));
         stack.Children.Add(picks);
 
         // ---- what she says after the hail: the dialogue triggers ----
@@ -620,13 +636,21 @@ public partial class MainWindow
             var tileHost = new Grid();
             tileHost.Children.Add(MakePickTile("ui-pick-slot.jpg",
                 step.Item.Length > 0 ? step.Item : "hand-in item",
-                shortQuest,
+                step.HasIcon ? "icon learned — found live" : shortQuest,
                 $"{i + 1} of {total}",
                 step.Slot.Set,
-                $"The bag slot she picks {(step.Item.Length > 0 ? step.Item : "this item")} up from. Keep that slot for this item — "
-                + "she clicks the position, not the picture. Click to pick.",
+                "Drag a TIGHT box around one copy of the item in your bag. The pick learns the item's ICON, so at "
+                + "run time she scans the bag area for wherever a copy actually is — the picked slot is only the "
+                + "fallback. Click to pick.",
                 () => { if (PickQuestPoint(captured.Slot, "where " + captured.Item + " sits in your bags",
-                            $"Click ON the {captured.Item} where it sits in your inventory, then press Enter.")) Persist(); RenderQuests(); }));
+                            $"Drag a TIGHT box around one {captured.Item} in your inventory, then press Enter.",
+                            (frame, box) =>
+                            {
+                                captured.IconSig = QuestFind.SigFromRegion(frame, box.X, box.Y, box.W, box.H);
+                                if (captured.IconSig is not null)
+                                    QstStatus.Text = $"Saved — and learned {captured.Item}'s icon, so she'll find the "
+                                                   + "next copy wherever it sits in the bag area.";
+                            })) Persist(); RenderQuests(); }));
 
             if (total > 1)
             {
@@ -757,6 +781,40 @@ public partial class MainWindow
         };
         targ.Click += (_, _) => { script.TargetByName = targ.IsChecked == true; Persist(); };
 
+        var smart = new CheckBox
+        {
+            Content = "smart find", IsChecked = script.SmartFind, Foreground = Hex("#9FB6CC"), FontSize = 11,
+            Margin = new Thickness(0, 0, 14, 0), VerticalAlignment = VerticalAlignment.Center,
+            ToolTip = "Find each item by its ICON in the bag area, and the NPC by his NAMEPLATE — instead of "
+                    + "trusting the fixed picks. The fixed picks stay as fallbacks either way.",
+        };
+        smart.Click += (_, _) => { script.SmartFind = smart.IsChecked == true; Persist(); };
+
+        opts.Children.Add(smart);
+        opts.Children.Add(new TextBlock { Text = "bag", Foreground = Hex("#9FB6CC"), FontSize = 11, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 4, 0) });
+        var bagCols = new TextBox
+        {
+            Text = script.BagCols.ToString(), Width = 34, FontSize = 11.5, VerticalAlignment = VerticalAlignment.Center,
+            ToolTip = "Columns across the dragged bag area.",
+        };
+        var bagRows = new TextBox
+        {
+            Text = script.BagRows.ToString(), Width = 34, FontSize = 11.5, VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(4, 0, 14, 0), ToolTip = "Rows down the dragged bag area.",
+        };
+        bagCols.LostFocus += (_, _) =>
+        {
+            script.BagCols = int.TryParse(bagCols.Text.Trim(), out int c) ? Math.Clamp(c, 1, 20) : script.BagCols;
+            bagCols.Text = script.BagCols.ToString(); Persist();
+        };
+        bagRows.LostFocus += (_, _) =>
+        {
+            script.BagRows = int.TryParse(bagRows.Text.Trim(), out int r) ? Math.Clamp(r, 1, 20) : script.BagRows;
+            bagRows.Text = script.BagRows.ToString(); Persist();
+        };
+        opts.Children.Add(bagCols);
+        opts.Children.Add(new TextBlock { Text = "×", Foreground = Hex("#5E7C9A"), FontSize = 11, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(4, 0, 0, 0) });
+        opts.Children.Add(bagRows);
         opts.Children.Add(hail);
         opts.Children.Add(hailKey);
         opts.Children.Add(targ);
@@ -865,10 +923,44 @@ public partial class MainWindow
                 await Task.Delay(1000);
             }
 
+            // The SAME lookups the run uses — a test that exercises different code proves nothing.
             var points = new List<(string Label, ScreenPoint P)>();
             foreach (TurnInStep st in script.Steps)
-                points.Add(($"bag slot: {(st.Item.Length > 0 ? st.Item : "item")}", st.Slot));
-            points.Add(("the NPC", script.Layout.Npc));
+            {
+                string label = $"bag slot: {(st.Item.Length > 0 ? st.Item : "item")}";
+                ScreenPoint p = st.Slot;
+                if (script.SmartFind && script.BagSet && st.HasIcon)
+                {
+                    QuestFind.IconHit? hit = QuestFind.FindIconCell(_grindTarget, script, st);
+                    if (hit is not null && hit.Dist <= QuestFind.IconAcceptDistance)
+                    {
+                        p = new ScreenPoint { X = hit.X, Y = hit.Y };
+                        label += $" — FOUND in cell {hit.Row + 1},{hit.Col + 1} (match {hit.Dist:0})";
+                    }
+                    else
+                    {
+                        label += hit is null
+                            ? " — bag scan failed, showing the fixed pick"
+                            : $" — NO icon match (closest {hit.Dist:0}), showing the fixed pick";
+                    }
+                }
+                points.Add((label, p));
+            }
+            {
+                string label = "the NPC";
+                ScreenPoint p = script.Layout.Npc;
+                if (script.SmartFind && script.NpcAnchorLearned)
+                {
+                    QuestFind.NpcHit? found = await QuestFind.FindNpcAsync(_grindTarget, script);
+                    if (found is not null)
+                    {
+                        p = new ScreenPoint { X = found.X, Y = found.Y };
+                        label += $" — FOUND by nameplate \"{found.Matched}\"";
+                    }
+                    else label += " — nameplate not readable, showing the fixed pick";
+                }
+                points.Add((label, p));
+            }
             points.Add(("the GIVE button", script.Layout.GiveButton));
             if (script.Layout.Confirm.Set) points.Add(("the confirm button", script.Layout.Confirm));
 
@@ -905,7 +997,12 @@ public partial class MainWindow
 
     /// <summary>Show the shared region picker over a live frame of the game and store the CENTRE
     /// of whatever box was dragged, normalized to the window.</summary>
-    private bool PickQuestPoint(ScreenPoint point, string what, string hint)
+    /// <param name="learn">Given the pick frame and the dragged normalized box, BEFORE the frame
+    /// is disposed — this is where a slot pick learns its icon signature and the NPC pick learns
+    /// its nameplate anchor. Learning happens off the frame the user drew on, never a fresh grab
+    /// (the 0.9.37 lesson: the modal covers the game).</param>
+    private bool PickQuestPoint(ScreenPoint point, string what, string hint,
+                                Action<System.Drawing.Bitmap, (double X, double Y, double W, double H)>? learn = null)
     {
         if (_grindTarget == IntPtr.Zero) AutoTargetEq();
         // Disposed here, not by the picker: CaptureFrame allocates a full-window 32bpp bitmap
@@ -925,7 +1022,86 @@ public partial class MainWindow
         point.Y = dlg.NY + dlg.NH / 2;
         QstStatus.Text = $"Saved {what} at {point.X * 100:0.#}% across, {point.Y * 100:0.#}% down the game window.";
         QstStatus.Foreground = Hex("#7CE38B");
+        try { learn?.Invoke(frame, (dlg.NX, dlg.NY, dlg.NW, dlg.NH)); }
+        catch { /* learning is a bonus; the pick itself already saved */ }
         return true;
+    }
+
+    /// <summary>Pick a normalized RECT (the bag area) rather than a point.</summary>
+    private bool PickQuestRect(Action<(double X, double Y, double W, double H)> store, string what, string hint)
+    {
+        if (_grindTarget == IntPtr.Zero) AutoTargetEq();
+        using System.Drawing.Bitmap? frame = VitalsSvc.CaptureFrame();
+        if (frame is null)
+        {
+            QstStatus.Text = "No game window to capture — launch EQL and keep it on screen, then try again.";
+            QstStatus.Foreground = Hex("#FFCB6B");
+            return false;
+        }
+        var dlg = new CompassPickWindow(frame, "Pick " + what, hint) { Owner = this };
+        if (dlg.ShowDialog() != true) return false;
+        store((dlg.NX, dlg.NY, dlg.NW, dlg.NH));
+        QstStatus.Text = $"Saved {what}.";
+        QstStatus.Foreground = Hex("#7CE38B");
+        return true;
+    }
+
+    /// <summary>
+    /// Learn the NPC's nameplate anchor from the pick frame: OCR the frame, find the name nearest
+    /// ABOVE the picked body point, store the nameplate position and the nameplate→body vector.
+    /// Async because Windows OCR is; the pick itself has already saved by the time this runs.
+    /// </summary>
+    private async void LearnNpcAnchorAsync(QuestScript script, System.Drawing.Bitmap frameClone,
+                                           double bodyX, double bodyY)
+    {
+        try
+        {
+            string key = QuestFind.NameKey(script.Npc);
+            if (key.Length == 0)
+            {
+                script.NpcAnchorLearned = false;
+                QuestScriptStore.Current.Adopt(script);
+                QstStatus.Text = "NPC name too short to anchor — using the fixed spot.";
+                return;
+            }
+            double fw = frameClone.Width, fh = frameClone.Height;
+            List<FoundText> found = await ScreenText.ReadBitmapAsync(frameClone);
+
+            (double X, double Y)? best = null;
+            double bestScore = double.MaxValue;
+            foreach (FoundText f in found)
+            {
+                string t = new(f.Text.Where(char.IsLetter).ToArray());
+                if (!t.ToLowerInvariant().Contains(key)) continue;
+                double nx = f.X / fw, ny = f.Y / fh;
+                if (ny > 0.72 || ny > bodyY) continue;         // the nameplate floats ABOVE the body
+                double dx = nx - bodyX, dy = ny - bodyY;
+                double score = dx * dx + dy * dy;
+                if (score < bestScore) { bestScore = score; best = (nx, ny); }
+            }
+            if (best is null)
+            {
+                // Clear any PREVIOUS anchor: it was learned for a different body pick, and keeping
+                // it live while telling the user "the fixed spot will be used" would be a lie.
+                script.NpcAnchorLearned = false;
+                QuestScriptStore.Current.Adopt(script);
+                QstStatus.Text = $"Couldn't read \"{script.Npc}\"'s nameplate in the pick frame — she'll use the "
+                               + "fixed spot. (Target the NPC so the big name is on screen, then re-pick.)";
+                QstStatus.Foreground = Hex("#FFCB6B");
+                return;
+            }
+            script.NpcNameX = best.Value.X;
+            script.NpcNameY = best.Value.Y;
+            script.NpcDx = bodyX - best.Value.X;
+            script.NpcDy = bodyY - best.Value.Y;
+            script.NpcAnchorLearned = true;
+            QuestScriptStore.Current.Adopt(script);
+            QstStatus.Text = $"Nameplate anchor learned — she'll find {script.Npc} by the name over his head and "
+                           + "click the body below it, wherever he stands.";
+            QstStatus.Foreground = Hex("#7CE38B");
+        }
+        catch { /* anchor is a bonus; the fixed point still works */ }
+        finally { frameClone.Dispose(); }
     }
 
     private void StartQuestRun(QuestScript script)

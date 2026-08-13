@@ -30,8 +30,7 @@ public static class ScreenText
 
     public static async Task<List<FoundText>> ReadAsync(IntPtr hwnd)
     {
-        var result = new List<FoundText>();
-        if (hwnd == IntPtr.Zero || !GetWindowRect(hwnd, out RECT r)) return result;
+        if (hwnd == IntPtr.Zero || !GetWindowRect(hwnd, out RECT r)) return new List<FoundText>();
         int w = Math.Max(1, r.Right - r.Left), h = Math.Max(1, r.Bottom - r.Top);
 
         // Capture the on-screen pixels of the (foregrounded) window. This works for the
@@ -40,6 +39,20 @@ public static class ScreenText
         using (var g = Graphics.FromImage(bmp))
             g.CopyFromScreen(r.Left, r.Top, 0, 0, new Size(w, h), CopyPixelOperation.SourceCopy);
 
+        return await ReadBitmapAsync(bmp, r.Left, r.Top);
+    }
+
+    /// <summary>
+    /// OCR an already-captured bitmap, mapping each hit's centre by <paramref name="addX"/>/<paramref name="addY"/>.
+    ///
+    /// Exists so pick-time learning can read the PICKER'S OWN frame — the 0.9.37 lesson: the modal
+    /// covers the game, the desktop repaints on its own schedule, and a fresh grab can read the
+    /// dialog instead of the game. Runtime reads pass the live window rect; pick-time reads pass
+    /// the frame the user actually drew on, with a zero offset.
+    /// </summary>
+    public static async Task<List<FoundText>> ReadBitmapAsync(Bitmap bmp, double addX = 0, double addY = 0)
+    {
+        var result = new List<FoundText>();
         OcrEngine? engine = Engine;
         if (engine == null) return result;
 
@@ -61,8 +74,8 @@ public static class ScreenText
                 foreach (OcrWord word in line.Words)
                 {
                     var b = word.BoundingRect;
-                    double cx = r.Left + b.X + b.Width / 2.0;
-                    double cy = r.Top + b.Y + b.Height / 2.0;
+                    double cx = addX + b.X + b.Width / 2.0;
+                    double cy = addY + b.Y + b.Height / 2.0;
                     result.Add(new FoundText(word.Text, cx, cy));   // individual words (server name, PLAY)
                     lx += cx; ly += cy; n++;
                 }

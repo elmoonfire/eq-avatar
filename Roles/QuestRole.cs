@@ -68,6 +68,10 @@ public sealed class QuestRole
     private volatile bool _listening;
     /// <summary>The step currently in flight, so the log matcher can name-check its item.</summary>
     private volatile TurnInStep? _inFlight;
+    /// <summary>Set when the last false from HandOverAsync meant "no icon in the bag" — a miss
+    /// where NOTHING was clicked and nothing is on the cursor, so the recovery click that shakes a
+    /// stuck item back into its slot must NOT run: over a bag it would pick an item UP.</summary>
+    private volatile bool _emptyBagMiss;
     private int _finished;
 
     public QuestRole(QuestScript script, IInputSink sink, AppSettings settings,
@@ -228,17 +232,60 @@ public sealed class QuestRole
     {
         Stats.State = $"handing over {step.Item}";
         Stats.Attempts++;
+        _emptyBagMiss = false;
 
-        if (!ClickAt(step.Slot, 260, $"the bag slot for {step.Item}")) return null;   // pick the item up
+        // Where the item ACTUALLY is right now. The picked slot is only the fallback: totems
+        // migrate through the bag as each one is consumed, and clicking yesterday's slot is how
+        // the first field test handed nothing to anyone.
+        ScreenPoint slot = step.Slot;
+        if (_script.SmartFind && _script.BagSet && step.HasIcon)
+        {
+            QuestFind.IconHit? hit = QuestFind.FindIconCell(_hwnd(), _script, step);
+            if (hit is null)
+            {
+                Log?.Invoke($"⚠ couldn't scan the bag area for {step.Item} — using the picked slot.");
+            }
+            else if (hit.Dist <= QuestFind.IconAcceptDistance)
+            {
+                slot = new ScreenPoint { X = hit.X, Y = hit.Y };
+                if (_narrate) Log?.Invoke($"· found {step.Item} in bag cell {hit.Row + 1},{hit.Col + 1} (match {hit.Dist:0})");
+            }
+            else
+            {
+                // No cell holds this icon: the honest out-of-items signal, seen BEFORE an item is
+                // offered rather than inferred from two unanswered offers.
+                Log?.Invoke($"✖ no {step.Item} found in the bag area (closest cell matched {hit.Dist:0}, need ≤ {QuestFind.IconAcceptDistance:0}).");
+                _emptyBagMiss = true;
+                return false;
+            }
+        }
+
+        if (!ClickAt(slot, 260, $"the bag slot for {step.Item}")) return null;   // pick the item up
 
         // From here the item is ON THE CURSOR. Every early exit has to put it back in ITS OWN slot
         // first: the cycle restarts at step 1, and step 1's first act is to click step 1's slot —
         // which, with step 2's item still held, drops it into the wrong bag square and every
         // pick-up after that grabs the wrong thing.
         bool holding = true;
-        bool? Drop(bool? result) { if (holding) { ClickAt(step.Slot, 260, "the bag slot (returning the item)"); holding = false; } return result; }
+        bool? Drop(bool? result) { if (holding) { ClickAt(slot, 260, "the bag slot (returning the item)"); holding = false; } return result; }
 
-        if (!ClickAt(_script.Layout.Npc, 620, "the NPC")) return Drop(null);   // drop it on the NPC → give window
+        // Where the NPC actually stands. The nameplate follows him; the picked point doesn't.
+        ScreenPoint npc = _script.Layout.Npc;
+        if (_script.SmartFind && _script.NpcAnchorLearned)
+        {
+            QuestFind.NpcHit? found = await QuestFind.FindNpcAsync(_hwnd(), _script);
+            if (found is not null)
+            {
+                npc = new ScreenPoint { X = found.X, Y = found.Y };
+                if (_narrate) Log?.Invoke($"· nameplate \"{found.Matched}\" at {found.NameX * 100:0.0}%, {found.NameY * 100:0.0}% → clicking the body below it");
+            }
+            else if (_narrate)
+            {
+                Log?.Invoke("· nameplate not readable right now — using the picked NPC spot");
+            }
+        }
+
+        if (!ClickAt(npc, 620, "the NPC")) return Drop(null);   // drop it on the NPC → give window
 
         // Arm the listener HERE, immediately before the button that commits the trade — not at the
         // top of the cycle. Everything above takes seconds, and a confirmation armed that early can
@@ -285,6 +332,22 @@ public sealed class QuestRole
             string items = string.Join(" → ", _script.Steps.Select(s => s.Item));
             Log?.Invoke($"Quest Runner: {items} → {_script.Npc}"
                       + (_script.Repeat > 0 ? $", {_script.Repeat} cycle(s)." : ", until the items run out."));
+
+            // Say out loud what smart find can actually do THIS run. Silence here is how a user
+            // updates, runs, and watches the identical failure with no hint the fix exists but is
+            // unarmed: an old script has no icon signatures, no bag area and no nameplate anchor.
+            if (_script.SmartFind)
+            {
+                var unarmed = new List<string>();
+                if (!_script.BagSet) unarmed.Add("the bag area isn't dragged");
+                foreach (TurnInStep st in _script.Steps)
+                    if (!st.HasIcon) unarmed.Add($"{st.Item}'s icon isn't learned (re-pick its slot)");
+                if (!_script.NpcAnchorLearned) unarmed.Add("the NPC nameplate isn't anchored (re-pick him while targeted)");
+                Log?.Invoke(unarmed.Count == 0
+                    ? "smart find ARMED: items by icon in the bag area, the NPC by nameplate."
+                    : "⚠ smart find is ON but partly unarmed — " + string.Join("; ", unarmed)
+                      + ". Unarmed parts fall back to the fixed picks, which is exactly what failed last time.");
+            }
 
             // PER STEP, not one counter for the run. A cycle restarts from the top after any
             // failure, so a shared counter is reset by step 1 succeeding on the very next pass and
@@ -392,10 +455,19 @@ public sealed class QuestRole
                         int misses = stepMisses.TryGetValue(step, out int m) ? m + 1 : 1;
                         stepMisses[step] = misses;
                         Stats.Misses++;
-                        Log?.Invoke($"✖ {step.Item}: nothing came back from the server within "
-                                  + $"{_script.ConfirmSeconds}s (miss {misses} of 2 for this item).");
-                        // Drop whatever might still be stuck to the cursor before trying again.
-                        ClickAt(step.Slot, 300);
+                        if (_emptyBagMiss)
+                        {
+                            // Nothing was clicked and nothing is on the cursor — the recovery
+                            // click below would PICK AN ITEM UP over a bag, not put one down.
+                            Log?.Invoke($"✖ {step.Item}: bag scan found none (miss {misses} of 2 for this item).");
+                        }
+                        else
+                        {
+                            Log?.Invoke($"✖ {step.Item}: nothing came back from the server within "
+                                      + $"{_script.ConfirmSeconds}s (miss {misses} of 2 for this item).");
+                            // Drop whatever might still be stuck to the cursor before trying again.
+                            ClickAt(step.Slot, 300);
+                        }
                         if (misses >= 2)
                         {
                             Finish($"Stopped after {Stats.Cycles} cycle(s) / {Stats.HandIns} hand-in(s): this item "
