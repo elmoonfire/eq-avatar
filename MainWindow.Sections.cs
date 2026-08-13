@@ -47,6 +47,13 @@ public partial class MainWindow
         public Border Body = null!;
         public StackPanel Items = null!;
         public TextBlock Chevron = null!, Caption = null!, HeadGlyph = null!;
+        /// <summary>The left half: glyph + caption, opens the section's page.</summary>
+        public Border LabelHit = null!;
+        /// <summary>The right half: the chip around the chevron, collapses and expands.</summary>
+        public Border ChevronChip = null!;
+        /// <summary>What the caption and glyph go back to when the mouse leaves — depends on
+        /// whether this section is the current one, so hover can't strand them the wrong colour.</summary>
+        public Brush CaptionRest = Brushes.Gray, GlyphRest = Brushes.Gray;
         public bool Expanded = true;
         public readonly List<RadioButton> Buttons = new();
         public NavPage[] Pages = Array.Empty<NavPage>();
@@ -190,66 +197,102 @@ public partial class MainWindow
         if (current is not null) OnNavItemChecked(current);
     }
 
+    /// <summary>
+    /// A section heading is TWO controls sharing a line: the label opens the section's page, the
+    /// chevron collapses it. That is easy to miss when both live under one flat caption, so each
+    /// gets its own hit area and its own hover — mousing the label lights the label, mousing the
+    /// chevron lights a small button-shaped chip on the right. The chip carries a faint fill and
+    /// border even at rest, because a control that only appears once you are already on it cannot
+    /// tell you it is there.
+    /// </summary>
     private Border BuildSectionHeader(NavSection sec)
     {
         var grid = new Grid();
-        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+
+        sec.CaptionRest = Hex("#5D6878");
+        sec.GlyphRest = Hex("#6E7C8C");
 
         sec.HeadGlyph = new TextBlock
         {
             Text = sec.Glyph, FontFamily = Mdl2, FontSize = 11, Width = 22,
-            VerticalAlignment = VerticalAlignment.Center, Foreground = Hex("#6E7C8C")
+            VerticalAlignment = VerticalAlignment.Center, Foreground = sec.GlyphRest
         };
         sec.Caption = new TextBlock
         {
             Text = sec.Title.ToUpperInvariant(), FontSize = 10, FontWeight = FontWeights.SemiBold,
-            VerticalAlignment = VerticalAlignment.Center, Foreground = Hex("#5D6878")
+            VerticalAlignment = VerticalAlignment.Center, Foreground = sec.CaptionRest
         };
         sec.Chevron = new TextBlock
         {
-            Text = "", FontFamily = Mdl2, FontSize = 8, Width = 12,
-            TextAlignment = TextAlignment.Center, VerticalAlignment = VerticalAlignment.Center,
-            Foreground = Hex("#5D6878"),
+            Text = "", FontFamily = Mdl2, FontSize = 9,
+            HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center,
+            Foreground = Hex("#8B99AA"),
             RenderTransformOrigin = new Point(0.5, 0.5), RenderTransform = new RotateTransform(0)
         };
 
-        // The chevron needs its own hit area, or a click near it lands on the heading and navigates.
-        var chevHit = new Border
+        // ---- right half: the collapse/expand chip
+        sec.ChevronChip = new Border
         {
-            Child = sec.Chevron, Background = Brushes.Transparent, Padding = new Thickness(6, 4, 2, 4),
-            Cursor = Cursors.Hand, ToolTip = "Collapse or expand this section"
+            Child = sec.Chevron, Width = 24, Height = 20, CornerRadius = new CornerRadius(5),
+            Background = Hex("#0EFFFFFF"), BorderBrush = Hex("#28FFFFFF"), BorderThickness = new Thickness(1),
+            Margin = new Thickness(6, 0, 0, 0), VerticalAlignment = VerticalAlignment.Center,
+            Cursor = Cursors.Hand
         };
-        chevHit.MouseLeftButtonUp += (_, e) =>
+        sec.ChevronChip.MouseEnter += (_, _) =>
+        {
+            sec.ChevronChip.Background = Hex("#284FC3F7");
+            sec.ChevronChip.BorderBrush = Hex("#4FC3F7");
+            sec.Chevron.Foreground = Hex("#EAF6FF");
+        };
+        sec.ChevronChip.MouseLeave += (_, _) =>
+        {
+            sec.ChevronChip.Background = Hex("#0EFFFFFF");
+            sec.ChevronChip.BorderBrush = Hex("#28FFFFFF");
+            sec.Chevron.Foreground = Hex("#8B99AA");
+        };
+        sec.ChevronChip.MouseLeftButtonUp += (_, e) =>
         {
             e.Handled = true;
             SetSectionExpanded(sec, !sec.Expanded, animate: true);
             SaveCollapsed();
         };
 
-        Grid.SetColumn(sec.HeadGlyph, 0);
-        Grid.SetColumn(sec.Caption, 1);
-        Grid.SetColumn(chevHit, 2);
-        grid.Children.Add(sec.HeadGlyph);
-        grid.Children.Add(sec.Caption);
-        grid.Children.Add(chevHit);
-
-        var head = new Border
+        // ---- left half: the label, which opens the section's page
+        var label = new StackPanel { Orientation = Orientation.Horizontal };
+        label.Children.Add(sec.HeadGlyph);
+        label.Children.Add(sec.Caption);
+        sec.LabelHit = new Border
         {
-            Child = grid, Background = Brushes.Transparent, CornerRadius = new CornerRadius(8),
-            Padding = new Thickness(4, 5, 2, 5), Margin = new Thickness(0, 12, 0, 2),
-            Cursor = Cursors.Hand,
-            ToolTip = sec.Title + " — overview of the pages in this section"
+            Child = label, Background = Brushes.Transparent, CornerRadius = new CornerRadius(8),
+            Padding = new Thickness(4, 5, 8, 5), Cursor = Cursors.Hand,
+            ToolTip = "Open the " + sec.Title + " overview"
         };
-        head.MouseEnter += (_, _) => head.Background = Hex("#10FFFFFF");
-        head.MouseLeave += (_, _) => head.Background =
-            _activeSectionPanel == sec.Panel ? Hex("#184FC3F7") : Brushes.Transparent;
-        head.MouseLeftButtonUp += (_, _) =>
+        sec.LabelHit.MouseEnter += (_, _) =>
+        {
+            if (_activeSectionPanel != sec.Panel) sec.LabelHit.Background = Hex("#12FFFFFF");
+            sec.Caption.Foreground = Hex("#EAF6FF");
+            sec.HeadGlyph.Foreground = Hex("#4FC3F7");
+        };
+        sec.LabelHit.MouseLeave += (_, _) =>
+        {
+            sec.LabelHit.Background = _activeSectionPanel == sec.Panel ? Hex("#184FC3F7") : Brushes.Transparent;
+            sec.Caption.Foreground = sec.CaptionRest;
+            sec.HeadGlyph.Foreground = sec.GlyphRest;
+        };
+        sec.LabelHit.MouseLeftButtonUp += (_, _) =>
         {
             if (!sec.Expanded) { SetSectionExpanded(sec, true, animate: true); SaveCollapsed(); }
             ShowSectionDashboard(sec);
         };
+
+        Grid.SetColumn(sec.LabelHit, 0);
+        Grid.SetColumn(sec.ChevronChip, 1);
+        grid.Children.Add(sec.LabelHit);
+        grid.Children.Add(sec.ChevronChip);
+
+        var head = new Border { Child = grid, Margin = new Thickness(0, 12, 2, 2) };
         return head;
     }
 
@@ -304,6 +347,7 @@ public partial class MainWindow
     private void SetSectionExpanded(NavSection sec, bool expand, bool animate)
     {
         sec.Expanded = expand;
+        sec.ChevronChip.ToolTip = (expand ? "Hide the " : "Show the ") + sec.Title + " pages";
 
         var rot = (RotateTransform)sec.Chevron.RenderTransform;
         if (animate)
@@ -360,8 +404,10 @@ public partial class MainWindow
         foreach (NavSection s in _navSections)
         {
             bool mine = ReferenceEquals(s, sec);
-            s.Caption.Foreground = mine ? Hex("#9FB6CC") : Hex("#5D6878");
-            s.HeadGlyph.Foreground = mine ? Hex("#4FC3F7") : Hex("#6E7C8C");
+            s.CaptionRest = mine ? Hex("#9FB6CC") : Hex("#5D6878");
+            s.GlyphRest = mine ? Hex("#4FC3F7") : Hex("#6E7C8C");
+            s.Caption.Foreground = s.CaptionRest;
+            s.HeadGlyph.Foreground = s.GlyphRest;
         }
         if (!sec.Expanded) { SetSectionExpanded(sec, true, animate: true); SaveCollapsed(); }
     }
@@ -372,9 +418,11 @@ public partial class MainWindow
         foreach (NavSection s in _navSections)
         {
             bool on = s.Panel == panel && panel.Length > 0;
-            s.Header.Background = on ? Hex("#184FC3F7") : Brushes.Transparent;
-            s.Caption.Foreground = on ? Hex("#EAF6FF") : Hex("#5D6878");
-            s.HeadGlyph.Foreground = on ? Hex("#4FC3F7") : Hex("#6E7C8C");
+            s.LabelHit.Background = on ? Hex("#184FC3F7") : Brushes.Transparent;
+            s.CaptionRest = on ? Hex("#EAF6FF") : Hex("#5D6878");
+            s.GlyphRest = on ? Hex("#4FC3F7") : Hex("#6E7C8C");
+            s.Caption.Foreground = s.CaptionRest;
+            s.HeadGlyph.Foreground = s.GlyphRest;
         }
     }
 
