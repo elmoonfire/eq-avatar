@@ -57,73 +57,39 @@ public partial class MainWindow
         MergePlan p = MergePlan.Current;
         MrgPickHost.Children.Clear();
 
-        FrameworkElement Pick(string title, string hint, string tip, Func<bool> isSet, Action<bool> onPicked)
-        {
-            var g = new Grid { Margin = new Thickness(0, 0, 0, 5) };
-            g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(300) });
-            g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(90) });
-            g.ColumnDefinitions.Add(new ColumnDefinition());
-
-            var label = new TextBlock
-            {
-                Text = title, FontSize = 11.5, Foreground = Hex("#C6D2DE"),
-                VerticalAlignment = VerticalAlignment.Center, ToolTip = tip,
-                TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 0, 8, 0),
-            };
-            bool set = isSet();
-            var state = new TextBlock
-            {
-                Text = set ? "picked" : "not picked", FontSize = 10.5,
-                Foreground = set ? Hex("#9FE0B8") : Hex("#FFC08A"),
-                VerticalAlignment = VerticalAlignment.Center,
-            };
-            var btn = new Button
-            {
-                Content = "◎  pick", Padding = new Thickness(10, 3, 10, 3),
-                HorizontalAlignment = HorizontalAlignment.Left, ToolTip = tip,
-            };
-            btn.Click += (_, _) => onPicked(true);
-
-            Grid.SetColumn(label, 0); Grid.SetColumn(state, 1); Grid.SetColumn(btn, 2);
-            g.Children.Add(label); g.Children.Add(state); g.Children.Add(btn);
-            return g;
-        }
-
-        MrgPickHost.Children.Add(Pick(
-            "① the Place Item box on the item you're keeping",
-            "Click ON the empty Place Item square on the target item's window, then press Enter.",
-            "Where each copy gets dropped. On the item window this is the square beside the Merge Item button.",
-            () => p.PlaceBox.Set,
-            _ => { if (PickMergePoint(p.PlaceBox, "the Place Item box",
+        // The four picks as scene tiles, same visual grammar as the Grind mode tiles and the
+        // Questing card: art, TITLE, subtitle, and a badge that answers "can I press Run?" at a
+        // glance — orange ✕ Not Ready top-right until picked, glowing green ✓ Ready top-left after.
+        var tiles = new WrapPanel();
+        tiles.Children.Add(MakePickTile("ui-pick-place.jpg", "Place Item", "where each copy drops", "",
+            p.PlaceBox.Set,
+            "The empty Place Item square on the target item's window — where each copy gets dropped. Click to pick.",
+            () => { if (PickMergePoint(p.PlaceBox, "the Place Item box",
                         "Click ON the empty Place Item square on the target item's window, then press Enter.")) p.Save(); RenderMergeUi(); }));
-
-        MrgPickHost.Children.Add(Pick(
-            "② the Merge Item button",
-            "Click ON the Merge Item button on the target item's window, then press Enter.",
-            "The button that finalises the merge and consumes the copy.",
-            () => p.MergeButton.Set,
-            _ => { if (PickMergePoint(p.MergeButton, "the Merge Item button",
+        tiles.Children.Add(MakePickTile("ui-pick-merge.jpg", "Merge Item", "commits & consumes", "",
+            p.MergeButton.Set,
+            "The Merge Item button that finalises the merge and consumes the copy. Click to pick.",
+            () => { if (PickMergePoint(p.MergeButton, "the Merge Item button",
                         "Click ON the Merge Item button on the target item's window, then press Enter.")) p.Save(); RenderMergeUi(); }));
-
-        MrgPickHost.Children.Add(Pick(
-            "③ the bag area holding the copies  (drag a box over the WHOLE block of slots)",
-            "Drag a box around the block of bag slots that holds the copies, corner to corner, then press Enter.",
-            "Dragged as a rectangle and divided by the columns and rows below, because picking 27 slots by hand "
-            + "would be worse than doing the merges by hand.",
-            () => p.BagSet,
-            _ => { if (PickMergeRect(r => { p.BagX = r.X; p.BagY = r.Y; p.BagW = r.W; p.BagH = r.H; },
+        tiles.Children.Add(MakePickTile("ui-pick-bag.jpg", "the bag", "drag the whole block", "",
+            p.BagSet,
+            "Drag one box around the WHOLE block of slots holding the copies — it is divided by the columns and rows "
+            + "below, because picking 27 slots by hand would be worse than doing the merges by hand. Click to pick.",
+            () => { if (PickMergeRect(r => { p.BagX = r.X; p.BagY = r.Y; p.BagW = r.W; p.BagH = r.H; },
                         "the bag area",
                         "Drag a box around the WHOLE block of slots holding the copies — corner to corner — then press Enter.")) p.Save(); RenderMergeUi(); }));
-
-        MrgPickHost.Children.Add(Pick(
-            "④ the tier counter on the target item  (the \"4 / 32\")",
-            "Drag a tight box around just the n/m numbers on the target item's window, then press Enter.",
-            "The only witness that a merge happened. The game writes nothing to the log about merging, so without "
-            + "this there is no way to tell a merge from a click on an empty slot.",
-            () => p.TierSet,
-            _ => { if (PickMergeRect(r => { p.TierX = r.X; p.TierY = r.Y; p.TierW = r.W; p.TierH = r.H; },
+        tiles.Children.Add(MakePickTile("ui-pick-tier.jpg", "tier counter", "the \"4 / 32\" — her witness", "",
+            p.TierSet,
+            "A TIGHT box around just the n/m numbers on the target item's window. The game logs nothing about merging, "
+            + "so this counter is the only proof a merge happened. Click to pick.",
+            () => { if (PickMergeRect(r => { p.TierX = r.X; p.TierY = r.Y; p.TierW = r.W; p.TierH = r.H; },
                         "the tier counter",
                         "Drag a TIGHT box around just the \"n / m\" numbers on the target item's window, then press Enter.")) p.Save(); RenderMergeUi(); }));
+        MrgPickHost.Children.Add(tiles);
+
+        int mrgHave = (p.PlaceBox.Set ? 1 : 0) + (p.MergeButton.Set ? 1 : 0) + (p.BagSet ? 1 : 0) + (p.TierSet ? 1 : 0);
+        MrgPickHost.Children.Add(MakeFireBar(mrgHave / 4.0,
+            mrgHave >= 4 ? "everything picked — ready to sweep" : $"{mrgHave} of 4 picks made"));
 
         MrgGridText.Text = p.BagSet
             ? $"{p.Columns * p.Rows} slots will be visited, left to right then top to bottom"

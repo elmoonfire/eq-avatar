@@ -79,8 +79,12 @@ public sealed class QuestScript
     public List<TurnInStep> Steps { get; set; } = new();
     /// <summary>0 = keep going until the items run out (i.e. until hand-ins stop confirming).</summary>
     public int Repeat { get; set; }
-    /// <summary>Say "Hail, NPC" at the start of each cycle. Some NPCs need waking up.</summary>
+    /// <summary>Hail at the start of each cycle. Some NPCs need waking up — and on Kerra Isle the
+    /// hail is what re-assigns the task after a full cycle.</summary>
     public bool HailFirst { get; set; } = true;
+    /// <summary>The in-game hail key, pressed with the NPC targeted. EQL binds "h" by default,
+    /// which is one keystroke instead of typing "Hail, The Kerran Sha`rr" a thousand times.</summary>
+    public string HailKey { get; set; } = "h";
     /// <summary>Issue /target NPC before hailing, rather than trusting the current target.</summary>
     public bool TargetByName { get; set; } = true;
     /// <summary>Extra phrases to say between the hail and the first hand-in (quest dialogue
@@ -141,6 +145,7 @@ public sealed class QuestScript
         PerTurnIn = null;
         Layout.ItemSlot = null;
         foreach (TurnInStep s in Steps) { s.Item ??= ""; s.Quest ??= ""; s.Slot ??= new ScreenPoint(); }
+        if (string.IsNullOrWhiteSpace(HailKey)) HailKey = "h";
     }
 
     public static QuestScript FromQuest(QuestInfo q)

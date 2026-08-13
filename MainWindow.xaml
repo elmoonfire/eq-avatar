@@ -1914,6 +1914,7 @@
                                         <ColumnDefinition Width="150"/>
                                         <ColumnDefinition Width="94"/>
                                         <ColumnDefinition Width="1*"/>
+                                        <ColumnDefinition Width="128"/>
                                         <ColumnDefinition Width="76"/>
                                     </Grid.ColumnDefinitions>
 
@@ -1979,7 +1980,19 @@
                                                  ToolTip="Filter by reward — type part of an item name, or '—' to find quests with no item reward listed."/>
                                     </StackPanel>
 
-                                    <StackPanel Grid.Column="6" Margin="3,0,2,0"
+                                    <StackPanel Grid.Column="6" Margin="3,0,3,0"
+                                                ToolTip="When YOU first completed this quest on this machine, and how many times since — recorded off the same log evidence the Quest Runner trusts.">
+                                        <Border x:Name="DoneHead" CornerRadius="9" ClipToBounds="True" Height="66" Margin="0,0,0,3">
+                                            <Image x:Name="ArtQColDone" Stretch="UniformToFill"/>
+                                        </Border>
+                                        <TextBlock Text="COMPLETED" FontWeight="Bold" FontSize="10.5" Foreground="#9FE0B8" HorizontalAlignment="Center"/>
+                                        <ComboBox x:Name="QstFilterDone" SelectionChanged="QstFilterSel_Changed" FontSize="11" Margin="0,4,0,0"
+                                                  ToolTip="Filter by your own completion history."/>
+                                        <ComboBox x:Name="QstSortDone" SelectionChanged="QstFilterSel_Changed" FontSize="11" Margin="0,3,0,0"
+                                                  ToolTip="Sort the list — by name, by when you first completed a quest, or by how many times."/>
+                                    </StackPanel>
+
+                                    <StackPanel Grid.Column="7" Margin="3,0,2,0"
                                                 ToolTip="Whether this quest ends in a hand-in she can repeat for you, and whether you've built that automation yet.">
                                         <Border x:Name="AutoHead" CornerRadius="9" ClipToBounds="True" Height="66" Margin="0,0,0,3">
                                             <Image x:Name="ArtQColAuto" Stretch="UniformToFill"/>

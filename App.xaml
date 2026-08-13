@@ -13,6 +13,10 @@
         <SolidColorBrush x:Key="Good" Color="#7CE38B"/>
         <SolidColorBrush x:Key="Warn" Color="#FFCB6B"/>
 
+        <!-- Buttons carry their own template because the DEFAULT one is what made hover unreadable:
+             with no template, WPF hot-tracks to the system light-blue chrome (#BEE6FD) while our
+             implicit Foreground stays near-white — white on light blue, on every button in the app.
+             Owning the template keeps the text on dark fills at every state. -->
         <Style TargetType="Button">
             <Setter Property="Background" Value="{StaticResource AccentDim}"/>
             <Setter Property="Foreground" Value="{StaticResource Text}"/>
@@ -21,6 +25,32 @@
             <Setter Property="Padding" Value="10,6"/>
             <Setter Property="Margin" Value="0,0,8,8"/>
             <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="bd" Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                CornerRadius="6" Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"
+                                              RecognizesAccessKey="True"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="bd" Property="Background" Value="#2E6E96"/>
+                                <Setter TargetName="bd" Property="BorderBrush" Value="#7FD4FF"/>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="bd" Property="Background" Value="#1F4D6B"/>
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter TargetName="bd" Property="Opacity" Value="0.45"/>
+                                <Setter Property="Foreground" Value="{StaticResource TextDim}"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
         </Style>
         <Style TargetType="TextBlock">
             <Setter Property="Foreground" Value="{StaticResource Text}"/>

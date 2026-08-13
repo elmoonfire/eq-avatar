@@ -5,6 +5,7 @@ using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 using EQAvatar.Spike.Config;
+using EQAvatar.Spike.Data;
 using EQAvatar.Spike.Input;
 using EQAvatar.Spike.Log;
 
@@ -279,6 +280,8 @@ public sealed class QuestRole
             // the stop exists for. Keyed by the step object; the list is only edited from the UI
             // while the run is stopped.
             var stepMisses = new Dictionary<TurnInStep, int>();
+            // Items offered toward a step's Qty since its last recorded completion.
+            var offersToward = new Dictionary<TurnInStep, int>();
 
             while (!ct.IsCancellationRequested)
             {
@@ -294,10 +297,14 @@ public sealed class QuestRole
                     if (!Say("/target " + _script.Npc)) { await Task.Delay(500, ct); continue; }
                     await Task.Delay(700 + _rng.Next(250), ct);
                 }
-                if (_script.HailFirst && _script.Npc.Length > 0)
+                if (_script.HailFirst)
                 {
+                    // One keystroke, not a typed sentence: EQL binds hail to a key ("h" by
+                    // default), and it acts on the current target — which the /target above (or
+                    // the user's own click) has just set.
                     Stats.State = "hailing";
-                    if (!Say("/say Hail, " + _script.Npc)) { await Task.Delay(500, ct); continue; }
+                    InputKey hail = InputKey.Parse(string.IsNullOrWhiteSpace(_script.HailKey) ? "h" : _script.HailKey);
+                    if (hail.IsNone || !_sink.Send(hail, 45)) { await Task.Delay(500, ct); continue; }
                     await Task.Delay(900 + _rng.Next(350), ct);
                 }
                 foreach (string phrase in _script.SayPhrases)
@@ -307,43 +314,62 @@ public sealed class QuestRole
                     await Task.Delay(900 + _rng.Next(300), ct);
                 }
 
-                // ---- the hand-ins, in order
+                // ---- the hand-ins, in order.
+                //
+                // A missed step is RETRIED IN PLACE, never by restarting the cycle. The NPC only
+                // accepts the item its current quest stage calls for: once the Totem is in, the
+                // Sha`rr refuses another Totem until the Orders go in. Restarting from step 1
+                // after a step-2 hiccup would therefore offer an item the NPC is guaranteed to
+                // reject — turning one slow server reply into a spurious "out of items" stop.
                 bool cycleComplete = true;
-                foreach (TurnInStep step in _script.Steps.ToList())
+                List<TurnInStep> steps = _script.Steps.ToList();
+                for (int i = 0; i < steps.Count && cycleComplete; i++)
                 {
-                    if (ct.IsCancellationRequested) { cycleComplete = false; break; }
-                    if (!await WaitFocus(ct)) { cycleComplete = false; break; }
-
-                    bool? result = await HandOverAsync(step, ct);
-                    if (result is null) { cycleComplete = false; await Task.Delay(600, ct); break; }
-
-                    if (result == true)
+                    TurnInStep step = steps[i];
+                    while (true)
                     {
-                        stepMisses[step] = 0;
-                        Stats.HandIns++;
-                        Log?.Invoke($"✔ {step.Item} accepted — {Stats.LastLine}");
-                        await Task.Delay(1100 + _rng.Next(500), ct);
-                        continue;
-                    }
+                        if (ct.IsCancellationRequested) { cycleComplete = false; break; }
+                        if (!await WaitFocus(ct)) { cycleComplete = false; break; }
 
-                    cycleComplete = false;
-                    int misses = stepMisses.TryGetValue(step, out int m) ? m + 1 : 1;
-                    stepMisses[step] = misses;
-                    Stats.Misses++;
-                    Log?.Invoke($"✖ {step.Item}: nothing came back from the server within "
-                              + $"{_script.ConfirmSeconds}s (miss {misses} of 2 for this item).");
-                    // Drop whatever might still be stuck to the cursor before trying again.
-                    ClickAt(step.Slot, 300);
-                    if (misses >= 2)
-                    {
-                        Finish($"Stopped after {Stats.Cycles} cycle(s) / {Stats.HandIns} hand-in(s): two in a row "
-                             + $"went unanswered. Most likely you're out of {step.Item} — if you're not, re-pick "
-                             + "the NPC and GIVE points and check the NPC is in reach.");
-                        HumanizedMouse.MoveInstant(home.x, home.y);
-                        return;
+                        bool? result = await HandOverAsync(step, ct);
+                        if (result is null) { await Task.Delay(600, ct); continue; }   // focus blip: same step again
+
+                        if (result == true)
+                        {
+                            stepMisses[step] = 0;
+                            Stats.HandIns++;
+                            // A confirmed offer is ONE ITEM. For a quest that wants four of a
+                            // thing, four offers = one completion — stamping the history on the
+                            // first partial offer would mark quests "completed" that never were.
+                            int toward = offersToward.TryGetValue(step, out int t) ? t + 1 : 1;
+                            if (toward >= Math.Max(1, step.Qty))
+                            {
+                                QuestCompletions.Record(step.Quest);
+                                toward = 0;
+                            }
+                            offersToward[step] = toward;
+                            Log?.Invoke($"✔ {step.Item} accepted — {Stats.LastLine}");
+                            await Task.Delay(1100 + _rng.Next(500), ct);
+                            break;                            // next step
+                        }
+
+                        int misses = stepMisses.TryGetValue(step, out int m) ? m + 1 : 1;
+                        stepMisses[step] = misses;
+                        Stats.Misses++;
+                        Log?.Invoke($"✖ {step.Item}: nothing came back from the server within "
+                                  + $"{_script.ConfirmSeconds}s (miss {misses} of 2 for this item).");
+                        // Drop whatever might still be stuck to the cursor before trying again.
+                        ClickAt(step.Slot, 300);
+                        if (misses >= 2)
+                        {
+                            Finish($"Stopped after {Stats.Cycles} cycle(s) / {Stats.HandIns} hand-in(s): this item "
+                                 + $"went unanswered twice. Most likely you're out of {step.Item} — if you're not, "
+                                 + "re-pick the NPC and GIVE points and check the NPC is in reach.");
+                            HumanizedMouse.MoveInstant(home.x, home.y);
+                            return;
+                        }
+                        await Task.Delay(1500, ct);           // retry THIS step
                     }
-                    await Task.Delay(1500, ct);
-                    break;                                   // restart the cycle from the hail
                 }
 
                 if (cycleComplete)
