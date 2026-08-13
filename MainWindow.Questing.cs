@@ -41,6 +41,9 @@ public partial class MainWindow
     /// <summary>The quest whose script <see cref="_questRun"/> is executing — so an unrelated
     /// card that happens to be open doesn't dress itself in the running quest's counters.</summary>
     private string _questRunFor = "";
+    /// <summary>Scripts already offered the catalog's dialogue triggers this session — so clearing
+    /// the "say after hail" box on purpose doesn't get refilled on the next render.</summary>
+    private readonly HashSet<string> _sayBackfilled = new(StringComparer.OrdinalIgnoreCase);
 
     private static readonly (string Label, int Lo, int Hi)[] LevelBands =
     {
@@ -464,6 +467,7 @@ public partial class MainWindow
         Line("LEVEL", q.LevelText, "#7CE38B");
         Line("CLASSES", q.ClassText);
         Line("HAND IN", q.TurnIns.Count == 0 ? "" : string.Join(", ", q.TurnIns.Select(t => $"{t.Qty}× {t.Item} → {t.Npc}")), "#FFC08A");
+        Line("SAY", string.Join("  ·  ", q.SayPhrases), "#9FE0FF");
         Line("REWARD", q.RewardText == "—" ? "" : q.RewardText, "#FFB3D9");
         Line("EXPERIENCE", q.ExpText);
         Line("FACTION", string.Join(", ", q.Factions.Select(f => $"{f.Faction} {(f.Delta > 0 ? "+" : "")}{f.Delta}")));
@@ -517,6 +521,11 @@ public partial class MainWindow
         // — expanding a row to read it must not leave an empty automation behind, or the AUTO
         // column ends up claiming a dozen quests are "built" when none of them are.
         QuestScript script = QuestScriptStore.Current.Find(q.Name) ?? QuestScript.FromQuest(q);
+        // Back-fill dialogue triggers into scripts built before the catalog carried them: without
+        // "explorrre the island" said after the hail, the task never enters the journal and the
+        // very first Totem offer goes unanswered. Persisted with the next edit or Run.
+        if (script.SayPhrases.Count == 0 && q.SayPhrases.Count > 0 && _sayBackfilled.Add(q.Name))
+            script.SayPhrases = new List<string>(q.SayPhrases);
         void Persist() => QuestScriptStore.Current.Adopt(script);
         var stack = new StackPanel();
 
@@ -556,6 +565,38 @@ public partial class MainWindow
             () => { if (PickQuestPoint(script.Layout.Confirm, "the confirm button",
                         "If a confirmation appears after GIVE, click ON its button and press Enter.")) Persist(); RenderQuests(); }));
         stack.Children.Add(picks);
+
+        // ---- what she says after the hail: the dialogue triggers ----
+        var sayBar = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 2, 0, 8) };
+        sayBar.Children.Add(new TextBlock
+        {
+            Text = "say after hail", Foreground = Hex("#9FB6CC"), FontSize = 11,
+            VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 6, 0),
+            ToolTip = "The bracketed words the NPC asks you to say back — saying them does the same thing as "
+                    + "clicking the bracketed link in chat, and it is what puts the task in your journal. "
+                    + "Spoken in order after the hail, every cycle. Separate several with ;",
+        });
+        var sayBox = new TextBox
+        {
+            Text = string.Join(" ; ", script.SayPhrases), Width = 320, FontSize = 11.5,
+            VerticalAlignment = VerticalAlignment.Center,
+            ToolTip = "Pre-filled from the wiki's own transcript when it records the phrase. Blank = nothing said.",
+        };
+        sayBox.LostFocus += (_, _) =>
+        {
+            script.SayPhrases = sayBox.Text.Split(';', StringSplitOptions.RemoveEmptyEntries)
+                                           .Select(x => x.Trim()).Where(x => x.Length > 0).ToList();
+            sayBox.Text = string.Join(" ; ", script.SayPhrases);
+            Persist();
+        };
+        sayBar.Children.Add(sayBox);
+        if (script.SayPhrases.Count > 0)
+            sayBar.Children.Add(new TextBlock
+            {
+                Text = "puts the task in the journal", Foreground = Hex("#5E7C9A"), FontSize = 10,
+                VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(8, 0, 0, 0),
+            });
+        stack.Children.Add(sayBar);
 
         // ---- the hand-ins, in order, as numbered tiles + the fire bar ----
         stack.Children.Add(new TextBlock

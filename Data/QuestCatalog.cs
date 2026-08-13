@@ -56,6 +56,11 @@ public sealed class QuestInfo
     [JsonPropertyName("rewards")] public List<string> Rewards { get; set; } = new();
     [JsonPropertyName("itemsNeeded")] public List<string> ItemsNeeded { get; set; } = new();
     [JsonPropertyName("turnIns")] public List<QuestTurnIn> TurnIns { get; set; } = new();
+    /// <summary>Dialogue triggers, in order — the bracketed words the NPC asks you to say back
+    /// ("explorrre the island"). Saying one does the same thing as clicking the bracketed link in
+    /// chat: it assigns or advances the task. Without them a hand-in-only automation can't even
+    /// get the quest INTO the journal.</summary>
+    [JsonPropertyName("say")] public List<string> SayPhrases { get; set; } = new();
     [JsonPropertyName("locs")] public List<QuestLoc> Locs { get; set; } = new();
     [JsonPropertyName("factions")] public List<QuestFaction> Factions { get; set; } = new();
     [JsonPropertyName("expText")] public string ExpText { get; set; } = "";
@@ -244,6 +249,8 @@ public static class QuestCatalog
             q.ItemsNeeded ??= new List<string>();
             q.Categories ??= new List<string>();
             q.TurnIns ??= new List<QuestTurnIn>();
+            q.SayPhrases ??= new List<string>();
+            q.SayPhrases.RemoveAll(string.IsNullOrWhiteSpace);
             q.Locs ??= new List<QuestLoc>();
             q.Factions ??= new List<QuestFaction>();
             q.TurnIns.RemoveAll(t => t is null);

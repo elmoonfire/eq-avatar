@@ -297,6 +297,18 @@ def parse_page(title, text):
             seen.add(k)
             uniq_locs.append(l)
 
+    # Dialogue triggers: the bracketed words the NPC asks you to say back. The wiki records them
+    # as transcript lines — "You say, 'explorrre the island'" — and saying the phrase does the
+    # same thing as clicking the bracketed link in chat: it assigns/advances the task. Without
+    # these a hand-in-only automation can't even get the quest INTO the journal.
+    says = []
+    for m in re.finditer(r"You say, '([^']+)'", text):
+        phrase = m.group(1).strip()
+        if phrase.lower().startswith("hail"):
+            continue
+        if phrase not in says:
+            says.append(phrase)
+
     factions = [{"faction": plain(m.group(1)), "delta": int(m.group(2))} for m in FACTION.finditer(ptxt)]
     xm = EXPPCT.search(ptxt)
 
@@ -320,6 +332,7 @@ def parse_page(title, text):
         "rewards": reward_items(text, sq.get("reward", "")),
         "itemsNeeded": items_needed,
         "turnIns": turnins,
+        "say": says[:6],
         "locs": uniq_locs[:12],
         "factions": factions[:12],
         "expText": (xm.group(1) or "") if xm else "",

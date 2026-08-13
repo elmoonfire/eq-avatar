@@ -157,6 +157,7 @@ public sealed class QuestScript
         };
         foreach (QuestTurnIn t in q.TurnIns)
             script.Steps.Add(new TurnInStep { Item = t.Item, Qty = Math.Max(1, t.Qty), Quest = q.Name });
+        script.SayPhrases = new List<string>(q.SayPhrases);
         return script;
     }
 }
