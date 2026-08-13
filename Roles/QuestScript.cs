@@ -21,9 +21,30 @@ public sealed class ScreenPoint
 }
 
 /// <summary>
-/// The four gestures a hand-in is made of. EQ Legends has no addon API and the log says nothing
-/// until AFTER an item has been offered, so where to click cannot be discovered — it is picked
-/// once, by hand, off a real frame of the game, exactly like the HP bar and the target window.
+/// One item handed over: the bag slot it is picked up from, and which quest that hand-in belongs
+/// to (so the log line that confirms it can be matched by name).
+///
+/// A cycle is a LIST of these because that is what farming a quest chain actually looks like:
+/// on Kerra Isle the Desecrated Kejaar Totem finishes "Something is Wrrrong", which immediately
+/// assigns "This Means Warrr", whose Heretic Insurrection Orders go to the SAME NPC and re-open
+/// the first quest. One hand-in per script would have meant babysitting every other hand-over.
+/// </summary>
+public sealed class TurnInStep
+{
+    public string Item { get; set; } = "";
+    public int Qty { get; set; } = 1;
+    /// <summary>The quest this hand-in advances — used to match the confirming log line.</summary>
+    public string Quest { get; set; } = "";
+    /// <summary>The inventory slot this item sits in.</summary>
+    public ScreenPoint Slot { get; set; } = new();
+
+    public TurnInStep Clone() => new()
+    { Item = Item, Qty = Qty, Quest = Quest, Slot = new ScreenPoint { X = Slot.X, Y = Slot.Y } };
+}
+
+/// <summary>
+/// The parts of the gesture that are the same for every item in a cycle: the NPC you drop onto,
+/// the give window's GIVE button, and an optional confirmation.
 ///
 /// Deliberately points and not templates: an inventory slot's contents change every time an item
 /// is consumed, so matching a picture of the slot would fail on the second turn-in. The position
@@ -31,8 +52,6 @@ public sealed class ScreenPoint
 /// </summary>
 public sealed class TurnInLayout
 {
-    /// <summary>The inventory slot the hand-in item sits in.</summary>
-    public ScreenPoint ItemSlot { get; set; } = new();
     /// <summary>The NPC's body — where the held item gets dropped to open the give window.</summary>
     public ScreenPoint Npc { get; set; } = new();
     /// <summary>The give window's GIVE button.</summary>
@@ -40,39 +59,32 @@ public sealed class TurnInLayout
     /// <summary>Optional: a confirmation button, if the server puts one up.</summary>
     public ScreenPoint Confirm { get; set; } = new();
 
-    [JsonIgnore] public bool Ready => ItemSlot.Set && Npc.Set && GiveButton.Set;
+    /// <summary>Legacy (0.10.2): a single item slot, before cycles could hold several items.
+    /// Read on load and migrated into the first step; never written again.</summary>
+    public ScreenPoint? ItemSlot { get; set; }
 
-    public string Missing()
-    {
-        var gaps = new List<string>();
-        if (!ItemSlot.Set) gaps.Add("the item's inventory slot");
-        if (!Npc.Set) gaps.Add("the NPC");
-        if (!GiveButton.Set) gaps.Add("the GIVE button");
-        return gaps.Count == 0 ? "" : string.Join(", ", gaps);
-    }
+    [JsonIgnore] public bool Ready => Npc.Set && GiveButton.Set;
 }
 
 /// <summary>
-/// One quest's automation: which NPC to hand what to, where the clicks land, and how many times
-/// to go round. A script is only ever built for a quest the catalog says has a turn-in — the
-/// hand-in is the one part of a quest that is a fixed, repeatable gesture, and it is where the
-/// tedium actually is when a quest is farmed.
+/// One quest chain's automation: which NPC, which items in which order, where the clicks land,
+/// and how many times round.
 /// </summary>
 public sealed class QuestScript
 {
+    /// <summary>The quest this script was built from — the row it appears under.</summary>
     public string Quest { get; set; } = "";
     public string Npc { get; set; } = "";
-    public string Item { get; set; } = "";
-    /// <summary>How many of the item go in one hand-in (the wiki's turn-in quantity).</summary>
-    public int PerTurnIn { get; set; } = 1;
-    /// <summary>0 = keep going until the item runs out (i.e. until hand-ins stop confirming).</summary>
+    /// <summary>The hand-ins, in the order they are given. One cycle = all of them, once.</summary>
+    public List<TurnInStep> Steps { get; set; } = new();
+    /// <summary>0 = keep going until the items run out (i.e. until hand-ins stop confirming).</summary>
     public int Repeat { get; set; }
-    /// <summary>Say "Hail, NPC" before the first hand-in of each loop. Some NPCs need waking up.</summary>
+    /// <summary>Say "Hail, NPC" at the start of each cycle. Some NPCs need waking up.</summary>
     public bool HailFirst { get; set; } = true;
     /// <summary>Issue /target NPC before hailing, rather than trusting the current target.</summary>
     public bool TargetByName { get; set; } = true;
-    /// <summary>Extra phrases to say between the hail and the hand-in (quest dialogue triggers,
-    /// e.g. the bracketed words an NPC asks you to repeat back).</summary>
+    /// <summary>Extra phrases to say between the hail and the first hand-in (quest dialogue
+    /// triggers, e.g. the bracketed words an NPC asks you to repeat back).</summary>
     public List<string> SayPhrases { get; set; } = new();
     public TurnInLayout Layout { get; set; } = new();
     /// <summary>Seconds to wait for the log to confirm a hand-in before calling it a miss.</summary>
@@ -80,17 +92,67 @@ public sealed class QuestScript
     public DateTime? LastRun { get; set; }
     public int LifetimeCompleted { get; set; }
 
+    // ---- legacy 0.10.2 fields, read once on load then folded into Steps ----
+    public string? Item { get; set; }
+    public int? PerTurnIn { get; set; }
+
+    [JsonIgnore] public bool Ready => Layout.Ready && Steps.Count > 0 && Steps.All(s => s.Slot.Set);
+
+    public string Missing()
+    {
+        var gaps = new List<string>();
+        if (!Layout.Npc.Set) gaps.Add("the NPC");
+        if (!Layout.GiveButton.Set) gaps.Add("the GIVE button");
+        if (Steps.Count == 0) gaps.Add("at least one item to hand in");
+        foreach (TurnInStep s in Steps)
+            if (!s.Slot.Set) gaps.Add($"the bag slot for {(s.Item.Length > 0 ? s.Item : "an item")}");
+        return gaps.Count == 0 ? "" : string.Join(", ", gaps);
+    }
+
+    /// <summary>Fold the 0.10.2 single-item shape into the cycle shape. Idempotent, and defensive
+    /// about every field, because this runs over a file a user could have hand-edited.</summary>
+    public void Migrate()
+    {
+        Quest ??= "";
+        Npc ??= "";
+        SayPhrases ??= new List<string>();
+        Layout ??= new TurnInLayout();
+        Layout.Npc ??= new ScreenPoint();
+        Layout.GiveButton ??= new ScreenPoint();
+        Layout.Confirm ??= new ScreenPoint();
+        Steps ??= new List<TurnInStep>();
+        Steps.RemoveAll(s => s is null);
+
+        // Fold on EITHER signal. A 0.10.2 script could carry a picked slot with a blank item name
+        // (the catalog stores "" when the wiki didn't name the hand-in) and it ran perfectly well;
+        // requiring the name would silently throw that pick away.
+        bool hadLegacy = !string.IsNullOrWhiteSpace(Item) || Layout.ItemSlot?.Set == true;
+        if (Steps.Count == 0 && hadLegacy)
+        {
+            Steps.Add(new TurnInStep
+            {
+                Item = Item ?? "",
+                Qty = Math.Max(1, PerTurnIn ?? 1),
+                Quest = Quest,
+                Slot = Layout.ItemSlot ?? new ScreenPoint(),
+            });
+        }
+        Item = null;
+        PerTurnIn = null;
+        Layout.ItemSlot = null;
+        foreach (TurnInStep s in Steps) { s.Item ??= ""; s.Quest ??= ""; s.Slot ??= new ScreenPoint(); }
+    }
+
     public static QuestScript FromQuest(QuestInfo q)
     {
-        QuestTurnIn? t = q.TurnIns.FirstOrDefault();
-        return new QuestScript
+        var script = new QuestScript
         {
             Quest = q.Name,
-            Npc = string.IsNullOrWhiteSpace(t?.Npc) ? q.EndNpc : t!.Npc,
-            Item = t?.Item ?? "",
-            PerTurnIn = Math.Max(1, t?.Qty ?? 1),
-            SayPhrases = new List<string>(),
+            Npc = string.IsNullOrWhiteSpace(q.TurnIns.FirstOrDefault()?.Npc) ? q.EndNpc : q.TurnIns[0].Npc,
         };
+        foreach (QuestTurnIn t in q.TurnIns)
+            script.Steps.Add(new TurnInStep { Item = t.Item, Qty = Math.Max(1, t.Qty), Quest = q.Name });
+        return script;
     }
 }
 
@@ -111,12 +173,41 @@ public sealed class QuestScriptStore
     /// mutation and every save goes through this lock.</summary>
     private readonly object _gate = new();
 
+    /// <summary>Nulls are OMITTED, not written. The migrated-away fields (Item, PerTurnIn,
+    /// Layout.ItemSlot) are nullable so they can be READ from a 0.10.2 file — writing them back as
+    /// explicit nulls would hand 0.10.2 a `"PerTurnIn": null` for its non-nullable int, which it
+    /// throws on and then swallows, wiping every script the user had built. Rolling a release back
+    /// is a thing this project does, so it has to survive it.</summary>
+    private static readonly JsonSerializerOptions SaveOpts = new()
+    {
+        WriteIndented = true,
+        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
+    };
+
     public static QuestScriptStore Load()
     {
         try
         {
             if (File.Exists(FilePath))
-                return JsonSerializer.Deserialize<QuestScriptStore>(File.ReadAllText(FilePath)) ?? new();
+            {
+                var store = JsonSerializer.Deserialize<QuestScriptStore>(File.ReadAllText(FilePath));
+                if (store is not null)
+                {
+                    store.Scripts ??= new List<QuestScript>();
+                    store.Scripts.RemoveAll(s => s is null);
+                    // Per-script, so one unreadable entry costs that entry and not the whole file.
+                    // The outer catch returns an EMPTY store, and the next Save() would overwrite
+                    // everything the user had built with it.
+                    var bad = new List<QuestScript>();
+                    foreach (QuestScript s in store.Scripts)
+                    {
+                        try { s.Migrate(); }
+                        catch { bad.Add(s); }
+                    }
+                    foreach (QuestScript s in bad) store.Scripts.Remove(s);
+                    return store;
+                }
+            }
         }
         catch { }
         return new();
@@ -127,7 +218,7 @@ public sealed class QuestScriptStore
         try
         {
             string json;
-            lock (_gate) json = JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true });
+            lock (_gate) json = JsonSerializer.Serialize(this, SaveOpts);
             Directory.CreateDirectory(Path.GetDirectoryName(FilePath)!);
             File.WriteAllText(FilePath, json);
         }
@@ -142,6 +233,10 @@ public sealed class QuestScriptStore
 
     public int Count { get { lock (_gate) return Scripts.Count; } }
 
+    /// <summary>How many scripts could actually run right now — the number worth showing, since a
+    /// script with a pick still missing is a half-built one, not a built one.</summary>
+    public int ReadyCount { get { lock (_gate) return Scripts.Count(s => s.Ready); } }
+
     /// <summary>Adopt a script the UI has been editing in memory. Called the first time the user
     /// actually changes something — NOT when a row is merely expanded, so browsing the catalog
     /// doesn't leave a trail of empty "built" automations behind it.</summary>
@@ -153,6 +248,16 @@ public sealed class QuestScriptStore
                 && !Scripts.Any(s => QuestCatalog.Norm(s.Quest) == QuestCatalog.Norm(script.Quest)))
                 Scripts.Add(script);
         }
+        Save();
+    }
+
+    /// <summary>Run a mutation of a script under the store's lock, then persist. The runner thread
+    /// serializes the whole store when it finishes, so a Steps list edited from the UI thread at
+    /// that moment throws inside Serialize — and that throw is swallowed, so the save just silently
+    /// doesn't happen.</summary>
+    public void Edit(Action change)
+    {
+        lock (_gate) change();
         Save();
     }
 

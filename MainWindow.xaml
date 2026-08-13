@@ -1899,8 +1899,11 @@
                                     </StackPanel>
                                 </Border>
 
-                                <!-- column titles: a scene per column with its name underneath, then that column's own filter -->
-                                <Grid Margin="0,0,0,6">
+                                <!-- column titles: a scene per column with its name underneath, then that column's own filter.
+                                     The scene heights are set in code from the grid's own width (QstHeads_SizeChanged),
+                                     so widening the window makes the pictures grow with their columns instead of
+                                     leaving a row of letterboxed slivers. -->
+                                <Grid x:Name="QstColHeads" SizeChanged="QstHeads_SizeChanged" Margin="0,0,0,6">
                                     <Grid.ColumnDefinitions>
                                         <ColumnDefinition Width="1.5*"/>
                                         <ColumnDefinition Width="150"/>
@@ -1913,7 +1916,7 @@
 
                                     <StackPanel Grid.Column="0" Margin="2,0,6,0"
                                                 ToolTip="The quest's name, exactly as the wiki titles its page. Click any row to open the full walkthrough details.">
-                                        <Border CornerRadius="9" ClipToBounds="True" Height="66" Margin="0,0,0,3">
+                                        <Border x:Name="QuestHead" CornerRadius="9" ClipToBounds="True" Height="66" Margin="0,0,0,3">
                                             <Image x:Name="ArtQColQuest" Stretch="UniformToFill"/>
                                         </Border>
                                         <TextBlock Text="QUEST" FontWeight="Bold" FontSize="10.5" Foreground="#4FC3F7" HorizontalAlignment="Center"/>
@@ -1923,7 +1926,7 @@
 
                                     <StackPanel Grid.Column="1" Margin="3,0,3,0"
                                                 ToolTip="The zone the quest is picked up in. The dropdown lists every zone that actually appears in the catalog.">
-                                        <Border CornerRadius="9" ClipToBounds="True" Height="66" Margin="0,0,0,3">
+                                        <Border x:Name="ZoneHead" CornerRadius="9" ClipToBounds="True" Height="66" Margin="0,0,0,3">
                                             <Image x:Name="ArtQColZone" Stretch="UniformToFill"/>
                                         </Border>
                                         <TextBlock Text="START ZONE" FontWeight="Bold" FontSize="10.5" Foreground="#9FE0FF" HorizontalAlignment="Center"/>
@@ -1933,7 +1936,7 @@
 
                                     <StackPanel Grid.Column="2" Margin="3,0,3,0"
                                                 ToolTip="The NPC who gives the quest out.">
-                                        <Border CornerRadius="9" ClipToBounds="True" Height="66" Margin="0,0,0,3">
+                                        <Border x:Name="StartNpcHead" CornerRadius="9" ClipToBounds="True" Height="66" Margin="0,0,0,3">
                                             <Image x:Name="ArtQColStartNpc" Stretch="UniformToFill"/>
                                         </Border>
                                         <TextBlock Text="START NPC" FontWeight="Bold" FontSize="10.5" Foreground="#C792EA" HorizontalAlignment="Center"/>
@@ -1943,7 +1946,7 @@
 
                                     <StackPanel Grid.Column="3" Margin="3,0,3,0"
                                                 ToolTip="Who the quest is finished with — the hand-in NPC, and the zone they stand in.">
-                                        <Border CornerRadius="9" ClipToBounds="True" Height="66" Margin="0,0,0,3">
+                                        <Border x:Name="EndNpcHead" CornerRadius="9" ClipToBounds="True" Height="66" Margin="0,0,0,3">
                                             <Image x:Name="ArtQColEndNpc" Stretch="UniformToFill"/>
                                         </Border>
                                         <TextBlock Text="END NPC" FontWeight="Bold" FontSize="10.5" Foreground="#FFCB6B" HorizontalAlignment="Center"/>
@@ -1955,7 +1958,7 @@
 
                                     <StackPanel Grid.Column="4" Margin="3,0,3,0"
                                                 ToolTip="The minimum level the wiki lists for the quest.">
-                                        <Border CornerRadius="9" ClipToBounds="True" Height="66" Margin="0,0,0,3">
+                                        <Border x:Name="LevelHead" CornerRadius="9" ClipToBounds="True" Height="66" Margin="0,0,0,3">
                                             <Image x:Name="ArtQColLevel" Stretch="UniformToFill"/>
                                         </Border>
                                         <TextBlock Text="LEVEL" FontWeight="Bold" FontSize="10.5" Foreground="#7CE38B" HorizontalAlignment="Center"/>
@@ -1965,7 +1968,7 @@
 
                                     <StackPanel Grid.Column="5" Margin="3,0,3,0"
                                                 ToolTip="What the quest pays out — items, and the experience the wiki recorded.">
-                                        <Border CornerRadius="9" ClipToBounds="True" Height="66" Margin="0,0,0,3">
+                                        <Border x:Name="RewardHead" CornerRadius="9" ClipToBounds="True" Height="66" Margin="0,0,0,3">
                                             <Image x:Name="ArtQColReward" Stretch="UniformToFill"/>
                                         </Border>
                                         <TextBlock Text="REWARD" FontWeight="Bold" FontSize="10.5" Foreground="#FFB3D9" HorizontalAlignment="Center"/>
@@ -1975,7 +1978,7 @@
 
                                     <StackPanel Grid.Column="6" Margin="3,0,2,0"
                                                 ToolTip="Whether this quest ends in a hand-in she can repeat for you, and whether you've built that automation yet.">
-                                        <Border CornerRadius="9" ClipToBounds="True" Height="66" Margin="0,0,0,3">
+                                        <Border x:Name="AutoHead" CornerRadius="9" ClipToBounds="True" Height="66" Margin="0,0,0,3">
                                             <Image x:Name="ArtQColAuto" Stretch="UniformToFill"/>
                                         </Border>
                                         <TextBlock Text="AUTO" FontWeight="Bold" FontSize="10.5" Foreground="#FF8A65" HorizontalAlignment="Center"/>

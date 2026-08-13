@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
@@ -11,28 +12,32 @@ namespace EQAvatar.Spike.Roles;
 
 public sealed class QuestStats
 {
-    public int Completed, Attempts, Misses;
+    public int Cycles, HandIns, Attempts, Misses;
     public string State = "idle";
     public string LastLine = "";
 }
 
 /// <summary>
-/// The Quest Runner: repeats a quest's hand-in for as long as you have the item.
+/// The Quest Runner: repeats a quest chain's hand-ins for as long as you have the items.
 ///
 /// WHAT IT AUTOMATES, AND WHY ONLY THAT. A quest is mostly travel, dialogue and killing — the
-/// Grind role already does the killing, and travel is the Maps role's waypoints. What is left,
-/// and what is genuinely tedious when a quest is farmed, is the hand-in: target, hail, pick the
-/// item up, drop it on the NPC, press GIVE, and do it again. That is a fixed gesture, so that is
-/// what this drives.
+/// Grind role already does the killing, and travel is the Maps role's waypoints (and, soon, a
+/// recorded path). What is left, and what is genuinely tedious when a quest is farmed, is the
+/// hand-in: target, hail, pick the item up, drop it on the NPC, press GIVE, and do it again.
+/// That is a fixed gesture, so that is what this drives.
+///
+/// A CYCLE, NOT A HAND-IN. Hayden's Kerra Isle loop is two items to the same NPC: the Desecrated
+/// Kejaar Totem finishes "Something is Wrrrong", which immediately assigns "This Means Warrr",
+/// whose Heretic Insurrection Orders go back to the same cat and re-open the first quest. So the
+/// unit of repetition is the whole ordered list of hand-ins, hailed once at the top.
 ///
 /// HOW IT KNOWS IT WORKED. It does not trust its own clicks. EQ's log is silent about inventory
 /// and about what is on screen, but it is NOT silent about a completed hand-in: the server prints
 /// "You offered 1 &lt;item&gt; to &lt;npc&gt;", then some of "has been updated", "You have been
-/// given:", "Your faction standing with … has been adjusted", "You gain experience". Every loop
-/// waits for one of those lines before counting a turn-in. A loop that clicks perfectly and
-/// confirms nothing is a FAILED loop, and two in a row stop the run — because the overwhelmingly
-/// likely cause is that the item ran out, and the second most likely is that a picked point is
-/// wrong, and neither is improved by carrying on clicking.
+/// given:", "has been assigned the task". Every hand-in waits for one of those before counting.
+/// A step that clicks perfectly and confirms nothing is a FAILED step, and two failures in a row
+/// stop the run — because the overwhelmingly likely cause is that the item ran out, the second
+/// most likely is that a picked point is wrong, and neither is improved by carrying on clicking.
 ///
 /// Foreground-only, same as every other role: it uses <see cref="ForegroundSendInputSink"/> for
 /// keys and only moves the mouse while the game is the focused window, so tabbing away pauses it
@@ -56,13 +61,12 @@ public sealed class QuestRole
     private readonly Random _rng = new();
     private CancellationTokenSource? _cts;
 
-    /// <summary>Set by the log reader the moment the server acknowledges a hand-in. Armed only
-    /// for the window between pressing GIVE and the confirm deadline — see <see cref="_listening"/>.</summary>
+    /// <summary>Set by the log reader the moment the server acknowledges the hand-in in flight.
+    /// Armed only for the window between the GIVE click and the confirm deadline.</summary>
     private volatile bool _offered, _advanced;
-    /// <summary>True only while a hand-in is actually in flight. Without it, a line that lands
-    /// between iterations — the tail of the previous hand-in, or a kill's experience line — would
-    /// pre-arm the next iteration and it would "confirm" before it had given anything away.</summary>
     private volatile bool _listening;
+    /// <summary>The step currently in flight, so the log matcher can name-check its item.</summary>
+    private volatile TurnInStep? _inFlight;
     private int _finished;
 
     public QuestRole(QuestScript script, IInputSink sink, AppSettings settings,
@@ -108,22 +112,26 @@ public sealed class QuestRole
     // ---------------------------------------------------------------- log
 
     /// <summary>
-    /// Decide whether a log line is the server acknowledging THIS hand-in.
+    /// Decide whether a log line is the server acknowledging the hand-in currently in flight.
     ///
     /// Deliberately narrow. The obvious wider net — count a faction adjustment or an experience
     /// line — is wrong here, because both of those also print for every mob anyone in the group
-    /// kills, and a run that "confirms" off a passing kill never notices that the item ran out.
-    /// So: the definitive "You offered …" line, or a quest-state line that names this quest, or
-    /// "You have been given:" naming the reward. Nothing generic.
+    /// kills, and a run that "confirms" off a passing kill never notices that the items ran out.
+    /// So: the definitive "You offered … &lt;item&gt;" line, or a quest-state line naming the quest
+    /// this step belongs to, or "You have been given:" naming a reward. Nothing generic.
     /// </summary>
     private void OnLine(string line)
     {
         if (line.Length == 0 || !_listening) return;
-        string l = line.ToLowerInvariant();
-        string item = _script.Item.ToLowerInvariant();
-        string quest = _script.Quest.ToLowerInvariant();
+        TurnInStep? step = _inFlight;
+        if (step is null) return;
 
-        // The line that means the server took the item out of our hands.
+        string l = line.ToLowerInvariant();
+        string item = step.Item.ToLowerInvariant();
+        string quest = step.Quest.ToLowerInvariant();
+
+        // The only line that names THIS hand-in. When the item is known, nothing else counts —
+        // see the note below.
         if ((l.Contains("you offered") || l.Contains("you have given"))
             && (item.Length == 0 || l.Contains(item)))
         {
@@ -132,18 +140,16 @@ public sealed class QuestRole
             return;
         }
 
-        // Quest-state lines, but only when they name the quest we're actually running.
+        // Everything below is a FALLBACK for a hand-in whose item the wiki never named, and it is
+        // gated on that. In a two-item cycle the looser lines are actively wrong: completing step 1
+        // prints "You have been given: <reward>" and "has been assigned the task This Means Warrr"
+        // — the second of which carries step 2's quest name. Armed for step 2 they would confirm a
+        // hand-in that gave nothing away, which is the exact failure this matcher exists to catch.
+        if (item.Length > 0) return;
+
         bool questLine = l.Contains("has been updated") || l.Contains("has been assigned the task")
                       || l.Contains("you have completed") || l.Contains("your task");
-        if (questLine && quest.Length > 0 && l.Contains(quest))
-        {
-            _advanced = true;
-            Stats.LastLine = line.Trim();
-            return;
-        }
-
-        // The reward handover — specific enough on its own.
-        if (l.Contains("you have been given"))
+        if ((questLine && quest.Length > 0 && l.Contains(quest)) || l.Contains("you have been given"))
         {
             _advanced = true;
             Stats.LastLine = line.Trim();
@@ -199,46 +205,95 @@ public sealed class QuestRole
         return !ct.IsCancellationRequested;
     }
 
+    // ---------------------------------------------------------------- one hand-in
+
+    /// <summary>
+    /// Pick the item up, drop it on the NPC, press GIVE, and wait for the server to say so.
+    /// Returns null when the game lost focus mid-gesture (retry, don't count it as a miss).
+    /// </summary>
+    private async Task<bool?> HandOverAsync(TurnInStep step, CancellationToken ct)
+    {
+        Stats.State = $"handing over {step.Item}";
+        Stats.Attempts++;
+
+        if (!ClickAt(step.Slot, 260)) return null;                  // pick the item up
+
+        // From here the item is ON THE CURSOR. Every early exit has to put it back in ITS OWN slot
+        // first: the cycle restarts at step 1, and step 1's first act is to click step 1's slot —
+        // which, with step 2's item still held, drops it into the wrong bag square and every
+        // pick-up after that grabs the wrong thing.
+        bool holding = true;
+        bool? Drop(bool? result) { if (holding) { ClickAt(step.Slot, 260); holding = false; } return result; }
+
+        if (!ClickAt(_script.Layout.Npc, 620)) return Drop(null);   // drop it on the NPC → give window
+
+        // Arm the listener HERE, immediately before the button that commits the trade — not at the
+        // top of the cycle. Everything above takes seconds, and a confirmation armed that early can
+        // be satisfied by the tail of the PREVIOUS hand-in.
+        _inFlight = step;
+        _offered = _advanced = false;
+        _listening = true;
+
+        if (!ClickAt(_script.Layout.GiveButton, 500)) { _listening = false; _inFlight = null; return Drop(null); }
+        holding = false;                                            // GIVE was pressed; the item is the server's problem now
+        if (_script.Layout.Confirm.Set) ClickAt(_script.Layout.Confirm, 400);
+
+        Stats.State = "waiting for the server";
+        DateTime deadline = DateTime.UtcNow.AddSeconds(Math.Clamp(_script.ConfirmSeconds, 3, 60));
+        bool confirmed = false;
+        while (DateTime.UtcNow < deadline && !ct.IsCancellationRequested)
+        {
+            if (_offered || _advanced) { confirmed = true; break; }
+            await Task.Delay(250, ct);
+        }
+        _listening = false;
+        _inFlight = null;
+        return confirmed;
+    }
+
+
     // ---------------------------------------------------------------- the loop
 
     private async Task LoopAsync(CancellationToken ct)
     {
+        (int x, int y) home = HumanizedMouse.CursorPos();
         try
         {
-            if (!_script.Layout.Ready)
+            if (!_script.Ready)
             {
-                Finish("Can't start — still need a pick for: " + _script.Layout.Missing()
-                     + ". Use the three ◎ buttons on the quest's automation card.");
+                Finish("Can't start — still need a pick for: " + _script.Missing()
+                     + ". Use the ◎ buttons on the quest's automation card.");
                 return;
             }
             if (_watcher is null)
                 Log?.Invoke("⚠ No log file, so hand-ins cannot be confirmed — it will click and count nothing. "
                           + "Set the log folder on the Log Reader page and restart the run.");
 
-            Log?.Invoke($"Quest Runner: handing {_script.Item} to {_script.Npc}"
-                      + (_script.Repeat > 0 ? $", {_script.Repeat} time(s)." : ", until the item runs out."));
+            string items = string.Join(" → ", _script.Steps.Select(s => s.Item));
+            Log?.Invoke($"Quest Runner: {items} → {_script.Npc}"
+                      + (_script.Repeat > 0 ? $", {_script.Repeat} cycle(s)." : ", until the items run out."));
 
-            int consecutiveMisses = 0;
-            (int x, int y) home = HumanizedMouse.CursorPos();
+            // PER STEP, not one counter for the run. A cycle restarts from the top after any
+            // failure, so a shared counter is reset by step 1 succeeding on the very next pass and
+            // can never reach 2 — which is exactly the "you have run out of the second item" case
+            // the stop exists for. Keyed by the step object; the list is only edited from the UI
+            // while the run is stopped.
+            var stepMisses = new Dictionary<TurnInStep, int>();
 
             while (!ct.IsCancellationRequested)
             {
-                if (_script.Repeat > 0 && Stats.Completed >= _script.Repeat)
-                { Finish($"Done — {Stats.Completed} hand-in(s) confirmed."); return; }
+                if (_script.Repeat > 0 && Stats.Cycles >= _script.Repeat)
+                { Finish($"Done — {Stats.Cycles} cycle(s), {Stats.HandIns} hand-in(s) confirmed."); return; }
 
                 if (!await WaitFocus(ct)) break;
 
-                Stats.Attempts++;
-
-                // 1. make sure the right NPC is selected
+                // ---- top of the cycle: make sure the right NPC is selected and awake
                 if (_script.TargetByName && _script.Npc.Length > 0)
                 {
                     Stats.State = "targeting";
                     if (!Say("/target " + _script.Npc)) { await Task.Delay(500, ct); continue; }
                     await Task.Delay(700 + _rng.Next(250), ct);
                 }
-
-                // 2. wake it up, and say anything the quest dialogue needs
                 if (_script.HailFirst && _script.Npc.Length > 0)
                 {
                     Stats.State = "hailing";
@@ -252,65 +307,61 @@ public sealed class QuestRole
                     await Task.Delay(900 + _rng.Next(300), ct);
                 }
 
-                // 3. the hand-in gesture itself
-                Stats.State = "handing over";
-                if (!ClickAt(_script.Layout.ItemSlot, 260)) { await Task.Delay(500, ct); continue; }
-                if (!ClickAt(_script.Layout.Npc, 620)) { await Task.Delay(500, ct); continue; }
-
-                // Arm the listener HERE, immediately before the button that commits the trade —
-                // not at the top of the loop. Everything above takes seconds, and a confirmation
-                // armed that early can be satisfied by the tail of the previous hand-in.
-                _offered = _advanced = false;
-                _listening = true;
-
-                if (!ClickAt(_script.Layout.GiveButton, 500)) { _listening = false; await Task.Delay(500, ct); continue; }
-                if (_script.Layout.Confirm.Set) ClickAt(_script.Layout.Confirm, 400);
-
-                // 4. believe the log, not the clicks
-                Stats.State = "waiting for the server";
-                bool confirmed = false;
-                DateTime deadline = DateTime.UtcNow.AddSeconds(Math.Clamp(_script.ConfirmSeconds, 3, 60));
-                while (DateTime.UtcNow < deadline && !ct.IsCancellationRequested)
+                // ---- the hand-ins, in order
+                bool cycleComplete = true;
+                foreach (TurnInStep step in _script.Steps.ToList())
                 {
-                    if (_offered || _advanced) { confirmed = true; break; }
-                    await Task.Delay(250, ct);
-                }
-                _listening = false;
+                    if (ct.IsCancellationRequested) { cycleComplete = false; break; }
+                    if (!await WaitFocus(ct)) { cycleComplete = false; break; }
 
-                if (confirmed)
-                {
-                    consecutiveMisses = 0;
-                    Stats.Completed++;
-                    _script.LifetimeCompleted++;
-                    Log?.Invoke($"✔ hand-in {Stats.Completed} confirmed — {Stats.LastLine}");
-                    await Task.Delay(1200 + _rng.Next(600), ct);
-                }
-                else
-                {
-                    consecutiveMisses++;
-                    Stats.Misses++;
-                    Log?.Invoke($"✖ nothing came back from the server within {_script.ConfirmSeconds}s "
-                              + $"(miss {consecutiveMisses} of 2).");
-                    // Drop whatever might still be stuck to the cursor before trying again.
-                    ClickAt(_script.Layout.ItemSlot, 300);
-                    if (consecutiveMisses >= 2)
+                    bool? result = await HandOverAsync(step, ct);
+                    if (result is null) { cycleComplete = false; await Task.Delay(600, ct); break; }
+
+                    if (result == true)
                     {
-                        Finish($"Stopped after {Stats.Completed} confirmed hand-in(s): two in a row went unanswered. "
-                             + "Most likely you're out of " + _script.Item
-                             + " — if you're not, re-pick the three points and check the NPC is in reach.");
+                        stepMisses[step] = 0;
+                        Stats.HandIns++;
+                        Log?.Invoke($"✔ {step.Item} accepted — {Stats.LastLine}");
+                        await Task.Delay(1100 + _rng.Next(500), ct);
+                        continue;
+                    }
+
+                    cycleComplete = false;
+                    int misses = stepMisses.TryGetValue(step, out int m) ? m + 1 : 1;
+                    stepMisses[step] = misses;
+                    Stats.Misses++;
+                    Log?.Invoke($"✖ {step.Item}: nothing came back from the server within "
+                              + $"{_script.ConfirmSeconds}s (miss {misses} of 2 for this item).");
+                    // Drop whatever might still be stuck to the cursor before trying again.
+                    ClickAt(step.Slot, 300);
+                    if (misses >= 2)
+                    {
+                        Finish($"Stopped after {Stats.Cycles} cycle(s) / {Stats.HandIns} hand-in(s): two in a row "
+                             + $"went unanswered. Most likely you're out of {step.Item} — if you're not, re-pick "
+                             + "the NPC and GIVE points and check the NPC is in reach.");
                         HumanizedMouse.MoveInstant(home.x, home.y);
                         return;
                     }
                     await Task.Delay(1500, ct);
+                    break;                                   // restart the cycle from the hail
+                }
+
+                if (cycleComplete)
+                {
+                    Stats.Cycles++;
+                    _script.LifetimeCompleted++;
+                    Log?.Invoke($"— cycle {Stats.Cycles} complete —");
+                    await Task.Delay(900 + _rng.Next(500), ct);
                 }
             }
 
             HumanizedMouse.MoveInstant(home.x, home.y);
-            Finish($"Stopped — {Stats.Completed} hand-in(s) confirmed this run.");
+            Finish($"Stopped — {Stats.Cycles} cycle(s), {Stats.HandIns} hand-in(s) confirmed this run.");
         }
         catch (OperationCanceledException)
         {
-            Finish($"Stopped — {Stats.Completed} hand-in(s) confirmed this run.");
+            try { HumanizedMouse.MoveInstant(home.x, home.y); } catch { }
+            Finish($"Stopped — {Stats.Cycles} cycle(s), {Stats.HandIns} hand-in(s) confirmed this run.");
         }
         catch (Exception ex)
         {

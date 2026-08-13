@@ -155,13 +155,13 @@ public partial class MainWindow
              "The world's reference data: who drops what, where they live, and what the gear does.",
              new[] { NavData, navRaid, navSky, navGuide }),
 
-            ("Debug", "", "PanelSecDebug",
-             "Watch the plumbing: what the app sends, and what the game receives.",
-             new[] { NavInput, NavLogin }),
-
             ("Account", "", "PanelSecAccount",
              "Your character, your subscription, and how this app behaves.",
              new[] { NavProfile, NavLicensing, NavSettings }),
+
+            ("Debug", "", "PanelSecDebug",
+             "Watch the plumbing: what the app sends, and what the game receives.",
+             new[] { NavInput, NavLogin }),
         };
 
         HashSet<string> collapsed = LoadCollapsed();
@@ -192,9 +192,221 @@ public partial class MainWindow
         foreach (NavSection sec in _navSections)
             SetSectionExpanded(sec, !collapsed.Contains(sec.Title), animate: false);
 
+        rail.Children.Insert(0, BuildNavSearch());
+        MakeRailScrollable(rail);
+
         // Whatever page is showing at startup, open its section so the user can see where they are.
         NavSection? current = _navSections.FirstOrDefault(s => s.Buttons.Any(b => b.IsChecked == true));
         if (current is not null) OnNavItemChecked(current);
+    }
+
+    // ------------------------------------------------------------------ scrolling
+
+    /// <summary>
+    /// Put the rail inside a scroller.
+    ///
+    /// Six sections fully expanded are taller than the window on a laptop, and until now the
+    /// overflow was simply unreachable — the rail is a StackPanel in a DockPanel, which happily
+    /// lays out past the bottom edge and clips. The scrollbar itself stays hidden: this is a
+    /// navigation strip, not a document, and a permanent grey bar down the side of it would be
+    /// the loudest thing in the window. The wheel works, which is what was actually missing.
+    /// </summary>
+    private static void MakeRailScrollable(StackPanel rail)
+    {
+        if (rail.Parent is not DockPanel dock) return;
+        int at = dock.Children.IndexOf(rail);
+        if (at < 0) return;
+        dock.Children.Remove(rail);
+        var scroll = new ScrollViewer
+        {
+            Content = rail,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Hidden,
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+            CanContentScroll = false,
+            Focusable = false,
+            Margin = new Thickness(0, 0, -4, 0),   // let the hidden bar's gutter fall outside the rail
+            Padding = new Thickness(0, 0, 4, 0),
+        };
+        // A RadioButton doesn't handle the wheel, but a nested ScrollViewer elsewhere in the tree
+        // could — route it here explicitly so the rail always scrolls when the pointer is over it.
+        scroll.PreviewMouseWheel += (_, e) =>
+        {
+            scroll.ScrollToVerticalOffset(scroll.VerticalOffset - e.Delta * 0.6);
+            e.Handled = true;
+        };
+        dock.Children.Insert(Math.Min(at, dock.Children.Count), scroll);
+    }
+
+    // ------------------------------------------------------------------ search
+
+    private TextBox? _navSearchBox;
+    private Border? _navSearchShell;
+    private TextBlock? _navSearchRest;
+    private bool _navSearchOpen;
+    /// <summary>What was expanded before a filter started opening things. Restored when the filter
+    /// clears — otherwise a search silently rewrites the user's collapsed set, and the next
+    /// SaveCollapsed() (any chevron click) makes the loss permanent.</summary>
+    private Dictionary<string, bool>? _navPreFilter;
+
+    /// <summary>The label a nav RadioButton shows (its glyph TextBlock is skipped).</summary>
+    private static string NavLabel(RadioButton rb)
+    {
+        if (rb.Content is StackPanel sp)
+            foreach (TextBlock tb in sp.Children.OfType<TextBlock>())
+                if (tb.FontFamily?.Source != Mdl2.Source) return tb.Text ?? "";
+        return "";
+    }
+
+    /// <summary>
+    /// The rail's filter: a hairline pill that costs almost nothing at rest, and opens into a
+    /// glowing field when you click it.
+    ///
+    /// It is closed by default because the rail is the one part of the window you look at every
+    /// time, and a permanent search box at the top of it would be a permanent piece of furniture
+    /// for something used occasionally. Closed it is 22 px of near-invisible outline in the same
+    /// register as the ghost logo and the ghost scrollbars; open it glows cyan and filters as you
+    /// type, hiding whole sections that have nothing left in them.
+    /// </summary>
+    private UIElement BuildNavSearch()
+    {
+        var glyph = new TextBlock
+        {
+            Text = "", FontFamily = Mdl2, FontSize = 10,
+            Foreground = Hex("#4A5563"), VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(2, 0, 6, 0),
+        };
+        _navSearchRest = new TextBlock
+        {
+            Text = "search", FontSize = 10.5, Foreground = Hex("#42505F"),
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+        _navSearchBox = new TextBox
+        {
+            FontSize = 11.5, Background = Brushes.Transparent, BorderThickness = new Thickness(0),
+            Foreground = Hex("#EAF6FF"), CaretBrush = Hex("#4FC3F7"),
+            VerticalAlignment = VerticalAlignment.Center, Visibility = Visibility.Collapsed,
+            Padding = new Thickness(0), MinWidth = 100,
+        };
+
+        var content = new DockPanel { LastChildFill = true };
+        DockPanel.SetDock(glyph, Dock.Left);
+        content.Children.Add(glyph);
+        content.Children.Add(_navSearchRest);
+
+        var glow = new System.Windows.Media.Effects.DropShadowEffect
+        {
+            Color = Color.FromRgb(0x4F, 0xC3, 0xF7), ShadowDepth = 0, BlurRadius = 0, Opacity = 0.9,
+        };
+        _navSearchShell = new Border
+        {
+            Child = content,
+            Height = 22,
+            CornerRadius = new CornerRadius(11),
+            Background = Hex("#0AFFFFFF"),
+            BorderBrush = Hex("#1AFFFFFF"),
+            BorderThickness = new Thickness(1),
+            Padding = new Thickness(8, 0, 8, 0),
+            Margin = new Thickness(0, 0, 2, 2),
+            Cursor = Cursors.Hand,
+            Effect = glow,
+            ToolTip = "Filter the pages in this list",
+        };
+
+        _navSearchShell.MouseEnter += (_, _) =>
+        {
+            if (_navSearchOpen) return;
+            _navSearchShell.BorderBrush = Hex("#3A4A5A");
+            _navSearchRest!.Foreground = Hex("#7E93A8");
+        };
+        _navSearchShell.MouseLeave += (_, _) =>
+        {
+            if (_navSearchOpen) return;
+            _navSearchShell.BorderBrush = Hex("#1AFFFFFF");
+            _navSearchRest!.Foreground = Hex("#42505F");
+        };
+        _navSearchShell.MouseLeftButtonUp += (_, _) => OpenNavSearch(true);
+
+        _navSearchBox.TextChanged += (_, _) => ApplyNavFilter(_navSearchBox.Text);
+        _navSearchBox.KeyDown += (_, e) =>
+        {
+            if (e.Key == Key.Escape) { _navSearchBox.Text = ""; OpenNavSearch(false); e.Handled = true; }
+        };
+        _navSearchBox.LostFocus += (_, _) =>
+        {
+            // Only fold away when it is empty — a filter you can no longer see is a filter you
+            // will spend a minute being confused by.
+            if (_navSearchBox.Text.Trim().Length == 0) OpenNavSearch(false);
+        };
+        return _navSearchShell;
+    }
+
+    private void OpenNavSearch(bool open)
+    {
+        if (_navSearchShell is null || _navSearchBox is null || _navSearchRest is null) return;
+        if (_navSearchOpen == open) { if (open) _navSearchBox.Focus(); return; }
+        _navSearchOpen = open;
+
+        var grow = new DoubleAnimation(open ? 32 : 22, TimeSpan.FromMilliseconds(180))
+        { EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut } };
+        _navSearchShell.BeginAnimation(FrameworkElement.HeightProperty, grow);
+
+        if (_navSearchShell.Effect is System.Windows.Media.Effects.DropShadowEffect fx)
+            fx.BeginAnimation(System.Windows.Media.Effects.DropShadowEffect.BlurRadiusProperty,
+                new DoubleAnimation(open ? 14 : 0, TimeSpan.FromMilliseconds(open ? 260 : 150)));
+
+        _navSearchShell.BorderBrush = open ? Hex("#4FC3F7") : Hex("#1AFFFFFF");
+        _navSearchShell.Background = open ? Hex("#141F2C") : Hex("#0AFFFFFF");
+        _navSearchShell.Cursor = open ? Cursors.IBeam : Cursors.Hand;
+        _navSearchRest.Visibility = open ? Visibility.Collapsed : Visibility.Visible;
+        _navSearchBox.Visibility = open ? Visibility.Visible : Visibility.Collapsed;
+
+        if (open)
+        {
+            if (_navSearchShell.Child is DockPanel dp && !dp.Children.Contains(_navSearchBox))
+            { dp.Children.Remove(_navSearchRest); dp.Children.Add(_navSearchBox); }
+            _navSearchBox.Focus();
+        }
+        else
+        {
+            if (_navSearchShell.Child is DockPanel dp && !dp.Children.Contains(_navSearchRest))
+            { dp.Children.Remove(_navSearchBox); dp.Children.Add(_navSearchRest); }
+            ApplyNavFilter("");
+        }
+    }
+
+    /// <summary>Hide nav items that don't match, and any section left with nothing in it. A section
+    /// that DOES have a match is opened, so a hit can never be hiding behind a collapsed heading.</summary>
+    private void ApplyNavFilter(string query)
+    {
+        string q = (query ?? "").Trim();
+        bool filtering = q.Length > 0;
+
+        if (filtering)
+            _navPreFilter ??= _navSections.ToDictionary(s => s.Title, s => s.Expanded);
+        else if (_navPreFilter is { } was)
+        {
+            foreach (NavSection sec in _navSections)
+                if (was.TryGetValue(sec.Title, out bool open) && open != sec.Expanded)
+                    SetSectionExpanded(sec, open, animate: false);
+            _navPreFilter = null;
+        }
+
+        foreach (NavSection sec in _navSections)
+        {
+            int shown = 0;
+            foreach (RadioButton rb in sec.Buttons)
+            {
+                bool hit = !filtering
+                        || NavLabel(rb).IndexOf(q, StringComparison.OrdinalIgnoreCase) >= 0
+                        || sec.Title.IndexOf(q, StringComparison.OrdinalIgnoreCase) >= 0;
+                rb.Visibility = hit ? Visibility.Visible : Visibility.Collapsed;
+                if (hit) shown++;
+            }
+            bool keep = !filtering || shown > 0;
+            sec.Header.Visibility = keep ? Visibility.Visible : Visibility.Collapsed;
+            sec.Body.Visibility = keep ? Visibility.Visible : Visibility.Collapsed;
+            if (filtering && keep && !sec.Expanded) SetSectionExpanded(sec, true, animate: false);
+        }
     }
 
     /// <summary>

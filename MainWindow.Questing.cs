@@ -71,6 +71,23 @@ public partial class MainWindow
         RenderQuests();
     }
 
+    /// <summary>
+    /// Grow the column scenes with the window.
+    ///
+    /// They were a fixed 66 px, which is right at 1200 px wide and wrong at 2600: the columns
+    /// stretch, the pictures don't, and a row of wide letterboxed slivers is what you get. Height
+    /// tracks the grid's own width so the tiles keep something close to their painted proportions,
+    /// clamped so they can never eat the list. Done in code rather than a binding because a
+    /// converter in XAML is one more thing that resolves at runtime and can't be seen failing here.
+    /// </summary>
+    private void QstHeads_SizeChanged(object sender, SizeChangedEventArgs e)
+    {
+        if (AutoHead is null) return;                        // the LAST-declared of the seven
+        double h = Math.Clamp(e.NewSize.Width * 0.058, 66, 150);
+        foreach (Border b in new[] { QuestHead, ZoneHead, StartNpcHead, EndNpcHead, LevelHead, RewardHead, AutoHead })
+            if (b is not null) b.Height = h;
+    }
+
     private async Task LoadQuestsAsync(bool force)
     {
         if (_qstBusy) return;
@@ -216,7 +233,7 @@ public partial class MainWindow
         List<QuestInfo> shown = FilteredQuests().ToList();
         int total = QuestCatalog.Quests.Count;
         int automatable = QuestCatalog.Quests.Count(q => q.Automatable);
-        int scripted = QuestScriptStore.Current.Count;
+        int scripted = QuestScriptStore.Current.ReadyCount;
         bool capped = shown.Count > RowCap;
 
         QstCountText.Text = total == 0
@@ -266,7 +283,9 @@ public partial class MainWindow
     private FrameworkElement MakeQuestRow(QuestInfo q)
     {
         bool open = _qstOpen is not null && QuestCatalog.Norm(_qstOpen) == QuestCatalog.Norm(q.Name);
-        bool built = QuestScriptStore.Current.Find(q.Name) is not null;
+        QuestScript? existing = QuestScriptStore.Current.Find(q.Name);
+        bool built = existing?.Ready == true;
+        bool started = existing is not null;
 
         Grid grid = QuestGrid();
         grid.Margin = new Thickness(6, 0, 6, 0);
@@ -314,13 +333,15 @@ public partial class MainWindow
                 VerticalAlignment = VerticalAlignment.Center,
                 Child = new TextBlock
                 {
-                    Text = built ? "built" : "can",
+                    Text = built ? "built" : started ? "part" : "can",
                     Foreground = built ? Hex("#9FE0B8") : Hex("#FFC08A"),
                     FontSize = 10.5,
                 },
                 ToolTip = built
-                    ? "An automation for this hand-in already exists — open the row to run it."
-                    : "This quest ends in a hand-in she can repeat. Open the row to build it.",
+                    ? "Ready to run — open the row and press Run."
+                    : started
+                        ? "Started, but it still needs a pick before it can run — open the row to finish it."
+                        : "This quest ends in a hand-in she can repeat. Open the row to build it.",
             }
             : new TextBlock
             {
@@ -410,7 +431,13 @@ public partial class MainWindow
     }
 
     /// <summary>
-    /// The build-and-run card. Three picks, a couple of switches, and a start button.
+    /// The build-and-run card: an ordered list of hand-ins, the two picks they all share, a
+    /// couple of switches and a start button.
+    ///
+    /// It is a LIST because that is what farming a quest chain looks like. On Kerra Isle the
+    /// Desecrated Kejaar Totem finishes "Something is Wrrrong", which immediately assigns
+    /// "This Means Warrr", whose Heretic Insurrection Orders go back to the same cat and re-open
+    /// the first quest — so the unit worth repeating is both hand-ins, not either one.
     ///
     /// The picks exist because there is nothing to discover: the game has no addon API, the log
     /// says nothing about inventory or about what is drawn on screen, and an inventory slot's
@@ -429,7 +456,7 @@ public partial class MainWindow
 
         stack.Children.Add(new TextBlock
         {
-            Text = "REPEAT THIS HAND-IN",
+            Text = "REPEAT THIS TURN-IN CYCLE",
             FontSize = 9.5, FontWeight = FontWeights.Bold,
             Foreground = Hex("#5E7C9A"),
             Margin = new Thickness(0, 14, 0, 6),
@@ -438,51 +465,170 @@ public partial class MainWindow
         {
             TextWrapping = TextWrapping.Wrap, FontSize = 11.5, Foreground = Hex("#9FB6CC"),
             Margin = new Thickness(0, 0, 0, 8),
-            Text = $"She targets {script.Npc}, hails, gives {script.Item}, and does it again — checking the game's own log "
-                 + "after every hand-in and stopping when two in a row go unanswered (which is what running out of the item looks like). "
-                 + "Stand in front of the NPC with the items in your bags, show her the three spots below once, then press Run.",
+            Text = $"One cycle: she targets {script.Npc}, hails, then hands over each item below in order — "
+                 + "picking it out of your bag, dropping it on the NPC and pressing GIVE. She waits for the game's "
+                 + "own log to confirm every hand-in and stops when two in a row go unanswered, which is what "
+                 + "running out of an item looks like. Stand in front of the NPC with the items in your bags, show "
+                 + "her the spots below once, then press Run.",
         });
 
-        // ---- the three picks ----
-        var picks = new StackPanel { Margin = new Thickness(0, 0, 0, 8) };
+        // ---- the shared picks: the NPC and the give window ----
+        var picks = new StackPanel { Margin = new Thickness(0, 0, 0, 6) };
 
-        FrameworkElement Pick(string title, string hint, Func<ScreenPoint> get, string tip)
+        FrameworkElement Pick(string title, string hint, ScreenPoint point, string tip, double indent = 0)
         {
-            var g = new Grid { Margin = new Thickness(0, 0, 0, 4) };
-            g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(150) });
-            g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(96) });
+            var g = new Grid { Margin = new Thickness(indent, 0, 0, 4) };
+            g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(230) });
+            g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(90) });
             g.ColumnDefinitions.Add(new ColumnDefinition());
 
             var label = new TextBlock
             {
                 Text = title, FontSize = 11.5, Foreground = Hex("#C6D2DE"),
                 VerticalAlignment = VerticalAlignment.Center, ToolTip = tip,
+                TextTrimming = TextTrimming.CharacterEllipsis, Margin = new Thickness(0, 0, 8, 0),
             };
-            ScreenPoint pt = get();
             var state = new TextBlock
             {
-                Text = pt.Set ? "picked" : "not picked",
+                Text = point.Set ? "picked" : "not picked",
                 FontSize = 10.5,
-                Foreground = pt.Set ? Hex("#9FE0B8") : Hex("#FFC08A"),
+                Foreground = point.Set ? Hex("#9FE0B8") : Hex("#FFC08A"),
                 VerticalAlignment = VerticalAlignment.Center,
             };
-            var btn = new Button { Content = "◎  pick", Padding = new Thickness(10, 3, 10, 3), HorizontalAlignment = HorizontalAlignment.Left, ToolTip = tip };
-            btn.Click += (_, _) => { if (PickQuestPoint(get(), title, hint)) Persist(); RenderQuests(); };
+            var btn = new Button
+            {
+                Content = "◎  pick", Padding = new Thickness(10, 3, 10, 3),
+                HorizontalAlignment = HorizontalAlignment.Left, ToolTip = tip,
+            };
+            btn.Click += (_, _) => { if (PickQuestPoint(point, title, hint)) Persist(); RenderQuests(); };
 
             Grid.SetColumn(label, 0); Grid.SetColumn(state, 1); Grid.SetColumn(btn, 2);
             g.Children.Add(label); g.Children.Add(state); g.Children.Add(btn);
             return g;
         }
 
-        picks.Children.Add(Pick("① the item in your bag", $"Click ON the {script.Item} where it sits in your inventory, then press Enter.",
-            () => script.Layout.ItemSlot, "The inventory slot she picks the item up from. Keep that slot for this item."));
-        picks.Children.Add(Pick("② the NPC", $"Click ON {script.Npc}'s body in the game world, then press Enter.",
-            () => script.Layout.Npc, "Where she drops the held item to open the give window. Stand in the same spot each run."));
-        picks.Children.Add(Pick("③ the GIVE button", "Open a give window with the NPC, then click ON its GIVE button and press Enter.",
-            () => script.Layout.GiveButton, "The button that completes the hand-in."));
-        picks.Children.Add(Pick("④ confirm (optional)", "If a confirmation appears after GIVE, click ON its button. Otherwise skip this.",
-            () => script.Layout.Confirm, "Only needed if the server puts a second dialog up."));
+        picks.Children.Add(Pick("the NPC", $"Click ON {script.Npc}'s body in the game world, then press Enter.",
+            script.Layout.Npc, "Where she drops the held item to open the give window. Stand in the same spot each run."));
+        picks.Children.Add(Pick("the GIVE button", "Open a give window with the NPC, then click ON its GIVE button and press Enter.",
+            script.Layout.GiveButton, "The button that completes the hand-in. The give window opens in the same place every time, so one pick covers every item."));
+        picks.Children.Add(Pick("confirm (optional)", "If a confirmation appears after GIVE, click ON its button. Otherwise skip this.",
+            script.Layout.Confirm, "Only needed if the server puts a second dialog up."));
         stack.Children.Add(picks);
+
+        // ---- the hand-ins, in order ----
+        stack.Children.Add(new TextBlock
+        {
+            Text = "HAND-INS, IN ORDER",
+            FontSize = 9.5, FontWeight = FontWeights.Bold,
+            Foreground = Hex("#5E7C9A"),
+            Margin = new Thickness(0, 6, 0, 5),
+        });
+
+        var steps = new StackPanel { Margin = new Thickness(0, 0, 0, 6) };
+        for (int i = 0; i < script.Steps.Count; i++)
+        {
+            TurnInStep step = script.Steps[i];
+            var row = new StackPanel { Margin = new Thickness(0, 0, 0, 3) };
+
+            var head = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 0, 0, 2) };
+            head.Children.Add(new Border
+            {
+                CornerRadius = new CornerRadius(999),
+                Background = Hex("#14293D"), BorderBrush = Hex("#2E6E96"), BorderThickness = new Thickness(1),
+                Padding = new Thickness(7, 0, 7, 1), VerticalAlignment = VerticalAlignment.Center,
+                Child = new TextBlock { Text = (i + 1).ToString(), Foreground = Hex("#9FE0FF"), FontSize = 10.5 },
+            });
+            head.Children.Add(new TextBlock
+            {
+                Text = step.Qty > 1 ? $"{step.Qty}× {step.Item}" : step.Item,
+                Foreground = Hex("#FFC08A"), FontSize = 12, FontWeight = FontWeights.SemiBold,
+                VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(7, 0, 8, 0),
+            });
+            if (!string.Equals(step.Quest, script.Quest, StringComparison.OrdinalIgnoreCase) && step.Quest.Length > 0)
+                head.Children.Add(new TextBlock
+                {
+                    Text = "for " + step.Quest, Foreground = Hex("#7E93A8"), FontSize = 10,
+                    VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 8, 0),
+                });
+
+            if (script.Steps.Count > 1)
+            {
+                var del = new Border
+                {
+                    CornerRadius = new CornerRadius(999), Width = 20, Height = 18,
+                    Background = Brushes.Transparent, BorderBrush = Hex("#4A3040"), BorderThickness = new Thickness(1),
+                    Cursor = Cursors.Hand, VerticalAlignment = VerticalAlignment.Center,
+                    ToolTip = "Remove this hand-in from the cycle.",
+                    Child = new TextBlock
+                    {
+                        Text = "✕", Foreground = Hex("#C98B9E"), FontSize = 10,
+                        HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center,
+                    },
+                };
+                TurnInStep captured = step;
+                del.MouseLeftButtonUp += (_, _) =>
+            {
+                QuestScriptStore.Current.Edit(() => script.Steps.Remove(captured));
+                Persist();
+                RenderQuests();
+            };
+                head.Children.Add(del);
+            }
+            row.Children.Add(head);
+
+            row.Children.Add(Pick($"↳ where {step.Item} sits in your bags",
+                $"Click ON the {step.Item} where it sits in your inventory, then press Enter.",
+                step.Slot,
+                "The bag slot she picks this item up from. Keep that slot for this item — she clicks the position, not the picture.",
+                indent: 16));
+            steps.Children.Add(row);
+        }
+        stack.Children.Add(steps);
+
+        // ---- add a hand-in from the quest this one leads into ----
+        var addBar = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 0, 0, 10) };
+        var addBox = new ComboBox
+        {
+            Width = 320, FontSize = 11, VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(0, 0, 8, 0),
+            ToolTip = "Every other hand-in in the catalog that goes to this same NPC — which is exactly what a "
+                    + "follow-on quest looks like.",
+        };
+        var candidates = new List<(QuestInfo Quest, QuestTurnIn TurnIn)>();
+        string npcKey = QuestCatalog.Norm(script.Npc);
+        // Only when we actually know who the NPC is: Norm("") == Norm("") would otherwise match
+        // every blank-NPC hand-in in the catalog and offer all 884 quests as plausible follow-ons.
+        if (npcKey.Length > 0)
+            foreach (QuestInfo other in QuestCatalog.Quests)
+                foreach (QuestTurnIn t in other.TurnIns)
+                    if (QuestCatalog.Norm(t.Npc) == npcKey
+                        && !script.Steps.Any(s => QuestCatalog.Norm(s.Item) == QuestCatalog.Norm(t.Item)))
+                        candidates.Add((other, t));
+        foreach ((QuestInfo other, QuestTurnIn t) in candidates)
+            addBox.Items.Add($"{t.Item}  ·  {other.Name}");
+        addBox.IsEnabled = candidates.Count > 0;
+        if (candidates.Count == 0) addBox.ToolTip = "No other hand-in in the catalog goes to this NPC.";
+
+        var addBtn = new Button
+        {
+            Content = "＋ add to the cycle", Padding = new Thickness(12, 3, 12, 3),
+            VerticalAlignment = VerticalAlignment.Center, IsEnabled = candidates.Count > 0,
+            ToolTip = "Append that hand-in after the ones above. Use this when finishing one quest immediately "
+                    + "opens the next — the pair is what you actually repeat.",
+        };
+        addBtn.Click += (_, _) =>
+        {
+            int i = addBox.SelectedIndex;
+            if (i < 0 || i >= candidates.Count) { QstStatus.Text = "Pick a hand-in from the list first."; return; }
+            (QuestInfo other, QuestTurnIn t) = candidates[i];
+            QuestScriptStore.Current.Edit(() =>
+                script.Steps.Add(new TurnInStep { Item = t.Item, Qty = Math.Max(1, t.Qty), Quest = other.Name }));
+            Persist();
+            RenderQuests();
+        };
+        addBar.Children.Add(addBox);
+        addBar.Children.Add(addBtn);
+        stack.Children.Add(addBar);
 
         // ---- the switches ----
         var opts = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 0, 0, 8) };
@@ -490,7 +636,7 @@ public partial class MainWindow
         {
             Content = "hail first", IsChecked = script.HailFirst, Foreground = Hex("#9FB6CC"), FontSize = 11,
             Margin = new Thickness(0, 0, 14, 0), VerticalAlignment = VerticalAlignment.Center,
-            ToolTip = "Say 'Hail, <NPC>' before each hand-in. Some quest NPCs won't take an item until hailed.",
+            ToolTip = "Say 'Hail, <NPC>' at the top of each cycle. Some quest NPCs won't take an item until hailed.",
         };
         hail.Click += (_, _) => { script.HailFirst = hail.IsChecked == true; Persist(); };
 
@@ -508,7 +654,7 @@ public partial class MainWindow
         var repeat = new TextBox
         {
             Text = script.Repeat.ToString(), Width = 56, FontSize = 11.5, VerticalAlignment = VerticalAlignment.Center,
-            ToolTip = "How many hand-ins to do. 0 = keep going until the item runs out.",
+            ToolTip = "How many full cycles to run. 0 = keep going until the items run out.",
         };
         repeat.LostFocus += (_, _) =>
         {
@@ -519,7 +665,7 @@ public partial class MainWindow
         opts.Children.Add(repeat);
         opts.Children.Add(new TextBlock
         {
-            Text = "0 = until it runs out", Foreground = Hex("#5E7C9A"), FontSize = 10,
+            Text = "cycles · 0 = until they run out", Foreground = Hex("#5E7C9A"), FontSize = 10,
             VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(8, 0, 0, 0),
         });
         stack.Children.Add(opts);
@@ -529,13 +675,13 @@ public partial class MainWindow
         var bar = new StackPanel { Orientation = Orientation.Horizontal };
         var run = new Button
         {
-            Content = running ? "■  Stop" : "▶  Run the hand-in",
+            Content = running ? "■  Stop" : "▶  Run the cycle",
             Padding = new Thickness(14, 5, 14, 5),
             FontWeight = FontWeights.SemiBold,
             Margin = new Thickness(0, 0, 10, 0),
             ToolTip = running
                 ? "Stop the run. F12 and tabbing away from the game also stop it."
-                : "Start repeating this hand-in. The game must be the focused window; tab away and she pauses.",
+                : "Start repeating this cycle. The game must be the focused window; tab away and she pauses.",
         };
         run.Click += (_, _) => { if (_questRun is { Running: true }) _questRun.Stop(); else { Persist(); StartQuestRun(script); } };
         bar.Children.Add(run);
@@ -544,8 +690,8 @@ public partial class MainWindow
         {
             Foreground = Hex("#9FE0B8"), FontSize = 11, VerticalAlignment = VerticalAlignment.Center,
             Text = running
-                ? $"{_questRun!.Stats.State} · {_questRun.Stats.Completed} confirmed"
-                : script.LifetimeCompleted > 0 ? $"{script.LifetimeCompleted} confirmed all time" : "",
+                ? $"{_questRun!.Stats.State} · {_questRun.Stats.Cycles} cycle(s), {_questRun.Stats.HandIns} hand-in(s)"
+                : script.LifetimeCompleted > 0 ? $"{script.LifetimeCompleted} cycle(s) all time" : "",
         };
         bar.Children.Add(stats);
         stack.Children.Add(bar);
@@ -602,9 +748,9 @@ public partial class MainWindow
             QstStatus.Foreground = Hex("#FFCB6B");
             return;
         }
-        if (!script.Layout.Ready)
+        if (!script.Ready)
         {
-            QstStatus.Text = "Still need a pick for: " + script.Layout.Missing() + ".";
+            QstStatus.Text = "Still need a pick for: " + script.Missing() + ".";
             QstStatus.Foreground = Hex("#FFCB6B");
             return;
         }
