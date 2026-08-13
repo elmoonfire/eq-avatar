@@ -707,44 +707,104 @@ public partial class MainWindow
 
         // ---- add a hand-in from the quest this one leads into ----
         var addBar = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 0, 0, 10) };
+        // EDITABLE on purpose. The catalog is scraped from a wiki written by people, and when it
+        // has a gap the list is empty and the cycle simply cannot be built — which is exactly what
+        // happened to the Kerra pair: 'This Means Warrr' kept its hand-in under a sub-heading the
+        // scraper stopped short of, so the one item that completes the loop was un-addable. A
+        // suggestion list must never be the only way in; type the item's name and it goes in.
         var addBox = new ComboBox
         {
             Width = 320, FontSize = 11, VerticalAlignment = VerticalAlignment.Center,
-            Margin = new Thickness(0, 0, 8, 0),
-            ToolTip = "Every other hand-in in the catalog that goes to this same NPC — which is exactly what a "
-                    + "follow-on quest looks like.",
+            Margin = new Thickness(0, 0, 8, 0), IsEditable = true,
+            ToolTip = "Other hand-ins the catalog knows about for this NPC — or just type the item's name "
+                    + "exactly as it appears in game and press ＋.",
         };
-        var candidates = new List<(QuestInfo Quest, QuestTurnIn TurnIn)>();
+        var candidates = new List<(string Item, int Qty, string Quest)>();
         string npcKey = QuestCatalog.Norm(script.Npc);
         // Only when we actually know who the NPC is: Norm("") == Norm("") would otherwise match
         // every blank-NPC hand-in in the catalog and offer all 884 quests as plausible follow-ons.
         if (npcKey.Length > 0)
             foreach (QuestInfo other in QuestCatalog.Quests)
+            {
+                bool sameNpc = QuestCatalog.Norm(other.StartNpc) == npcKey || QuestCatalog.Norm(other.EndNpc) == npcKey;
                 foreach (QuestTurnIn t in other.TurnIns)
-                    if (QuestCatalog.Norm(t.Npc) == npcKey
-                        && !script.Steps.Any(s => QuestCatalog.Norm(s.Item) == QuestCatalog.Norm(t.Item)))
-                        candidates.Add((other, t));
-        foreach ((QuestInfo other, QuestTurnIn t) in candidates)
-            addBox.Items.Add($"{t.Item}  ·  {other.Name}");
-        addBox.IsEnabled = candidates.Count > 0;
-        if (candidates.Count == 0) addBox.ToolTip = "No other hand-in in the catalog goes to this NPC.";
+                    if (QuestCatalog.Norm(t.Npc) == npcKey)
+                        candidates.Add((t.Item, Math.Max(1, t.Qty), other.Name));
+                // Quests whose turn-in line the wiki never spelled out still list what they need.
+                // Offering those keeps a thin catalog entry from blocking the build.
+                if (sameNpc)
+                    foreach (string need in other.ItemsNeeded)
+                        candidates.Add((need, 1, other.Name));
+            }
+        // Drop anything already in the cycle, and any duplicate suggestion.
+        var seenCand = new HashSet<string>();
+        candidates = candidates
+            .Where(c => c.Item.Trim().Length > 1
+                     && !script.Steps.Any(s => QuestCatalog.Norm(s.Item) == QuestCatalog.Norm(c.Item))
+                     && seenCand.Add(QuestCatalog.Norm(c.Item) + "|" + QuestCatalog.Norm(c.Quest)))
+            .ToList();
+        foreach ((string item, int _q, string quest) in candidates)
+            addBox.Items.Add($"{item}  ·  {quest}");
 
         var addBtn = new Button
         {
             Content = "＋ add to the cycle", Padding = new Thickness(12, 3, 12, 3),
-            VerticalAlignment = VerticalAlignment.Center, IsEnabled = candidates.Count > 0,
-            ToolTip = "Append that hand-in after the ones above. Use this when finishing one quest immediately "
-                    + "opens the next — the pair is what you actually repeat.",
+            VerticalAlignment = VerticalAlignment.Center,
+            ToolTip = "Append a hand-in after the ones above. Use this when finishing one quest immediately "
+                    + "opens the next — the pair is what you actually repeat. Picked from the list or typed "
+                    + "by hand, both work.",
         };
         addBtn.Click += (_, _) =>
         {
+            // The typed text wins over a stale selection: an editable ComboBox can keep an old
+            // SelectedIndex while the box shows something the user has since typed over.
             int i = addBox.SelectedIndex;
-            if (i < 0 || i >= candidates.Count) { QstStatus.Text = "Pick a hand-in from the list first."; return; }
-            (QuestInfo other, QuestTurnIn t) = candidates[i];
+            string shown = (addBox.Text ?? "").Trim();
+            bool fromList = i >= 0 && i < candidates.Count
+                         && string.Equals(shown, addBox.Items[i] as string, StringComparison.OrdinalIgnoreCase);
+            string item; int qty; string quest; bool known = true;
+            if (fromList)
+                (item, qty, quest) = candidates[i];
+            else
+            {
+                // Typed by hand. Strip the "item · quest" shape in case they edited a suggestion,
+                // and credit it to the quest the wiki lists that item under when it knows one, so
+                // the COMPLETED column still counts the right row.
+                int dot = shown.IndexOf('·');
+                item = (dot > 0 ? shown[..dot] : shown).Trim();
+                if (item.Length < 2)
+                {
+                    QstStatus.Text = "Pick a hand-in from the list, or type the item's name.";
+                    QstStatus.Foreground = Hex("#FFCB6B");
+                    return;
+                }
+                qty = 1;
+                string? match = QuestCatalog.Quests.FirstOrDefault(q =>
+                            q.TurnIns.Any(t => QuestCatalog.Norm(t.Item) == QuestCatalog.Norm(item))
+                         || q.ItemsNeeded.Any(n => QuestCatalog.Norm(n) == QuestCatalog.Norm(item)))?.Name;
+                known = match is not null;
+                quest = match ?? script.Quest;
+            }
+            if (script.Steps.Any(s => QuestCatalog.Norm(s.Item) == QuestCatalog.Norm(item)))
+            {
+                QstStatus.Text = $"{item} is already in the cycle.";
+                QstStatus.Foreground = Hex("#FFCB6B");
+                return;
+            }
+
             QuestScriptStore.Current.Edit(() =>
-                script.Steps.Add(new TurnInStep { Item = t.Item, Qty = Math.Max(1, t.Qty), Quest = other.Name }));
+                script.Steps.Add(new TurnInStep { Item = item, Qty = Math.Max(1, qty), Quest = quest }));
             Persist();
             RenderQuests();
+            // The name is not how she FINDS the item (that's the icon) — it is how she RECOGNISES
+            // the server's "You offered 1 <item> to …" line. A name the catalog has never seen is
+            // usually a typo or a wiki page title, and the cost is silent: items get handed over
+            // and none of them count, which reads in the log as "you've run out".
+            QstStatus.Text = known
+                ? $"Added {item} — now pick its slot: drag a TIGHT box around one in your bag."
+                : $"Added {item} — heads up, the catalog doesn't know that name. It has to match what the game "
+                  + "prints in \"You offered 1 … \" EXACTLY, or the hand-ins won't be counted. Now pick its slot.";
+            QstStatus.Foreground = Hex(known ? "#9FE0B8" : "#FFCB6B");
         };
         addBar.Children.Add(addBox);
         addBar.Children.Add(addBtn);
@@ -800,6 +860,40 @@ public partial class MainWindow
         opts.Children.Add(hail);
         opts.Children.Add(hailKey);
         opts.Children.Add(targ);
+
+        opts.Children.Add(new TextBlock
+        {
+            Text = "open bags", Foreground = Hex("#9FB6CC"), FontSize = 11,
+            VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 5, 0),
+            ToolTip = "The key you've bound in game to OPEN ALL BAGS (chords welcome: alt+b). She presses it "
+                    + "when the run starts, and again if an item scan comes up empty — a shut bag and an empty "
+                    + "bag look the same to her otherwise. Bind the OPEN command, not the show/hide toggle. "
+                    + "Leave blank to never press anything.",
+        });
+        var bagsKey = new TextBox
+        {
+            Text = script.OpenBagsKey ?? "", Width = 62, FontSize = 11.5,
+            VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 14, 0),
+            ToolTip = "e.g. alt+b — blank means never pressed.",
+        };
+        bagsKey.LostFocus += (_, _) =>
+        {
+            string want = bagsKey.Text.Trim();
+            if (want.Length > 0 && InputKey.ParseChord(want).Key.IsNone)
+            {
+                QstStatus.Text = $"\"{want}\" isn't a key I can press — try something like alt+b, ctrl+i or b.";
+                QstStatus.Foreground = Hex("#FFCB6B");
+                bagsKey.Text = script.OpenBagsKey ?? "";
+                return;
+            }
+            script.OpenBagsKey = want;
+            Persist();
+            QstStatus.Text = want.Length > 0
+                ? $"Open-bags key set to {want} — she'll press it at the start of a run and whenever a scan comes up empty."
+                : "Open-bags key cleared — she won't press anything.";
+            QstStatus.Foreground = Hex("#9FE0B8");
+        };
+        opts.Children.Add(bagsKey);
         opts.Children.Add(new TextBlock { Text = "repeat", Foreground = Hex("#9FB6CC"), FontSize = 11, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 6, 0) });
         var repeat = new TextBox
         {

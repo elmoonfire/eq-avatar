@@ -63,6 +63,52 @@ public readonly struct InputKey
         return FromVk(char.ToUpperInvariant(s[0]));   // single letter/digit → VK
     }
 
+    /// <summary>
+    /// Split a chord like "alt+b", "ctrl+shift+i" or plain "h" into its modifier virtual-keys and
+    /// the key they modify. Modifiers are returned in press order and must be released in reverse.
+    ///
+    /// Kept separate from <see cref="Parse"/> on purpose: a chord is not an InputKey, and folding
+    /// modifiers into one would quietly change every existing binding's meaning. The game's own
+    /// keybind UI writes chords this way, so a user can copy what they see there.
+    /// </summary>
+    public static (ushort[] Mods, InputKey Key) ParseChord(string? s)
+    {
+        s = (s ?? "").Trim();
+        if (s.Length == 0) return (Array.Empty<ushort>(), None);
+        string[] parts = s.Split('+', StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length == 0) return (Array.Empty<ushort>(), None);        // "+" splits to nothing
+        if (parts.Length == 1) return (Array.Empty<ushort>(), StrictKey(parts[0]));
+
+        var mods = new System.Collections.Generic.List<ushort>();
+        for (int i = 0; i < parts.Length - 1; i++)
+            switch (parts[i].Trim().ToLowerInvariant())
+            {
+                case "ctrl": case "control": mods.Add(0x11); break;
+                case "alt": mods.Add(0x12); break;
+                case "shift": mods.Add(0x10); break;
+                default: return (Array.Empty<ushort>(), None);   // not a modifier — refuse rather than guess
+            }
+        InputKey key = StrictKey(parts[^1]);
+        return key.IsNone || key.IsMouse ? (Array.Empty<ushort>(), None) : (mods.ToArray(), key);
+    }
+
+    /// <summary>
+    /// <see cref="Parse"/>, minus its last-resort "use the first character" rule.
+    ///
+    /// That rule is right for a keymap read from the game's own config, where the token is known
+    /// good. It is dangerous for a box a human types into: "alt b" (space instead of plus) parses
+    /// to A, and the bot then taps A at a focused EverQuest — auto-attack — while the log claims
+    /// it pressed alt+b. A chord we don't understand must be refused, out loud, not approximated.
+    /// </summary>
+    private static InputKey StrictKey(string token)
+    {
+        token = token.Trim();
+        InputKey k = Parse(token);
+        if (k.IsNone || k.IsMouse) return k;
+        // Multi-character token that came back as a single character = the fallback fired.
+        return token.Length > 1 && k.Display.Length == 1 ? None : k;
+    }
+
     /// <summary>Human-readable label for logs/UI ("Tab", "Mouse5", "4", "F1").</summary>
     public string Display => Kind switch
     {

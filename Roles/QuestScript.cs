@@ -100,6 +100,12 @@ public sealed class QuestScript
     public string HailKey { get; set; } = "h";
     /// <summary>Issue /target NPC before hailing, rather than trusting the current target.</summary>
     public bool TargetByName { get; set; } = true;
+    /// <summary>The key (chord allowed, e.g. "alt+b") bound in game to OPEN ALL BAGS. Pressed once
+    /// at the start of a run and again whenever an item scan finds nothing, because "the bags are
+    /// shut" and "I'm out of totems" look identical to a screen reader — and only one of them is
+    /// worth stopping for. Blank = never pressed, which is the safe default for anyone who hasn't
+    /// bound the command: a TOGGLE pressed on a hunch would close the bags it meant to open.</summary>
+    public string OpenBagsKey { get; set; } = "";
     /// <summary>Extra phrases to say between the hail and the first hand-in (quest dialogue
     /// triggers, e.g. the bracketed words an NPC asks you to repeat back).</summary>
     public List<string> SayPhrases { get; set; } = new();
@@ -178,6 +184,7 @@ public sealed class QuestScript
         Layout.ItemSlot = null;
         foreach (TurnInStep s in Steps) { s.Item ??= ""; s.Quest ??= ""; s.Slot ??= new ScreenPoint(); }
         if (string.IsNullOrWhiteSpace(HailKey)) HailKey = "h";
+        OpenBagsKey = (OpenBagsKey ?? "").Trim();       // null from an older file, or a hand edit
         if (BagCols <= 0) BagCols = 2;
         if (BagRows <= 0) BagRows = 5;
     }

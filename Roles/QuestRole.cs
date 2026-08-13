@@ -210,6 +210,43 @@ public sealed class QuestRole
         return true;
     }
 
+    /// <summary>
+    /// Press the OPEN ALL BAGS key, if one is configured. Chords ("alt+b") are held around the
+    /// tap and released in reverse — and released even if the send fails, because a stuck ALT is
+    /// worse than a closed bag.
+    ///
+    /// Deliberately the game's OPEN command rather than its show/hide TOGGLE: open is idempotent,
+    /// so pressing it when the bags are already open costs nothing, while a toggle pressed on a
+    /// guess is a coin flip that closes them half the time.
+    /// </summary>
+    private bool OpenBags(string why)
+    {
+        string spec = (_script.OpenBagsKey ?? "").Trim();
+        if (spec.Length == 0) return false;
+        (ushort[] mods, InputKey key) = InputKey.ParseChord(spec);
+        if (key.IsNone) { Log?.Invoke($"⚠ \"{spec}\" isn't a key I can press — use something like alt+b."); return false; }
+        if (!_sink.Ready)
+        {
+            // Never silent. A skipped open-bags press means the next empty scan gets blamed on
+            // running out of items, and the log has to show that the check didn't actually run.
+            Log?.Invoke("· couldn't press the open-bags key — EverQuest isn't the focused window.");
+            return false;
+        }
+
+        // NOTHING between the press and the release except the keystroke itself. Log?.Invoke
+        // marshals to the UI thread and rebuilds the quest list; doing that with ALT physically
+        // down would hold ALT into the game for as long as the redraw takes.
+        bool sent;
+        foreach (ushort m in mods) InputProbe.KeyDown(m);
+        try { sent = _sink.Send(key, 45); }
+        finally { for (int i = mods.Length - 1; i >= 0; i--) InputProbe.KeyUp(mods[i]); }
+
+        Log?.Invoke(sent
+            ? $"· pressed {spec} to open the bags ({why})"
+            : $"· the open-bags key ({spec}) didn't send — focus was lost mid-press.");
+        return sent;
+    }
+
     private async Task<bool> WaitFocus(CancellationToken ct)
     {
         bool warned = false;
@@ -244,10 +281,25 @@ public sealed class QuestRole
             // discriminate (the grid compare once called Indicolite Gauntlets a totem). Steps
             // picked before icon sizes were stored fall back to the old grid scan.
             bool sliding = step.HasIconSize;
-            QuestFind.IconHit? hit = sliding
+            QuestFind.IconHit? Scan() => sliding
                 ? QuestFind.FindIconSliding(_hwnd(), _script, step)
                 : QuestFind.FindIconCell(_hwnd(), _script, step);
             double accept = sliding ? QuestFind.SlidingAcceptDistance : QuestFind.IconAcceptDistance;
+            QuestFind.IconHit? hit = Scan();
+
+            // A closed bag and an empty bag look identical from here. Before believing the empty
+            // one — which stops the run — press OPEN ALL BAGS and look again. Costs one keystroke
+            // on the last cycle; saves the whole night when a bag got shut at cycle 40.
+            if ((hit is null || hit.Dist > accept) && (_script.OpenBagsKey ?? "").Trim().Length > 0)
+            {
+                if (OpenBags($"nothing matched {step.Item} — checking the bags are open"))
+                {
+                    Thread.Sleep(450);
+                    QuestFind.IconHit? again = Scan();
+                    if (again is not null && (hit is null || again.Dist < hit.Dist)) hit = again;
+                }
+            }
+
             if (hit is null)
             {
                 Log?.Invoke($"⚠ couldn't scan the bag area for {step.Item} — using the picked slot.");
@@ -362,6 +414,11 @@ public sealed class QuestRole
                     Log?.Invoke("· " + string.Join(", ", oldSig) + " still use(s) the old grid scan — "
                               + "re-pick the slot once and the precise sliding search takes over.");
             }
+
+            // Open the bags before the first scan rather than hoping they're up. Nothing in the
+            // log or on screen says whether they are, so this is the one place a keystroke buys
+            // certainty — and if no key is bound, the run simply proceeds as before.
+            if (await WaitFocus(ct)) OpenBags("starting the run");
 
             // PER STEP, not one counter for the run. A cycle restarts from the top after any
             // failure, so a shared counter is reset by step 1 succeeding on the very next pass and

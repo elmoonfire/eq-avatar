@@ -128,13 +128,32 @@ def infobox(text):
     return out
 
 
+HEADING = re.compile(r"\n(=+)\s*([^=\n]+?)\s*=+[ \t]*(?=\n)")
+
+
 def section(text, *names):
-    """Body of the first == Heading == whose name matches (case/plural insensitive)."""
+    """Body of the first == Heading == whose name matches (case/plural insensitive),
+    INCLUDING everything under its deeper sub-headings.
+
+    Stopping at the next heading of ANY depth was a silent data bug with real cost: on
+    'This Means Warrr' the walkthrough's only turn-in — "You offered 1 Heretic
+    Insurrection Orders to The Kerran Sha`rr" — lives under '=== Quest Stage 2: ===',
+    so the section ended two lines in and the quest reached the app with an EMPTY
+    turn-in list. The Questing card then had nothing to offer as the follow-on hand-in,
+    and the cycle could not be completed at all. A section ends at the next heading of
+    the SAME OR SHALLOWER level; its own subsections are part of it.
+    """
     want = {n.lower().rstrip("s") for n in names}
-    parts = re.split(r"\n=+\s*([^=\n]+?)\s*=+\s*\n", "\n" + text)
-    for i in range(1, len(parts) - 1, 2):
-        if parts[i].strip().lower().rstrip(":").rstrip("s") in want:
-            return parts[i + 1]
+    t = "\n" + text
+    marks = [(m.start(), m.end(), len(m.group(1)), m.group(2)) for m in HEADING.finditer(t)]
+    for i, (_s, e, lvl, name) in enumerate(marks):
+        if name.strip().lower().rstrip(":").rstrip("s") in want:
+            stop = len(t)
+            for (s2, _e2, lvl2, _n2) in marks[i + 1:]:
+                if lvl2 <= lvl:
+                    stop = s2
+                    break
+            return t[e:stop]
     return ""
 
 
@@ -142,9 +161,16 @@ COORD = re.compile(r"(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.
 # "The Kerran Sha`rr is located at 902.55, 347.27, -6.81"  /  "may be located at -332, -836, -109"
 LOCATED = re.compile(r"([A-Za-z`'’\- ]{3,60}?)\s+(?:is|may be|can be|are)?\s*(?:located|found)\s*(?:at|around|near)\s*" + COORD.pattern, re.I)
 SPAWNS = re.compile(r"([A-Za-z`'’\- ]{3,60}?)\s+(?:has multiple spawns|spawns?)\s*(?:around|at|near)\s*" + COORD.pattern, re.I)
+# The server's own log line, quoted verbatim on nearly every quest page:
 # "* You offered 1 Desecrated Kejaar Totem to The Kerran Sha`rr."
-OFFERED = re.compile(r"You (?:offered|gave|hand(?:ed)?)\s+(\d+)?\s*([^\n]{2,80}?)\s+to\s+([^\n.]{2,60})", re.I)
-GAVE_TO = re.compile(r"(?:give|hand|turn in|deliver|bring)\s+(?:the\s+|him\s+|her\s+|them\s+|some\s+)?([^\n.]{2,70}?)\s+to\s+([A-Z][^\n.,]{2,50})", re.I)
+# ONLY "offered" — that is the exact wording EQ prints. Letting "gave"/"hand" in here swept up
+# prose ("...you hand in the Marching Orders to Gloradin") and stored "in the Marching Orders"
+# as an item. Prose goes through the link-anchored fallback below instead, where it must name
+# things the wiki actually has pages for.
+OFFERED = re.compile(r"You offered\s+(\d+)?\s*([^\n]{2,80}?)\s+to\s+([^\n.]{2,60})", re.I)
+# Prose fallback, used only when no log quote was found. Deliberately loose here and made
+# strict at the call site, where both halves must name pages this wiki actually links to.
+GAVE_TO = re.compile(r"(?:give|gave|hand(?:ed)?|turn in|deliver|bring)\s+(?:the\s+|him\s+|her\s+|them\s+|some\s+)?([^\n.]{2,70}?)\s+to\s+([^\n.,]{2,50})", re.I)
 FACTION = re.compile(r"faction standing with\s+([^\n]{2,50}?)\s+has been adjusted by\s+(-?\d+)", re.I)
 EXPPCT = re.compile(r"You gain experience!?\s*\(?([\d.]+%)?\)?\s*(?:@\s*level\s*(\d+))?", re.I)
 ERA = re.compile(r"\{\{\s*([A-Za-z' ]+?)\s*Era\s*\}\}")
@@ -241,14 +267,44 @@ def parse_page(title, text):
                             "npc": start_npc})
     for m in OFFERED.finditer(plain(walk)):
         qty, item, npc = m.group(1) or "1", m.group(2).strip(" .,'\"*"), clean_npc(m.group(3))
-        if len(item) > 1 and len(npc) > 1:
+        # The log quote is authoritative, but the sentence around it is not: keep hits whose
+        # item reads like an item (a proper noun, as every EQ item is).
+        if len(item) > 1 and len(npc) > 1 and re.search(r"[A-Z]", item):
             turnins.append({"item": item, "qty": int(qty), "npc": npc})
     if not turnins:
+        # Prose fallback, anchored to the wiki's own links. "give X to Y" in running text is a
+        # sentence, not data: matched loosely it produced turn-ins like "him the SMR he will give
+        # you the Mecha" to "obtain the Ink of the Dark". So a match only counts when the item and
+        # the NPC are things this page LINKS TO — every real item and NPC on eqlwiki is a page —
+        # and the match is trimmed back to the linked name.
+        linked = {}
+        for tgt, disp in links(walk):
+            if tgt.startswith(("File:", "Category:")):
+                continue
+            for nm in (tgt, disp):
+                nm = nm.strip()
+                if len(nm) > 2:
+                    linked[nm.lower()] = nm
+        for nm in [start_npc] + rel_npcs:
+            if nm and len(nm) > 2:
+                linked.setdefault(nm.lower(), nm)
+
+        def anchored(fragment, at_end):
+            """The longest linked name the fragment ends with (items) or starts with (NPCs)."""
+            f = fragment.lower()
+            best = ""
+            for k, nm in linked.items():
+                if (f.endswith(k) if at_end else f.startswith(k)) and len(k) > len(best):
+                    best = k
+            return linked.get(best, "")
+
         for m in GAVE_TO.finditer(plain(walk)):
-            item, npc = m.group(1).strip(" .,'\"*"), clean_npc(m.group(2))
-            if 2 < len(item) < 60 and 2 < len(npc) < 50 and not item.lower().startswith(("him", "her", "them")):
+            item = anchored(m.group(1).strip(" .,'\"*"), at_end=True)
+            npc = anchored(clean_npc(m.group(2)), at_end=False)
+            if item and npc and item.lower() != npc.lower():
                 turnins.append({"item": item, "qty": 1, "npc": npc})
-                break
+                if len(turnins) >= 4:            # a multi-item hand-in, not a whole walkthrough
+                    break
     seen_ti, ti = set(), []
     for t in turnins:
         k = (t["item"].lower(), t["npc"].lower())
@@ -315,7 +371,36 @@ def parse_page(title, text):
     cats = [m.group(1) for m in re.finditer(r"\[\[Category:\s*([^\]|]+?)\s*(?:\|[^\]]*)?\]\]", text)]
     era_m = ERA.search(text)
 
-    items_needed = sorted({t["item"] for t in turnins})
+    # What the quest asks you to bring. The turn-ins are the strongest evidence, but most pages
+    # never quote the log — they DO keep a "== Checklist ==" of linked item pages, which is the
+    # wiki's own answer to "what do I need?" and covers hundreds of quests the prose patterns
+    # can't reach. Feeding both lists means a quest the app can't fully script still tells you
+    # which item to hand over.
+    items_needed = [t["item"] for t in turnins]
+    check = section(text, "Checklist", "Check List")
+    for line in check.split("\n"):
+        stripped = line.strip()
+        if not stripped.startswith("*") or stripped.startswith("**"):
+            continue                                  # sub-bullets are steps ("Locate and kill …")
+        # ONLY the link the bullet leads with. The checklist convention is item-first
+        # ("* [[Heretic Insurrection Orders]]", with the mob and the zone on indented sub-bullets
+        # or later in the line), so taking every link on the line collects the creature that drops
+        # the item and the zone it drops in — and those then appear in the app's hand-in dropdown
+        # as things to give an NPC. Offering "Heretic" as a quest item is worse than offering
+        # nothing: it builds a step that can never match and stops the run claiming you ran out.
+        not_items = {x.strip().lower() for x in [start_zone, start_npc] + rel_zones + rel_npcs if x}
+        for tgt, disp in links(stripped)[:1]:
+            if tgt.startswith(("File:", "Category:")):
+                continue
+            name = disp.strip().lstrip(":").strip()
+            if 2 < len(name) < 60 and name.lower() not in not_items:
+                items_needed.append(name)
+    seen_in, uniq_in = set(), []
+    for n in items_needed:
+        if n.lower() not in seen_in:
+            seen_in.add(n.lower())
+            uniq_in.append(n)
+    items_needed = uniq_in[:12]
 
     return {
         "name": title,
@@ -371,7 +456,11 @@ def main():
             skipped.append(title)
 
     quests.sort(key=lambda q: q["name"].lower())
-    zones = sorted({z for q in quests for z in ([q["startZone"], q["endZone"]] + q["relatedZones"]) if z and z != "None"})
+    # "Various"/"Any" are what the wiki writes when a quest spans the world — real words in the
+    # Related Zones row, but not places, and a zone FILTER offering them filters to nothing.
+    not_a_zone = {"none", "various", "any", "multiple", "all", "n/a", "tbd"}
+    zones = sorted({z for q in quests for z in ([q["startZone"], q["endZone"]] + q["relatedZones"])
+                    if z and z.strip().lower() not in not_a_zone})
 
     out = {
         "schema": 1,
