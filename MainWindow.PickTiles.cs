@@ -30,8 +30,12 @@ public partial class MainWindow
     /// One pick tile: scene art, TITLE, subtitle, optional tertiary line ("1 of 2"), a
     /// ready/not-ready badge, and a click that runs the pick.
     /// </summary>
+    /// <param name="onBadgeInspect">Optional: makes the READY badge itself clickable, without
+    /// running the pick. This is the "show me what you actually learned" door — a pick that has
+    /// gone wrong looks exactly like one that hasn't until you can see the picture behind it.</param>
     private FrameworkElement MakePickTile(string artName, string title, string subtitle,
-                                          string tertiary, bool ready, string tip, Action onClick)
+                                          string tertiary, bool ready, string tip, Action onClick,
+                                          Action? onBadgeInspect = null)
     {
         var stack = new StackPanel();
 
@@ -58,14 +62,33 @@ public partial class MainWindow
                 Text = "Ready", FontSize = 9.5, FontWeight = FontWeights.Bold, Foreground = Hex("#49F27E"),
                 VerticalAlignment = VerticalAlignment.Center,
             };
+            var badgeRow = new StackPanel { Orientation = Orientation.Horizontal, Children = { check, word } };
+            if (onBadgeInspect is not null)
+                badgeRow.Children.Add(new TextBlock
+                {
+                    Text = "  🔍", FontSize = 9, Foreground = Hex("#BFE3FF"),
+                    VerticalAlignment = VerticalAlignment.Center,
+                });
             var badge = new Border
             {
                 CornerRadius = new CornerRadius(6), Background = Hex("#C40E2416"), BorderBrush = Hex("#2E7D4F"),
                 BorderThickness = new Thickness(1), Padding = new Thickness(6, 1, 6, 2),
                 HorizontalAlignment = HorizontalAlignment.Left, VerticalAlignment = VerticalAlignment.Top,
                 Margin = new Thickness(4, 4, 0, 0),
-                Child = new StackPanel { Orientation = Orientation.Horizontal, Children = { check, word } },
+                Child = badgeRow,
+                ToolTip = onBadgeInspect is null ? null
+                    : "Click the badge to SEE what she compares against — the picture this pick learned, "
+                    + "with your box drawn on it. The tile itself re-picks; the badge only looks.",
             };
+            if (onBadgeInspect is not null)
+            {
+                badge.Cursor = Cursors.Hand;
+                badge.MouseEnter += (_, _) => badge.BorderBrush = Hex("#49F27E");
+                badge.MouseLeave += (_, _) => badge.BorderBrush = Hex("#2E7D4F");
+                // Handled, or the tile underneath opens the picker and the user loses the very pick
+                // they were trying to inspect.
+                badge.MouseLeftButtonUp += (_, e) => { e.Handled = true; onBadgeInspect(); };
+            }
             sceneHost.Children.Add(badge);
         }
         else

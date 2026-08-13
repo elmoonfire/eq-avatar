@@ -411,8 +411,14 @@ public sealed class QuestRole
                     : "⚠ smart find is ON but partly unarmed — " + string.Join("; ", unarmed)
                       + ". Unarmed parts fall back to the fixed picks, which is exactly what failed last time.");
                 if (oldSig.Count > 0)
-                    Log?.Invoke("· " + string.Join(", ", oldSig) + " still use(s) the old grid scan — "
-                              + "re-pick the slot once and the precise sliding search takes over.");
+                    // ⚠, not "·": the consoles colour warnings amber and dim the routine steps, and
+                    // this one has now cost two field runs. The old grid scan divides the bag area
+                    // into guessed cells and compares the middle of each — it has matched gauntlets
+                    // to a totem at 24 and can "find" an item in an empty square with total
+                    // confidence, after which every click in the gesture lands on nothing.
+                    Log?.Invoke("⚠ " + string.Join(", ", oldSig) + " still use(s) the OLD grid scan — "
+                              + "re-pick the slot once (drag a tight box round the icon) and the precise "
+                              + "sliding search takes over. Until then a 'found' line here may be an empty slot.");
             }
 
             // Open the bags before the first scan rather than hoping they're up. Nothing in the

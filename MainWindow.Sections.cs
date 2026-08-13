@@ -159,7 +159,7 @@ public partial class MainWindow
             // hands for the jobs the game makes you do by hand, not things to read.
             ("Tools", "", "PanelSecTools",
              "Hands for the jobs the game makes you do by hand.",
-             new[] { NavAutoMerge }),
+             new[] { NavAutoMerge, NavActivity }),
 
             ("Account", "", "PanelSecAccount",
              "Your character, your subscription, and how this app behaves.",
@@ -849,6 +849,7 @@ public partial class MainWindow
                 sec.Pages = new[]
                 {
                     new NavPage("", "Auto Merge", "Point at the copy you want to keep and she folds the rest of the bag into it.", NavAutoMerge),
+                    new NavPage("", "Activity Console", "Everything every module does, in the order it happened — filtered to the parts you care about.", NavActivity),
                 };
                 break;
 

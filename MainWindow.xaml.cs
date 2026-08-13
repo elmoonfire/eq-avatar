@@ -15,6 +15,7 @@ using System.Windows.Threading;
 using System.Windows.Interop;
 using Microsoft.Win32;
 using EQAvatar.Spike.Config;
+using EQAvatar.Spike.Data;
 using EQAvatar.Spike.Input;
 using EQAvatar.Spike.Launch;
 using EQAvatar.Spike.Log;
@@ -61,7 +62,7 @@ public partial class MainWindow : Window
     private static readonly string[] Panels =
     {
         "PanelHome", "PanelLog", "PanelInput", "PanelMaps", "PanelData", "PanelSessions", "PanelCombat", "PanelGrind", "PanelFollower",
-        "PanelLogin", "PanelMouse", "PanelSequencer", "PanelKeymaps", "PanelQuesting", "PanelAutoMerge",
+        "PanelLogin", "PanelMouse", "PanelSequencer", "PanelKeymaps", "PanelQuesting", "PanelAutoMerge", "PanelActivity",
         "PanelProfile", "PanelLicensing", "PanelSettings"
     };
     private static readonly string[] EqClasses =
@@ -126,6 +127,10 @@ public partial class MainWindow : Window
         _followerTimer.Tick += (_, _) => UpdateFollowerStats();
         _hub = new HubClient(_settings);
         _hubTimer.Tick += (_, _) => { _ = DoCheckIn(false); };
+        // The Activity Console follows the shared stream. Subscribed for the window's whole life
+        // (not just while its page is open) so it is already complete the first time you open it —
+        // the run you want to inspect is always the one that already happened.
+        ActivityLog.Added += OnActivityAdded;
         Loaded += (_, _) => StartRemoteControl();   // phone/web remote control + live status + session sync
     }
 
@@ -201,6 +206,7 @@ public partial class MainWindow : Window
         if (name == "PanelKeymaps") InitKeymapsUi();
         if (name == "PanelQuesting") InitQuestingUi();
         if (name == "PanelAutoMerge") InitMergeUi();
+        if (name == "PanelActivity") InitActivityUi();
         if (name == "PanelProfile") UpdateProfilePanel();
         if (name == "PanelData") EnsureDataLoaded();
         if (name == "PanelSessions") RefreshSessions();
@@ -1464,9 +1470,17 @@ public partial class MainWindow : Window
         UpdateLicSessionLabel();
     }
 
+    /// <summary>
+    /// The GRIND console — and only the grind's own work.
+    ///
+    /// Quest and merge lines used to be funnelled in here with a "[quest]"/"[merge]" prefix, which
+    /// made this box useless for reading a grind and made those runs impossible to follow. Each
+    /// role now records under its own name in <see cref="ActivityLog"/>; this console reads back
+    /// one source, and the Activity Console page reads them all.
+    /// </summary>
     private void GrindLogLine(string msg)
     {
-        Diag.BotLog.Log("grind", msg);
+        ActivityLog.Record(_hunt is { Running: true } ? "Hunt" : "Grind", msg);
         GrindLog.AppendText(msg + Environment.NewLine);
         GrindLog.ScrollToEnd();
     }
@@ -2061,6 +2075,7 @@ public partial class MainWindow : Window
             UnregisterHotKey(_hwnd, MERGE_HOTKEY_ID);
         }
         StopWatch();
+        ActivityLog.Added -= OnActivityAdded;      // static event: leaving this attached leaks the window
         _overlay?.Close();
         base.OnClosed(e);
     }

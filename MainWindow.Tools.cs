@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
+using EQAvatar.Spike.Data;
 using EQAvatar.Spike.Input;
 using EQAvatar.Spike.Ocr;
 using EQAvatar.Spike.Roles;
@@ -251,7 +252,7 @@ public partial class MainWindow
                 MrgStatus.Foreground = m.StartsWith("Stopped") || m.StartsWith("Can't") ? Hex("#FFCB6B") : Hex("#7CE38B");
             }
             if (_mergeRun is { } r && r.Stats.Tier.Length > 0) SetMergeStamp(r.Stats.Tier, true);
-            GrindLogLine("[merge] " + m);
+            ActivityLog.Record("Merge", m);        // its own source — not the Grind console's problem
         });
         _mergeRun.Stopped += () => Dispatcher.Invoke(RenderMergeUi);
         _mergeRun.Start();

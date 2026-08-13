@@ -271,6 +271,9 @@
                             <RadioButton x:Name="NavAutoMerge" Style="{StaticResource NavItem}" GroupName="nav" Tag="PanelAutoMerge" Checked="Nav_Checked">
                                 <StackPanel Orientation="Horizontal"><TextBlock Style="{StaticResource NavGlyph}" Text="&#xE8AB;"/><TextBlock Text="Auto Merge"/></StackPanel>
                             </RadioButton>
+                            <RadioButton x:Name="NavActivity" Style="{StaticResource NavItem}" GroupName="nav" Tag="PanelActivity" Checked="Nav_Checked">
+                                <StackPanel Orientation="Horizontal"><TextBlock Style="{StaticResource NavGlyph}" Text="&#xE9D9;"/><TextBlock Text="Activity Console"/></StackPanel>
+                            </RadioButton>
 
                             <TextBlock Style="{StaticResource RailCap}" Text="INSIGHT" Margin="6,14,0,6"/>
                             <RadioButton x:Name="NavCombat" Style="{StaticResource NavItem}" GroupName="nav" Tag="PanelCombat" Checked="Nav_Checked">
@@ -2010,6 +2013,50 @@
                     </Grid>
 
                     <!-- ===== TOOLS → AUTO MERGE (fold a bag of duplicates into one item) ===== -->
+                    <Grid x:Name="PanelActivity" Visibility="Collapsed">
+                        <Grid Margin="18,14,18,18">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="*"/>
+                            </Grid.RowDefinitions>
+
+                            <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,8">
+                                <TextBlock Text="ACTIVITY CONSOLE" FontWeight="Bold" FontSize="15" Foreground="#BFE3FF" VerticalAlignment="Center"/>
+                                <TextBlock x:Name="ActCount" Text="" FontSize="11" Foreground="#5E7C9A" VerticalAlignment="Center" Margin="10,0,0,0"/>
+                                <Button x:Name="ActClearBtn" Content="Clear" Click="ActClear_Click" Padding="10,3" Margin="14,0,0,0"
+                                        ToolTip="Empty the in-memory console. The durable copy on disk is untouched."/>
+                            </StackPanel>
+
+                            <TextBlock Grid.Row="1" TextWrapping="Wrap" FontSize="11.5" Foreground="#9FB6CC" Margin="0,0,0,8"
+                                       Text="Everything every part of the bot does, in one stream. Each page keeps its own console for its own work; this is where they meet, so you can see a merge and a quest run in the order they actually happened."/>
+
+                            <Border Grid.Row="2" Background="#101826" BorderBrush="#26405A" BorderThickness="1" CornerRadius="10" Padding="10,8" Margin="0,0,0,8">
+                                <StackPanel>
+                                    <TextBlock Text="SHOW" FontSize="9" FontWeight="Bold" Foreground="#5E7C9A" Margin="0,0,0,6"/>
+                                    <WrapPanel x:Name="ActFilterHost"/>
+                                </StackPanel>
+                            </Border>
+
+                            <Border Grid.Row="3" x:Name="ActNowBorder" CornerRadius="8" Background="#0C1420" BorderBrush="#26303F"
+                                    BorderThickness="1" Padding="12,8,12,10" Margin="0,0,0,8">
+                                <StackPanel>
+                                    <TextBlock x:Name="ActNowLabel" Text="LATEST" FontSize="8.5" FontWeight="Bold" Foreground="#5E7C9A"/>
+                                    <TextBlock x:Name="ActNowText" Text="nothing yet" FontSize="15" FontWeight="SemiBold"
+                                               TextWrapping="Wrap" Foreground="#DDE7F0"/>
+                                </StackPanel>
+                            </Border>
+
+                            <Border Grid.Row="4" CornerRadius="8" BorderBrush="#26303F" BorderThickness="1" ClipToBounds="True">
+                                <ScrollViewer x:Name="ActScroll" VerticalScrollBarVisibility="Auto" Background="#0C0F13" Padding="10,8,10,8">
+                                    <StackPanel x:Name="ActLines"/>
+                                </ScrollViewer>
+                            </Border>
+                        </Grid>
+                    </Grid>
+
                     <Grid x:Name="PanelAutoMerge" Visibility="Collapsed">
                         <ScrollViewer VerticalScrollBarVisibility="Auto">
                             <StackPanel Margin="18,14,18,26" MaxWidth="1000" HorizontalAlignment="Left">

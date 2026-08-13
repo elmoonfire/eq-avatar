@@ -46,13 +46,16 @@ public sealed class TurnInStep
     /// EXACTLY this size, so a match is same-region-to-same-region and scores razor-sharp.</summary>
     public double IconW { get; set; }
     public double IconH { get; set; }
+    /// <summary>The picture the signature was learned from, so you can SEE what she matches
+    /// against instead of trusting 108 numbers in a file.</summary>
+    public PickShot? Shot { get; set; }
 
     [JsonIgnore] public bool HasIcon => IconSig is { Length: 108 };
     [JsonIgnore] public bool HasIconSize => IconW > 0.002 && IconH > 0.002;
 
     public TurnInStep Clone() => new()
     { Item = Item, Qty = Qty, Quest = Quest, Slot = new ScreenPoint { X = Slot.X, Y = Slot.Y },
-      IconSig = IconSig?.ToArray(), IconW = IconW, IconH = IconH };
+      IconSig = IconSig?.ToArray(), IconW = IconW, IconH = IconH, Shot = Shot };
 }
 
 /// <summary>
@@ -106,6 +109,9 @@ public sealed class QuestScript
     /// worth stopping for. Blank = never pressed, which is the safe default for anyone who hasn't
     /// bound the command: a TOGGLE pressed on a hunch would close the bags it meant to open.</summary>
     public string OpenBagsKey { get; set; } = "";
+    /// <summary>Snapshots of the non-item picks, keyed "npc"/"give"/"confirm"/"bag" — the same
+    /// "show me what you actually learned" answer for the spots that aren't matched by icon.</summary>
+    public Dictionary<string, PickShot> Shots { get; set; } = new();
     /// <summary>Extra phrases to say between the hail and the first hand-in (quest dialogue
     /// triggers, e.g. the bracketed words an NPC asks you to repeat back).</summary>
     public List<string> SayPhrases { get; set; } = new();
@@ -185,6 +191,7 @@ public sealed class QuestScript
         foreach (TurnInStep s in Steps) { s.Item ??= ""; s.Quest ??= ""; s.Slot ??= new ScreenPoint(); }
         if (string.IsNullOrWhiteSpace(HailKey)) HailKey = "h";
         OpenBagsKey = (OpenBagsKey ?? "").Trim();       // null from an older file, or a hand edit
+        Shots ??= new Dictionary<string, PickShot>();
         if (BagCols <= 0) BagCols = 2;
         if (BagRows <= 0) BagRows = 5;
     }
@@ -267,7 +274,14 @@ public sealed class QuestScriptStore
             string json;
             lock (_gate) json = JsonSerializer.Serialize(this, SaveOpts);
             Directory.CreateDirectory(Path.GetDirectoryName(FilePath)!);
-            File.WriteAllText(FilePath, json);
+            // Write beside it, then swap. A half-written file here is not a lost setting, it is a
+            // lost SCRIPT: Load()'s catch turns unparseable JSON into an empty store, and the next
+            // edit writes that emptiness back over everything the user ever built. The file grew
+            // teeth when picks started carrying snapshots, so the window for a torn write did too.
+            string tmp = FilePath + ".tmp";
+            File.WriteAllText(tmp, json);
+            if (File.Exists(FilePath)) File.Replace(tmp, FilePath, null);
+            else File.Move(tmp, FilePath);
         }
         catch { }
     }

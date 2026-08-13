@@ -6,6 +6,8 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
+using System.Windows.Media.Animation;
+using System.Windows.Media.Effects;
 using EQAvatar.Spike.Data;
 using EQAvatar.Spike.Input;
 using EQAvatar.Spike.Login;
@@ -550,7 +552,7 @@ public partial class MainWindow
 
         // ---- the shared picks, as scene tiles ----
         var picks = new WrapPanel { Margin = new Thickness(0, 0, 0, 2) };
-        picks.Children.Add(MakePickTile("ui-pick-npc.jpg", "the NPC", 
+        picks.Children.Add(MakePickTile("ui-pick-npc.jpg", "the NPC",
             script.NpcAnchorLearned ? "found by nameplate" : "where the items land", "",
             script.Layout.Npc.Set,
             "Where she drops the held item. Target the NPC FIRST so the big name floats over his head — the pick "
@@ -558,18 +560,28 @@ public partial class MainWindow
             () => { if (PickQuestPoint(script.Layout.Npc, "the NPC",
                         $"TARGET {script.Npc} so his name floats overhead, then click ON his body and press Enter.",
                         (frame, _) => LearnNpcAnchorAsync(script, new System.Drawing.Bitmap(frame),
-                                                          script.Layout.Npc.X, script.Layout.Npc.Y)))
-                    Persist(); RenderQuests(); }));
+                                                          script.Layout.Npc.X, script.Layout.Npc.Y),
+                        sh => { if (sh is null) script.Shots.Remove("npc"); else script.Shots["npc"] = sh; }))
+                    Persist(); RenderQuests(); },
+            script.Layout.Npc.Set ? () => ShowShot(script, "npc", "The NPC pick",
+                script.NpcAnchorLearned
+                    ? "The body point you clicked. At run time she reads the nameplate and clicks this far below it."
+                    : "The body point you clicked. No nameplate anchor was learned — target him and re-pick to get one.") : null));
         picks.Children.Add(MakePickTile("ui-pick-give.jpg", "GIVE button", "commits the trade", "",
             script.Layout.GiveButton.Set,
             "The button that completes the hand-in. The give window opens in the same place every time, so one pick covers every item. Click to pick.",
             () => { if (PickQuestPoint(script.Layout.GiveButton, "the GIVE button",
-                        "Open a give window with the NPC, then click ON its GIVE button and press Enter.")) Persist(); RenderQuests(); }));
+                        "Open a give window with the NPC, then click ON its GIVE button and press Enter.",
+                        null, sh => { if (sh is null) script.Shots.Remove("give"); else script.Shots["give"] = sh; })) Persist(); RenderQuests(); },
+            script.Layout.GiveButton.Set ? () => ShowShot(script, "give", "The GIVE button pick",
+                "She clicks the centre of this box every hand-in. If the give window has moved since, re-pick it.") : null));
         picks.Children.Add(MakePickTile("ui-pick-confirm.jpg", "confirm", "optional dialog", "",
             script.Layout.Confirm.Set,
             "Only needed if the server puts a second dialog up after GIVE. The cycle runs without it. Click to pick.",
             () => { if (PickQuestPoint(script.Layout.Confirm, "the confirm button",
-                        "If a confirmation appears after GIVE, click ON its button and press Enter.")) Persist(); RenderQuests(); }));
+                        "If a confirmation appears after GIVE, click ON its button and press Enter.",
+                        null, sh => { if (sh is null) script.Shots.Remove("confirm"); else script.Shots["confirm"] = sh; })) Persist(); RenderQuests(); },
+            script.Layout.Confirm.Set ? () => ShowShot(script, "confirm", "The confirm pick", "") : null));
         picks.Children.Add(MakePickTile("ui-pick-bag.jpg", "the bag area",
             "every slot scanned at your icon's size", "",
             script.BagSet,
@@ -578,8 +590,12 @@ public partial class MainWindow
             + "there; the picked slots become fallbacks. Click to pick.",
             () => { if (PickQuestRect(r => { script.BagX = r.X; script.BagY = r.Y; script.BagW = r.W; script.BagH = r.H; },
                         "the bag area",
-                        "Drag a box around the WHOLE block of bag slots holding the quest items — corner to corner — then press Enter."))
-                    Persist(); RenderQuests(); }));
+                        "Drag a box around the WHOLE block of bag slots holding the quest items — corner to corner — then press Enter.",
+                        sh => { if (sh is null) script.Shots.Remove("bag"); else script.Shots["bag"] = sh; }))
+                    Persist(); RenderQuests(); },
+            script.BagSet ? () => ShowShot(script, "bag", "The bag area",
+                "Everything inside the orange box gets scanned for your items. If your bags have moved or you have "
+                + "opened different ones since, re-pick it.") : null));
         stack.Children.Add(picks);
 
         // ---- what she says after the hail: the dialogue triggers ----
@@ -633,15 +649,21 @@ public partial class MainWindow
                 ? (step.Qty > 1 ? $"{step.Qty}× per hand-in" : "one per hand-in")
                 : "for " + step.Quest;
 
+            // The subtitle is where a step tells the truth about HOW it will be found. "icon learned"
+            // was true of a pre-0.10.9 pick too, and that hid the one fact that mattered: it was
+            // still using the loose grid scan that matched a totem to gauntlets at 24.
+            string howFound = !step.HasIcon ? shortQuest
+                            : step.HasIconSize ? "icon learned — found live"
+                            : "⚠ old scan — re-pick me";
             var tileHost = new Grid();
             tileHost.Children.Add(MakePickTile("ui-pick-slot.jpg",
                 step.Item.Length > 0 ? step.Item : "hand-in item",
-                step.HasIcon ? "icon learned — found live" : shortQuest,
+                howFound,
                 $"{i + 1} of {total}",
                 step.Slot.Set,
                 "Drag a TIGHT box around one copy of the item in your bag. The pick learns the item's ICON, so at "
                 + "run time she scans the bag area for wherever a copy actually is — the picked slot is only the "
-                + "fallback. Click to pick.",
+                + "fallback. Click to pick. Click the READY badge to see what she's comparing against.",
                 () => { if (PickQuestPoint(captured.Slot, "where " + captured.Item + " sits in your bags",
                             $"Drag a TIGHT box around one {captured.Item} in your inventory, then press Enter.",
                             (frame, box) =>
@@ -652,7 +674,9 @@ public partial class MainWindow
                                 if (captured.IconSig is not null)
                                     QstStatus.Text = $"Saved — and learned {captured.Item}'s icon, so she'll find the "
                                                    + "next copy wherever it sits in the bag area.";
-                            })) Persist(); RenderQuests(); }));
+                            },
+                            sh => captured.Shot = sh)) Persist(); RenderQuests(); },
+                captured.Slot.Set ? () => ShowStepShot(captured) : null));
 
             if (total > 1)
             {
@@ -979,19 +1003,138 @@ public partial class MainWindow
         bar.Children.Add(stats);
         stack.Children.Add(bar);
 
-        return new Border
+        // ---- the live console: what she is doing NOW, over the last few things she did ----
+        stack.Children.Add(MakeQuestConsole(running, script.Quest));
+
+        // The card itself reports the run. Green, glowing and faintly lit from within while she
+        // works — from across the room you can tell whether the bot is alive without reading a
+        // word, which is the whole point of watching an automation you can't see the inside of.
+        var card = new Border
         {
             CornerRadius = new CornerRadius(10),
-            Background = Hex("#121A28"),
-            BorderBrush = Hex("#2A4A57"),
-            BorderThickness = new Thickness(1),
+            Background = running ? Hex("#0E2318") : Hex("#121A28"),
+            BorderBrush = running ? Hex("#49F27E") : Hex("#2A4A57"),
+            BorderThickness = new Thickness(running ? 2 : 1),
             Padding = new Thickness(12, 4, 12, 12),
             Margin = new Thickness(0, 10, 0, 0),
             Child = stack,
         };
+        if (running)
+        {
+            var glow = new DropShadowEffect
+            { Color = Color.FromRgb(0x49, 0xF2, 0x7E), BlurRadius = 22, ShadowDepth = 0, Opacity = 0.55 };
+            // A slow breath rather than a fixed halo: a still glow reads as decoration, a moving
+            // one reads as a heartbeat — and a heartbeat that stops is information.
+            var breathe = new DoubleAnimation(0.30, 0.75, TimeSpan.FromSeconds(1.6))
+            { AutoReverse = true, RepeatBehavior = RepeatBehavior.Forever };
+            glow.BeginAnimation(DropShadowEffect.OpacityProperty, breathe);
+            card.Effect = glow;
+        }
+        return card;
+    }
+
+    /// <summary>
+    /// The Questing card's own console: one big line for what she is doing THIS SECOND, and the
+    /// steps behind it, scrollable back through the whole run.
+    ///
+    /// Separate from the Grind console on purpose. Everything used to pour into that one box, so a
+    /// quest run's narration was buried in someone else's log — and the Grind log was ruined by
+    /// quest lines it had no use for. Both consoles now read one source each; the Activity Console
+    /// under TOOLS is where you go to see them interleaved.
+    /// </summary>
+    private FrameworkElement MakeQuestConsole(bool running, string questName)
+    {
+        var host = new StackPanel { Margin = new Thickness(0, 10, 0, 0) };
+
+        var head = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 0, 0, 4) };
+        head.Children.Add(new TextBlock
+        {
+            Text = "LIVE ACTIVITY", FontSize = 9.5, FontWeight = FontWeights.Bold,
+            Foreground = Hex("#5E7C9A"), VerticalAlignment = VerticalAlignment.Center,
+        });
+        var openAll = new TextBlock
+        {
+            Text = "  open the Activity Console →", FontSize = 9.5, Foreground = Hex("#4FC3F7"),
+            VerticalAlignment = VerticalAlignment.Center, Cursor = Cursors.Hand,
+            ToolTip = "Every module's activity in one place, with filters.",
+        };
+        openAll.MouseLeftButtonUp += (_, _) => { NavActivity.IsChecked = true; };
+        head.Children.Add(openAll);
+        host.Children.Add(head);
+
+        // 150, not everything: this console is rebuilt on every line she speaks, and the full
+        // history has a page of its own. Deep enough to scroll back through several cycles.
+        // Scoped to THIS quest, not to questing in general: every quest has its own card, and a
+        // card showing another quest's "✔ accepted" as its own evidence is worse than a blank one.
+        List<ActivityEntry> lines = ActivityLog.Snapshot(
+            e => e.Source == QuestSource && QuestCatalog.Norm(e.Tag) == QuestCatalog.Norm(questName), 150);
+        ActivityEntry? now = lines.Count > 0 ? lines[^1] : null;
+
+        // NOW — deliberately oversized. In the Grind console the current action is just the last
+        // line of a wall of identical text, which is exactly what you can't read from two feet away.
+        var nowBorder = new Border
+        {
+            CornerRadius = new CornerRadius(8),
+            Background = running ? Hex("#10301F") : Hex("#0C1420"),
+            BorderBrush = running ? Hex("#3FCB74") : Hex("#26303F"),
+            BorderThickness = new Thickness(1),
+            Padding = new Thickness(10, 7, 10, 8),
+        };
+        var nowStack = new StackPanel();
+        nowStack.Children.Add(new TextBlock
+        {
+            Text = running ? "NOW" : "LAST", FontSize = 8.5, FontWeight = FontWeights.Bold,
+            Foreground = running ? Hex("#49F27E") : Hex("#5E7C9A"),
+        });
+        var nowText = new TextBlock
+        {
+            Text = now?.Text ?? "nothing yet — press Run and she'll narrate every step here.",
+            FontSize = 14, FontWeight = FontWeights.SemiBold, TextWrapping = TextWrapping.Wrap,
+            Foreground = now is null ? Hex("#5E7C9A")
+                       : now.IsBad ? Hex("#FFCB6B")
+                       : now.IsGood ? Hex("#49F27E") : Hex("#DDE7F0"),
+        };
+        if (running && now is not null && !now.IsBad)
+            nowText.Effect = new DropShadowEffect
+            { Color = Color.FromRgb(0x49, 0xF2, 0x7E), BlurRadius = 12, ShadowDepth = 0, Opacity = 0.35 };
+        nowStack.Children.Add(nowText);
+        nowBorder.Child = nowStack;
+        host.Children.Add(nowBorder);
+
+        // The steps behind it. Scrolls back through the whole run; the newest sits at the bottom,
+        // nearest the NOW line, so reading downward is reading forward in time.
+        var lineStack = new StackPanel();
+        foreach (ActivityEntry e in lines.Count > 1 ? lines.GetRange(0, lines.Count - 1) : new List<ActivityEntry>())
+            lineStack.Children.Add(new TextBlock
+            {
+                Text = $"{e.When:HH:mm:ss}  {e.Text}",
+                FontFamily = new FontFamily("Consolas"), FontSize = 11, TextWrapping = TextWrapping.Wrap,
+                Foreground = e.IsBad ? Hex("#FFCB6B") : e.IsGood ? Hex("#7CE38B") : e.IsStep ? Hex("#8AA0B6") : Hex("#C6D2DE"),
+                Margin = new Thickness(0, 0, 0, 1),
+            });
+
+        var scroll = new ScrollViewer
+        {
+            // ~5 steps tall, per the ask, and scrollable back through everything above them.
+            Height = 96, VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+            Margin = new Thickness(0, 4, 0, 0), Content = lineStack,
+            Background = Hex("#0C0F13"), Padding = new Thickness(8, 5, 8, 5),
+        };
+        // Show the newest without the user having to drag: the interesting end is the bottom.
+        scroll.Loaded += (_, _) => scroll.ScrollToEnd();
+        host.Children.Add(new Border
+        {
+            CornerRadius = new CornerRadius(8), BorderBrush = Hex("#26303F"), BorderThickness = new Thickness(1),
+            ClipToBounds = true, Child = scroll,
+        });
+        return host;
     }
 
     // ---------------------------------------------------------------- picking + running
+
+    /// <summary>The name this page records its activity under. One string, so the console that
+    /// reads it and the runner that writes it can never drift apart.</summary>
+    internal const string QuestSource = "Quest";
 
     private bool _hoverTestBusy;
 
@@ -1096,13 +1239,14 @@ public partial class MainWindow
                 int w = r.Right - r.Left, h = r.Bottom - r.Top;
                 int x = r.Left + (int)(p.X * w), y = r.Top + (int)(p.Y * h);
                 QstStatus.Text = $"hovering {label} → screen ({x}, {y})";
-                GrindLogLine($"[quest] hover test: {label} at {p.X * 100:0.0}%, {p.Y * 100:0.0}% → screen ({x}, {y})");
+                ActivityLog.Record(QuestSource,
+                    $"· hover test: {label} at {p.X * 100:0.0}%, {p.Y * 100:0.0}% → screen ({x}, {y})", script.Quest);
                 HumanizedMouse.MoveInstant(x, y);
                 await Task.Delay(1000);
             }
             HumanizedMouse.MoveInstant(hx, hy);
             QstStatus.Text = "Hover test done. Every stop should have sat exactly on its target — if one was off, "
-                           + "re-pick that point. If they were all right, run again and read the [quest] lines in the Grind log.";
+                           + "re-pick that point. Every stop is written to this card's LIVE ACTIVITY box below.";
             QstStatus.Foreground = Hex("#7CE38B");
         }
         finally { _hoverTestBusy = false; }
@@ -1116,7 +1260,8 @@ public partial class MainWindow
     /// its nameplate anchor. Learning happens off the frame the user drew on, never a fresh grab
     /// (the 0.9.37 lesson: the modal covers the game).</param>
     private bool PickQuestPoint(ScreenPoint point, string what, string hint,
-                                Action<System.Drawing.Bitmap, (double X, double Y, double W, double H)>? learn = null)
+                                Action<System.Drawing.Bitmap, (double X, double Y, double W, double H)>? learn = null,
+                                Action<PickShot?>? shot = null)
     {
         if (_grindTarget == IntPtr.Zero) AutoTargetEq();
         // Disposed here, not by the picker: CaptureFrame allocates a full-window 32bpp bitmap
@@ -1136,13 +1281,57 @@ public partial class MainWindow
         point.Y = dlg.NY + dlg.NH / 2;
         QstStatus.Text = $"Saved {what} at {point.X * 100:0.#}% across, {point.Y * 100:0.#}% down the game window.";
         QstStatus.Foreground = Hex("#7CE38B");
+        try { shot?.Invoke(PickShot.From(frame, dlg.NX, dlg.NY, dlg.NW, dlg.NH)); }
+        catch { /* a missing picture must never cost the pick */ }
         try { learn?.Invoke(frame, (dlg.NX, dlg.NY, dlg.NW, dlg.NH)); }
         catch { /* learning is a bonus; the pick itself already saved */ }
         return true;
     }
 
+    // ---------------------------------------------------------------- "show me what you learned"
+
+    /// <summary>The picture behind one of the shared picks (NPC / GIVE / confirm / bag).</summary>
+    private void ShowShot(QuestScript script, string key, string title, string note)
+    {
+        script.Shots.TryGetValue(key, out PickShot? shot);
+        new PickShotWindow(title, $"{script.Quest} · {script.Npc}", shot,
+            shot is null
+                ? "No snapshot for this pick — either it predates snapshots, or the capture failed at pick time. "
+                + "Re-pick it once and this window will show you exactly what she uses."
+                : (note.Length > 0 ? note : null))
+        { Owner = this }.ShowDialog();
+    }
+
+    /// <summary>
+    /// The picture behind an ITEM pick — the one that actually decides whether she grabs the right
+    /// thing. It also states WHICH search that step will use, because a signature learned before
+    /// 0.10.9 has no box size and silently falls back to the loose grid scan: the run then reports
+    /// "found ... in bag cell 2,1 (match 27)" and clicks an empty square with total confidence.
+    /// </summary>
+    private void ShowStepShot(TurnInStep step)
+    {
+        string note = !step.HasIcon
+            ? "No icon signature on this step — she will click the fixed slot and hope. Re-pick it."
+            : step.HasIconSize
+                ? "She slides a window of exactly this size across the bag area and clicks the closest match "
+                + "(needs a score of " + QuestFind.SlidingAcceptDistance.ToString("0") + " or better)."
+                : "⚠ This pick predates the precise search: with no box size stored she falls back to the OLD grid "
+                + "scan, which divides your bag area into cells and compares the middle of each one. That is how a "
+                + "totem got matched to gauntlets — and how an empty slot can score 27. Re-pick this item once.";
+        new PickShotWindow(
+            step.Item.Length > 0 ? step.Item : "hand-in item",
+            step.HasIconSize ? "precise sliding search" : "old grid scan",
+            step.Shot,
+            step.Shot is null
+                ? "No snapshot for this pick — either it predates snapshots, or the capture failed at pick time. "
+                + "Re-pick it once and this window will show you the exact pixels she compares against.\n\n" + note
+                : note)
+        { Owner = this }.ShowDialog();
+    }
+
     /// <summary>Pick a normalized RECT (the bag area) rather than a point.</summary>
-    private bool PickQuestRect(Action<(double X, double Y, double W, double H)> store, string what, string hint)
+    private bool PickQuestRect(Action<(double X, double Y, double W, double H)> store, string what, string hint,
+                               Action<PickShot?>? shot = null)
     {
         if (_grindTarget == IntPtr.Zero) AutoTargetEq();
         using System.Drawing.Bitmap? frame = VitalsSvc.CaptureFrame();
@@ -1155,6 +1344,9 @@ public partial class MainWindow
         var dlg = new CompassPickWindow(frame, "Pick " + what, hint) { Owner = this };
         if (dlg.ShowDialog() != true) return false;
         store((dlg.NX, dlg.NY, dlg.NW, dlg.NH));
+        // A bag area is already large; padding it further would just photograph the screen.
+        try { shot?.Invoke(PickShot.From(frame, dlg.NX, dlg.NY, dlg.NW, dlg.NH, pad: 0.06)); }
+        catch { /* a missing picture must never cost the pick */ }
         QstStatus.Text = $"Saved {what}.";
         QstStatus.Foreground = Hex("#7CE38B");
         return true;
@@ -1232,6 +1424,17 @@ public partial class MainWindow
     /// the thing it stops hasn't been constructed yet.</summary>
     private bool _questStartCancelled;
 
+    /// <summary>A start that refuses has to say so where the user is looking — which, now the card
+    /// has its own console, is the big NOW line as much as the status text. A refusal that only
+    /// wrote to QstStatus left the console reading "nothing yet — press Run" after they had.</summary>
+    private void QuestFail(QuestScript script, string why)
+    {
+        QstStatus.Text = why;
+        QstStatus.Foreground = Hex("#FFCB6B");
+        ActivityLog.Record(QuestSource, why, script.Quest);
+        RenderQuests();
+    }
+
     private async Task StartQuestRunAsync(QuestScript script)
     {
         if (_questStarting || _questRun is { Running: true }) { ShowToast("Already running — Stop first"); return; }
@@ -1242,14 +1445,12 @@ public partial class MainWindow
         if (_grindTarget == IntPtr.Zero) AutoTargetEq();
         if (_grindTarget == IntPtr.Zero)
         {
-            QstStatus.Text = "EverQuest window not found — launch the game, then try again.";
-            QstStatus.Foreground = Hex("#FFCB6B");
+            QuestFail(script, "✖ EverQuest window not found — launch the game, then try again.");
             return;
         }
         if (!script.Ready)
         {
-            QstStatus.Text = "Still need a pick for: " + script.Missing() + ".";
-            QstStatus.Foreground = Hex("#FFCB6B");
+            QuestFail(script, "✖ Still need a pick for: " + script.Missing() + ".");
             return;
         }
 
@@ -1265,14 +1466,17 @@ public partial class MainWindow
             // Hand control to the game. Pressing Run IS the intent to do that, and the runner
             // refuses to act while anything else is focused — so without this the first thing the
             // user sees is "Paused — EverQuest isn't the focused window" and a race to alt-tab.
+            ActivityLog.Record(QuestSource, "· starting the cycle", script.Quest);
             if (_settings.FocusGameOnStart)
             {
                 QstStatus.Text = "Bringing EverQuest to the front…";
                 QstStatus.Foreground = Hex("#9FE0FF");
+                ActivityLog.Record(QuestSource, "· bringing EverQuest to the front", script.Quest);
                 if (!await GameFocus.BringAndSettleAsync(_grindTarget))
                 {
                     QstStatus.Text = "Couldn't bring EverQuest to the front — click the game yourself and she'll pick up from there.";
                     QstStatus.Foreground = Hex("#FFCB6B");
+                    ActivityLog.Record(QuestSource, "⚠ couldn't bring EverQuest to the front — click the game yourself.", script.Quest);
                 }
             }
 
@@ -1282,6 +1486,7 @@ public partial class MainWindow
             {
                 QstStatus.Text = "Stopped before she started.";
                 QstStatus.Foreground = Hex("#FFCB6B");
+                ActivityLog.Record(QuestSource, "Stopped before she started.", script.Quest);
                 return;
             }
 
@@ -1291,8 +1496,9 @@ public partial class MainWindow
             _questRun.Log += m => Dispatcher.Invoke(() =>
             {
                 QstStatus.Text = m;
-                QstStatus.Foreground = m.StartsWith("✖") ? Hex("#FFCB6B") : Hex("#7CE38B");
-                GrindLogLine("[quest] " + m);
+                QstStatus.Foreground = m.StartsWith("✖") || m.StartsWith("⚠") ? Hex("#FFCB6B") : Hex("#7CE38B");
+                // Its OWN source, not the Grind console. Mixing them made both logs unreadable.
+                ActivityLog.Record(QuestSource, m, script.Quest);
                 // The runner speaks exactly when the picture changes — a hand-in confirmed, a miss,
                 // a cycle done — so this keeps the fire bar and the ×count column live mid-run.
                 RenderQuests();
