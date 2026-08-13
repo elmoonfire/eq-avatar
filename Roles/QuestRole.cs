@@ -170,15 +170,27 @@ public sealed class QuestRole
         return (r.Left + (int)(p.X * w), r.Top + (int)(p.Y * ht));
     }
 
-    /// <summary>Move and click one picked point. Returns false when the game isn't focused —
-    /// the caller treats that as "paused", not as a failure.</summary>
-    private bool ClickAt(ScreenPoint p, int settleMs)
+    /// <summary>Why the most recent ClickAt returned false. A silent false is indistinguishable
+    /// from "the bot did nothing" — which is exactly what the first field test looked like.</summary>
+    private string _clickFailWhy = "";
+    /// <summary>Narrate the first cycle's clicks to the log, coordinates and all, so a field test
+    /// that goes wrong says WHERE every click landed instead of nothing at all.</summary>
+    private bool _narrate = true;
+
+    /// <summary>Move and click one picked point. Returns false when it can't — and says why in
+    /// <see cref="_clickFailWhy"/>, because the caller may be about to loop on it.</summary>
+    private bool ClickAt(ScreenPoint p, int settleMs, string what = "")
     {
-        if (!_sink.Ready) return false;
-        if (Screen(p) is not (int x, int y)) return false;
+        if (!p.Set) { _clickFailWhy = $"the pick for {what} isn't set"; return false; }
+        if (!_sink.Ready) { _clickFailWhy = "EverQuest isn't the focused window"; return false; }
+        if (Screen(p) is not (int x, int y))
+        { _clickFailWhy = "the game window has gone away"; return false; }
+        if (_narrate && what.Length > 0)
+            Log?.Invoke($"· clicking {what} at {p.X * 100:0.0}%, {p.Y * 100:0.0}% → screen ({x}, {y})");
         HumanizedMouse.MoveInstant(x + _rng.Next(-2, 3), y + _rng.Next(-2, 3));
-        Thread.Sleep(90 + _rng.Next(70));
-        if (!_sink.Ready) return false;                 // re-check: focus can be lost mid-gesture
+        Thread.Sleep(140 + _rng.Next(80));
+        if (!_sink.Ready)                               // re-check: focus can be lost mid-gesture
+        { _clickFailWhy = "focus was lost mid-gesture"; return false; }
         HumanizedMouse.Click(_rng);
         Thread.Sleep(settleMs + _rng.Next(90));
         return true;
@@ -217,16 +229,16 @@ public sealed class QuestRole
         Stats.State = $"handing over {step.Item}";
         Stats.Attempts++;
 
-        if (!ClickAt(step.Slot, 260)) return null;                  // pick the item up
+        if (!ClickAt(step.Slot, 260, $"the bag slot for {step.Item}")) return null;   // pick the item up
 
         // From here the item is ON THE CURSOR. Every early exit has to put it back in ITS OWN slot
         // first: the cycle restarts at step 1, and step 1's first act is to click step 1's slot —
         // which, with step 2's item still held, drops it into the wrong bag square and every
         // pick-up after that grabs the wrong thing.
         bool holding = true;
-        bool? Drop(bool? result) { if (holding) { ClickAt(step.Slot, 260); holding = false; } return result; }
+        bool? Drop(bool? result) { if (holding) { ClickAt(step.Slot, 260, "the bag slot (returning the item)"); holding = false; } return result; }
 
-        if (!ClickAt(_script.Layout.Npc, 620)) return Drop(null);   // drop it on the NPC → give window
+        if (!ClickAt(_script.Layout.Npc, 620, "the NPC")) return Drop(null);   // drop it on the NPC → give window
 
         // Arm the listener HERE, immediately before the button that commits the trade — not at the
         // top of the cycle. Everything above takes seconds, and a confirmation armed that early can
@@ -235,7 +247,7 @@ public sealed class QuestRole
         _offered = _advanced = false;
         _listening = true;
 
-        if (!ClickAt(_script.Layout.GiveButton, 500)) { _listening = false; _inFlight = null; return Drop(null); }
+        if (!ClickAt(_script.Layout.GiveButton, 500, "the GIVE button")) { _listening = false; _inFlight = null; return Drop(null); }
         holding = false;                                            // GIVE was pressed; the item is the server's problem now
         if (_script.Layout.Confirm.Set) ClickAt(_script.Layout.Confirm, 400);
 
@@ -280,6 +292,7 @@ public sealed class QuestRole
             // the stop exists for. Keyed by the step object; the list is only edited from the UI
             // while the run is stopped.
             var stepMisses = new Dictionary<TurnInStep, int>();
+            int gestureFails = 0;
             // Items offered toward a step's Qty since its last recorded completion.
             var offersToward = new Dictionary<TurnInStep, int>();
 
@@ -313,6 +326,9 @@ public sealed class QuestRole
                     if (!Say("/say " + phrase.Trim())) break;
                     await Task.Delay(900 + _rng.Next(300), ct);
                 }
+                // Give the server a beat to put the task in the journal before the first offer —
+                // an offer that beats the assignment is refused and costs a retry.
+                if (_script.SayPhrases.Count > 0) await Task.Delay(800, ct);
 
                 // ---- the hand-ins, in order.
                 //
@@ -332,7 +348,27 @@ public sealed class QuestRole
                         if (!await WaitFocus(ct)) { cycleComplete = false; break; }
 
                         bool? result = await HandOverAsync(step, ct);
-                        if (result is null) { await Task.Delay(600, ct); continue; }   // focus blip: same step again
+                        if (result is null)
+                        {
+                            // NEVER retry silently — the first field test looked like "the bot did
+                            // nothing" because this path said nothing. Focus blips are retryable
+                            // (WaitFocus above blocks until the game is back); a missing pick or a
+                            // vanished window is not, and looping on those is just being quiet
+                            // about being broken.
+                            gestureFails++;
+                            Log?.Invoke($"⚠ couldn't complete the {step.Item} gesture: {_clickFailWhy} "
+                                      + $"(attempt {gestureFails}).");
+                            if (_clickFailWhy.Contains("isn't set") || _clickFailWhy.Contains("gone away")
+                                || gestureFails >= 8)
+                            {
+                                Finish($"Stopped: {_clickFailWhy}. Re-pick the points on the card and run again.");
+                                HumanizedMouse.MoveInstant(home.x, home.y);
+                                return;
+                            }
+                            await Task.Delay(600, ct);
+                            continue;                                  // same step again
+                        }
+                        gestureFails = 0;
 
                         if (result == true)
                         {
@@ -374,6 +410,7 @@ public sealed class QuestRole
 
                 if (cycleComplete)
                 {
+                    _narrate = false;                     // the first cycle told the story; hush now
                     Stats.Cycles++;
                     _script.LifetimeCompleted++;
                     Log?.Invoke($"— cycle {Stats.Cycles} complete —");

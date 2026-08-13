@@ -797,6 +797,18 @@ public partial class MainWindow
         run.Click += (_, _) => { if (_questRun is { Running: true }) _questRun.Stop(); else { Persist(); StartQuestRun(script); } };
         bar.Children.Add(run);
 
+        var hover = new Button
+        {
+            Content = "🖱  Test the clicks",
+            Padding = new Thickness(12, 5, 12, 5),
+            Margin = new Thickness(0, 0, 10, 0),
+            ToolTip = "Three-second countdown, then the cursor visits every picked point in order — bag slots, NPC, "
+                    + "GIVE — WITHOUT clicking, pausing a second on each. Watch it over the game: every stop should "
+                    + "sit exactly on its target. If one is off, that pick is the problem.",
+        };
+        hover.Click += async (_, _) => await HoverTestAsync(script);
+        bar.Children.Add(hover);
+
         var stats = new TextBlock
         {
             Foreground = Hex("#9FE0B8"), FontSize = 11, VerticalAlignment = VerticalAlignment.Center,
@@ -820,6 +832,76 @@ public partial class MainWindow
     }
 
     // ---------------------------------------------------------------- picking + running
+
+    private bool _hoverTestBusy;
+
+    /// <summary>
+    /// Walk the cursor through every picked point without clicking anything.
+    ///
+    /// This exists because the first field test failed invisibly: keyboard actions landed (hail,
+    /// say) but no click was ever seen, and a click that goes to the wrong place — or a pick that
+    /// silently isn't what you thought — looks exactly like a bot doing nothing. A second of
+    /// hovering on each target over the live game answers "are the coordinates right?" with your
+    /// own eyes, before any item is put at risk.
+    /// </summary>
+    private async Task HoverTestAsync(QuestScript script)
+    {
+        if (_hoverTestBusy) return;
+        if (_questRun is { Running: true }) { ShowToast("Stop the run first"); return; }
+        if (_grindTarget == IntPtr.Zero) AutoTargetEq();
+        if (_grindTarget == IntPtr.Zero)
+        {
+            QstStatus.Text = "EverQuest window not found — launch the game, then try again.";
+            QstStatus.Foreground = Hex("#FFCB6B");
+            return;
+        }
+        _hoverTestBusy = true;
+        try
+        {
+            for (int i = 3; i >= 1; i--)
+            {
+                QstStatus.Text = $"Hover test in {i}… bring EverQuest on screen (no clicks will be sent).";
+                QstStatus.Foreground = Hex("#9FE0FF");
+                await Task.Delay(1000);
+            }
+
+            var points = new List<(string Label, ScreenPoint P)>();
+            foreach (TurnInStep st in script.Steps)
+                points.Add(($"bag slot: {(st.Item.Length > 0 ? st.Item : "item")}", st.Slot));
+            points.Add(("the NPC", script.Layout.Npc));
+            points.Add(("the GIVE button", script.Layout.GiveButton));
+            if (script.Layout.Confirm.Set) points.Add(("the confirm button", script.Layout.Confirm));
+
+            (int hx, int hy) = HumanizedMouse.CursorPos();
+            foreach ((string label, ScreenPoint p) in points)
+            {
+                if (!p.Set)
+                {
+                    QstStatus.Text = $"{label}: not picked — skipped.";
+                    await Task.Delay(800);
+                    continue;
+                }
+                if (!GetWindowRect(_grindTarget, out KMRECT r))
+                {
+                    QstStatus.Text = "The game window has gone away.";
+                    QstStatus.Foreground = Hex("#FFCB6B");
+                    return;
+                }
+                int w = r.Right - r.Left, h = r.Bottom - r.Top;
+                int x = r.Left + (int)(p.X * w), y = r.Top + (int)(p.Y * h);
+                QstStatus.Text = $"hovering {label} → screen ({x}, {y})";
+                GrindLogLine($"[quest] hover test: {label} at {p.X * 100:0.0}%, {p.Y * 100:0.0}% → screen ({x}, {y})");
+                HumanizedMouse.MoveInstant(x, y);
+                await Task.Delay(1000);
+            }
+            HumanizedMouse.MoveInstant(hx, hy);
+            QstStatus.Text = "Hover test done. Every stop should have sat exactly on its target — if one was off, "
+                           + "re-pick that point. If they were all right, run again and read the [quest] lines in the Grind log.";
+            QstStatus.Foreground = Hex("#7CE38B");
+        }
+        finally { _hoverTestBusy = false; }
+    }
+
 
     /// <summary>Show the shared region picker over a live frame of the game and store the CENTRE
     /// of whatever box was dragged, normalized to the window.</summary>
