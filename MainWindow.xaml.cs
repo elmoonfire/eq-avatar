@@ -61,7 +61,8 @@ public partial class MainWindow : Window
     private static readonly string[] Panels =
     {
         "PanelHome", "PanelLog", "PanelInput", "PanelMaps", "PanelData", "PanelSessions", "PanelCombat", "PanelGrind", "PanelFollower",
-        "PanelLogin", "PanelMouse", "PanelSequencer", "PanelKeymaps", "PanelQuesting", "PanelProfile", "PanelLicensing", "PanelSettings"
+        "PanelLogin", "PanelMouse", "PanelSequencer", "PanelKeymaps", "PanelQuesting", "PanelAutoMerge",
+        "PanelProfile", "PanelLicensing", "PanelSettings"
     };
     private static readonly string[] EqClasses =
     {
@@ -95,10 +96,12 @@ public partial class MainWindow : Window
     private const ushort VK_RETURN = 0x0D;
     private const int PANIC_HOTKEY_ID = 0x4551;   // 'EQ'
     private const int PROBE_HOTKEY_ID = 0x4552;   // repeat last Input-probe action while the game is focused
+    private const int MERGE_HOTKEY_ID = 0x4553;   // Auto Merge: start/stop the bag sweep without leaving the game
     private const int WM_HOTKEY = 0x0312;
     private const uint VK_F12 = 0x7B;
     private const uint VK_F9 = 0x78;
     private const uint MOD_ALT = 0x0001, MOD_CONTROL = 0x0002;
+    private const uint VK_M = 0x4D;
     private Action? _lastProbe;                   // captured so Ctrl+Alt+F9 can re-fire it in-game
     private IntPtr _hwnd;
 
@@ -134,6 +137,9 @@ public partial class MainWindow : Window
         RegisterHotKey(_hwnd, PANIC_HOTKEY_ID, 0, VK_F12);
         // Repeat the last Input-probe action while EQ is focused (safe chord so it won't clash with in-game F9).
         RegisterHotKey(_hwnd, PROBE_HOTKEY_ID, MOD_CONTROL | MOD_ALT, VK_F9);
+        // Ctrl+Alt+M rather than a bare key: this fires while EQ has focus, so a single letter
+        // would be swallowed out of the middle of anything the user typed in game.
+        RegisterHotKey(_hwnd, MERGE_HOTKEY_ID, MOD_CONTROL | MOD_ALT, VK_M);
     }
 
     private IntPtr WndProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
@@ -151,6 +157,11 @@ public partial class MainWindow : Window
             else if (id == PROBE_HOTKEY_ID)
             {
                 _lastProbe?.Invoke();   // fires with EQ focused — this is what makes probe input actually land
+                handled = true;
+            }
+            else if (id == MERGE_HOTKEY_ID)
+            {
+                ToggleMergeRun();       // the whole point is not having to leave the game to press it
                 handled = true;
             }
         }
@@ -189,6 +200,7 @@ public partial class MainWindow : Window
         if (name == "PanelSequencer") InitSequencerUi();
         if (name == "PanelKeymaps") InitKeymapsUi();
         if (name == "PanelQuesting") InitQuestingUi();
+        if (name == "PanelAutoMerge") InitMergeUi();
         if (name == "PanelProfile") UpdateProfilePanel();
         if (name == "PanelData") EnsureDataLoaded();
         if (name == "PanelSessions") RefreshSessions();
@@ -723,7 +735,8 @@ public partial class MainWindow : Window
 
     private void StartGrind_Click(object sender, RoutedEventArgs e)
     {
-        if (_grind is { Running: true } || _hunt is { Running: true } || _questRun is { Running: true })
+        if (_grind is { Running: true } || _hunt is { Running: true }
+            || _questRun is { Running: true } || _mergeRun is { Running: true })
         { ShowToast("Already running — Stop (F12) first"); return; }
         if (_grindTarget == IntPtr.Zero) AutoTargetEq();     // the game may have launched after this page opened
         if (_grindTarget == IntPtr.Zero)
@@ -1363,6 +1376,7 @@ public partial class MainWindow : Window
         _grind?.Stop();
         _hunt?.Stop();
         _questRun?.Stop();          // F12 reaches every role that can send input, not just the grind ones
+        _mergeRun?.Stop();
         _grindTimer.Stop();
         UpdateGrindStats();
     }
@@ -2003,12 +2017,18 @@ public partial class MainWindow : Window
         _grind?.Stop();
         _hunt?.Stop();
         _questRun?.Stop();
+        _mergeRun?.Stop();
         _follower?.Stop();
         EndRoleSession();                 // persist a session cut short by closing the app
         _login?.Stop();
         _mouseCts?.Cancel();
         _mapsWatcher?.Dispose();
-        if (_hwnd != IntPtr.Zero) { UnregisterHotKey(_hwnd, PANIC_HOTKEY_ID); UnregisterHotKey(_hwnd, PROBE_HOTKEY_ID); }
+        if (_hwnd != IntPtr.Zero)
+        {
+            UnregisterHotKey(_hwnd, PANIC_HOTKEY_ID);
+            UnregisterHotKey(_hwnd, PROBE_HOTKEY_ID);
+            UnregisterHotKey(_hwnd, MERGE_HOTKEY_ID);
+        }
         StopWatch();
         _overlay?.Close();
         base.OnClosed(e);

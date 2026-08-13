@@ -155,6 +155,12 @@ public partial class MainWindow
              "The world's reference data: who drops what, where they live, and what the gear does.",
              new[] { NavData, navRaid, navSky, navGuide }),
 
+            // Tools sits between the reference data and the account pages on purpose: these are
+            // hands for the jobs the game makes you do by hand, not things to read.
+            ("Tools", "", "PanelSecTools",
+             "Hands for the jobs the game makes you do by hand.",
+             new[] { NavAutoMerge }),
+
             ("Account", "", "PanelSecAccount",
              "Your character, your subscription, and how this app behaves.",
              new[] { NavProfile, NavLicensing, NavSettings }),
@@ -836,6 +842,13 @@ public partial class MainWindow
                     new NavPage("", "Focus Effects", "Gear that bends your spells — range, duration, damage.", null, "focus"),
                     new NavPage("", "Clickies", "Items you can click for an effect, worn or in a bag.", null, "clickies"),
                     new NavPage("", "Worn Effects", "Effects that apply just for having the item equipped.", null, "worn"),
+                };
+                break;
+
+            case "PanelSecTools":
+                sec.Pages = new[]
+                {
+                    new NavPage("", "Auto Merge", "Point at the copy you want to keep and she folds the rest of the bag into it.", NavAutoMerge),
                 };
                 break;
 

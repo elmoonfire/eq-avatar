@@ -74,6 +74,51 @@ public static class ScreenText
     }
 
     /// <summary>
+    /// OCR one small rectangle of the window, given normalized (0–1) bounds. Returns the text it
+    /// found, joined with spaces, or "" if nothing read.
+    ///
+    /// Reading a 200×20 patch rather than the whole window is not just faster — it is what makes
+    /// a number like "4/32" legible at all. Windows' OCR lays a full 2560-wide game frame out as
+    /// hundreds of fragments, and the digits of a progress counter are among the first things it
+    /// merges into a neighbour. The patch is upscaled first for the same reason.
+    /// </summary>
+    public static async Task<string> ReadRectAsync(IntPtr hwnd, double nx, double ny, double nw, double nh)
+    {
+        if (hwnd == IntPtr.Zero || !GetWindowRect(hwnd, out RECT r)) return "";
+        int winW = Math.Max(1, r.Right - r.Left), winH = Math.Max(1, r.Bottom - r.Top);
+        int x = r.Left + (int)(nx * winW), y = r.Top + (int)(ny * winH);
+        int w = Math.Max(8, (int)(nw * winW)), h = Math.Max(6, (int)(nh * winH));
+
+        OcrEngine? engine = Engine;
+        if (engine is null) return "";
+
+        const int Scale = 3;
+        try
+        {
+            using var shot = new Bitmap(w, h, PixelFormat.Format32bppArgb);
+            using (var g = Graphics.FromImage(shot))
+                g.CopyFromScreen(x, y, 0, 0, new Size(w, h), CopyPixelOperation.SourceCopy);
+
+            using var big = new Bitmap(w * Scale, h * Scale, PixelFormat.Format32bppArgb);
+            using (var g = Graphics.FromImage(big))
+            {
+                g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+                g.DrawImage(shot, 0, 0, big.Width, big.Height);
+            }
+
+            using var ms = new MemoryStream();
+            big.Save(ms, ImageFormat.Bmp);
+            ms.Position = 0;
+            BitmapDecoder dec = await BitmapDecoder.CreateAsync(ms.AsRandomAccessStream());
+            using SoftwareBitmap sw = await dec.GetSoftwareBitmapAsync(
+                BitmapPixelFormat.Bgra8, BitmapAlphaMode.Premultiplied);
+            OcrResult res = await engine.RecognizeAsync(sw);
+            return (res.Text ?? "").Trim();
+        }
+        catch { return ""; }
+    }
+
+    /// <summary>
     /// Find the EQL LaunchPad's green PLAY button by colour when OCR can't read it (it's a graphic,
     /// not OS text). Scans the lower portion of the window for a cluster of saturated green and
     /// returns its centroid in SCREEN coordinates, or null if there isn't a convincing green blob.

@@ -268,6 +268,9 @@
                             <RadioButton x:Name="NavMouse" Style="{StaticResource NavItem}" GroupName="nav" Tag="PanelMouse" Checked="Nav_Checked">
                                 <StackPanel Orientation="Horizontal"><TextBlock Style="{StaticResource NavGlyph}" Text="&#xE962;"/><TextBlock Text="Mouse Motion"/></StackPanel>
                             </RadioButton>
+                            <RadioButton x:Name="NavAutoMerge" Style="{StaticResource NavItem}" GroupName="nav" Tag="PanelAutoMerge" Checked="Nav_Checked">
+                                <StackPanel Orientation="Horizontal"><TextBlock Style="{StaticResource NavGlyph}" Text="&#xE8AB;"/><TextBlock Text="Auto Merge"/></StackPanel>
+                            </RadioButton>
 
                             <TextBlock Style="{StaticResource RailCap}" Text="INSIGHT" Margin="6,14,0,6"/>
                             <RadioButton x:Name="NavCombat" Style="{StaticResource NavItem}" GroupName="nav" Tag="PanelCombat" Checked="Nav_Checked">
@@ -1989,6 +1992,82 @@
                                 </Grid>
 
                                 <StackPanel x:Name="QstListHost"/>
+                            </StackPanel>
+                        </ScrollViewer>
+                    </Grid>
+
+                    <!-- ===== TOOLS → AUTO MERGE (fold a bag of duplicates into one item) ===== -->
+                    <Grid x:Name="PanelAutoMerge" Visibility="Collapsed">
+                        <ScrollViewer VerticalScrollBarVisibility="Auto">
+                            <StackPanel Margin="18,14,18,26" MaxWidth="1000" HorizontalAlignment="Left">
+                                <Border CornerRadius="12" ClipToBounds="True" Margin="0,0,0,12">
+                                    <Image x:Name="ArtMergeBanner" Stretch="Uniform"/>
+                                </Border>
+
+                                <Grid Margin="0,0,0,4">
+                                    <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                                        <TextBlock Text="AUTO MERGE" FontWeight="Bold" FontSize="15" Foreground="#BFE3FF" VerticalAlignment="Center"/>
+                                        <Border x:Name="MrgStampBorder" Background="#2A2410" BorderBrush="#7A6320" BorderThickness="1" CornerRadius="6"
+                                                Padding="8,2" Margin="10,0,0,0" VerticalAlignment="Center"
+                                                ToolTip="What the target item's tier counter reads right now.">
+                                            <TextBlock x:Name="MrgStampText" Text="not read yet" FontSize="10.5" Foreground="#FFE1A6"/>
+                                        </Border>
+                                        <Border Background="#16202E" BorderBrush="#2A4A57" BorderThickness="1" CornerRadius="999"
+                                                Width="22" Height="22" Cursor="Hand" MouseLeftButtonUp="MrgInfo_Click" Margin="10,0,0,0"
+                                                ToolTip="How the sweep works, why it reads the tier counter, and the upgrade arithmetic.">
+                                            <TextBlock Text="i" FontFamily="Georgia" FontStyle="Italic" FontWeight="Bold" FontSize="13"
+                                                       Foreground="#7FB2D9" HorizontalAlignment="Center" VerticalAlignment="Center" Margin="0,-1,0,0"/>
+                                        </Border>
+                                    </StackPanel>
+                                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                                        <Button x:Name="MrgRunBtn" Content="▶  Merge the bag" Click="MrgRun_Click" Padding="14,6" FontWeight="SemiBold" Margin="0,0,8,0"
+                                                ToolTip="Walk every slot in the picked bag area and fold each copy into the target item."/>
+                                        <Button Content="Test read" Click="MrgTest_Click" Padding="12,6" Margin="0"
+                                                ToolTip="Read the tier counter once and show what it saw — do this before a run."/>
+                                    </StackPanel>
+                                </Grid>
+
+                                <Border Background="#121A28" BorderBrush="#26405A" BorderThickness="1"
+                                        CornerRadius="10" Padding="12,10" Margin="0,6,0,10">
+                                    <StackPanel>
+                                        <TextBlock TextWrapping="Wrap" FontSize="11.5" Foreground="#9FB6CC"
+                                                   Text="① In game, open the item you want to KEEP (the highest one) so its Merge Item / Place Item buttons and its tier counter are visible   ② open the bag holding the copies   ③ make the four picks below   ④ press Merge the bag, or your hotkey."/>
+                                        <TextBlock x:Name="MrgStatus" Text="" TextWrapping="Wrap" FontSize="11.5" Foreground="#7CE38B" Margin="0,6,0,0"/>
+                                    </StackPanel>
+                                </Border>
+
+                                <TextBlock Text="SHOW HER THE FOUR SPOTS" FontSize="9.5" FontWeight="Bold" Foreground="#5E7C9A" Margin="0,4,0,6"/>
+                                <StackPanel x:Name="MrgPickHost" Margin="0,0,0,10"/>
+
+                                <TextBlock Text="THE BAG GRID" FontSize="9.5" FontWeight="Bold" Foreground="#5E7C9A" Margin="0,4,0,6"/>
+                                <StackPanel Orientation="Horizontal" Margin="0,0,0,10">
+                                    <TextBlock Text="columns" Foreground="#9FB6CC" FontSize="11" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                                    <TextBox x:Name="MrgCols" Width="52" FontSize="11.5" VerticalAlignment="Center" Margin="0,0,14,0"
+                                             ToolTip="How many slots across the box you dragged."/>
+                                    <TextBlock Text="rows" Foreground="#9FB6CC" FontSize="11" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                                    <TextBox x:Name="MrgRows" Width="52" FontSize="11.5" VerticalAlignment="Center" Margin="0,0,14,0"
+                                             ToolTip="How many slots down the box you dragged."/>
+                                    <Button Content="Save grid" Click="MrgSaveGrid_Click" Padding="12,3" VerticalAlignment="Center" Margin="0,0,10,0"/>
+                                    <TextBlock x:Name="MrgGridText" Text="" Foreground="#5E7C9A" FontSize="10.5" VerticalAlignment="Center"/>
+                                </StackPanel>
+
+                                <TextBlock Text="HOW FAR THIS GETS YOU" FontSize="9.5" FontWeight="Bold" Foreground="#5E7C9A" Margin="0,4,0,6"/>
+                                <Border Background="#121A28" BorderBrush="#26405A" BorderThickness="1"
+                                        CornerRadius="10" Padding="12,10" Margin="0,0,0,10">
+                                    <StackPanel>
+                                        <StackPanel Orientation="Horizontal" Margin="0,0,0,6">
+                                            <TextBlock Text="current +" Foreground="#9FB6CC" FontSize="11" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                                            <TextBox x:Name="MrgPlus" Width="46" FontSize="11.5" VerticalAlignment="Center" Margin="0,0,14,0"
+                                                     TextChanged="MrgMath_Changed" ToolTip="The plus level of the item you're merging into."/>
+                                            <TextBlock Text="target +" Foreground="#9FB6CC" FontSize="11" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                                            <TextBox x:Name="MrgTarget" Width="46" FontSize="11.5" VerticalAlignment="Center" Margin="0,0,14,0"
+                                                     TextChanged="MrgMath_Changed" ToolTip="Where you're heading. The ladder doubles at every step."/>
+                                        </StackPanel>
+                                        <TextBlock x:Name="MrgMathText" Text="" TextWrapping="Wrap" FontSize="11.5" Foreground="#C6D2DE"/>
+                                    </StackPanel>
+                                </Border>
+
+                                <TextBlock x:Name="MrgHotkeyText" Text="" FontSize="10.5" Foreground="{StaticResource TextDim}" Margin="1,0,0,0"/>
                             </StackPanel>
                         </ScrollViewer>
                     </Grid>

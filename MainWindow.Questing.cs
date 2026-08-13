@@ -738,8 +738,8 @@ public partial class MainWindow
     private void StartQuestRun(QuestScript script)
     {
         if (_questRun is { Running: true }) { ShowToast("Already running — Stop first"); return; }
-        if (_grind is { Running: true } || _hunt is { Running: true })
-        { ShowToast("Grind is running — stop it first"); return; }
+        if (_grind is { Running: true } || _hunt is { Running: true } || _mergeRun is { Running: true })
+        { ShowToast("Something else is running — Stop (F12) first"); return; }
 
         if (_grindTarget == IntPtr.Zero) AutoTargetEq();
         if (_grindTarget == IntPtr.Zero)
