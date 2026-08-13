@@ -571,11 +571,11 @@ public partial class MainWindow
             () => { if (PickQuestPoint(script.Layout.Confirm, "the confirm button",
                         "If a confirmation appears after GIVE, click ON its button and press Enter.")) Persist(); RenderQuests(); }));
         picks.Children.Add(MakePickTile("ui-pick-bag.jpg", "the bag area",
-            $"{script.BagCols}×{script.BagRows} slots, scanned for icons", "",
+            "every slot scanned at your icon's size", "",
             script.BagSet,
-            "Drag ONE box around the whole block of bag slots the quest items live in. At run time she scans its "
-            + "cells for each item's icon and clicks the copy that's actually there — the picked slots become "
-            + "fallbacks. Click to pick, then set columns × rows below.",
+            "Drag ONE box around ALL your open bags — every slot inside it gets scanned. At run time she slides a "
+            + "window the size of each item's learned icon across this area and clicks the copy that's actually "
+            + "there; the picked slots become fallbacks. Click to pick.",
             () => { if (PickQuestRect(r => { script.BagX = r.X; script.BagY = r.Y; script.BagW = r.W; script.BagH = r.H; },
                         "the bag area",
                         "Drag a box around the WHOLE block of bag slots holding the quest items — corner to corner — then press Enter."))
@@ -647,6 +647,8 @@ public partial class MainWindow
                             (frame, box) =>
                             {
                                 captured.IconSig = QuestFind.SigFromRegion(frame, box.X, box.Y, box.W, box.H);
+                                captured.IconW = box.W;              // the box's own size drives the sliding
+                                captured.IconH = box.H;              // search — no columns, no rows, no questions
                                 if (captured.IconSig is not null)
                                     QstStatus.Text = $"Saved — and learned {captured.Item}'s icon, so she'll find the "
                                                    + "next copy wherever it sits in the bag area.";
@@ -790,31 +792,11 @@ public partial class MainWindow
         };
         smart.Click += (_, _) => { script.SmartFind = smart.IsChecked == true; Persist(); };
 
+        // (No bag columns × rows here anymore. The sliding search takes its window size from the
+        // TIGHT box dragged around the item itself, so every slot in the bag area gets scanned
+        // without the user ever counting slots. BagCols/BagRows live on only as a fallback grid
+        // for steps picked before icon sizes were stored.)
         opts.Children.Add(smart);
-        opts.Children.Add(new TextBlock { Text = "bag", Foreground = Hex("#9FB6CC"), FontSize = 11, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 4, 0) });
-        var bagCols = new TextBox
-        {
-            Text = script.BagCols.ToString(), Width = 34, FontSize = 11.5, VerticalAlignment = VerticalAlignment.Center,
-            ToolTip = "Columns across the dragged bag area.",
-        };
-        var bagRows = new TextBox
-        {
-            Text = script.BagRows.ToString(), Width = 34, FontSize = 11.5, VerticalAlignment = VerticalAlignment.Center,
-            Margin = new Thickness(4, 0, 14, 0), ToolTip = "Rows down the dragged bag area.",
-        };
-        bagCols.LostFocus += (_, _) =>
-        {
-            script.BagCols = int.TryParse(bagCols.Text.Trim(), out int c) ? Math.Clamp(c, 1, 20) : script.BagCols;
-            bagCols.Text = script.BagCols.ToString(); Persist();
-        };
-        bagRows.LostFocus += (_, _) =>
-        {
-            script.BagRows = int.TryParse(bagRows.Text.Trim(), out int r) ? Math.Clamp(r, 1, 20) : script.BagRows;
-            bagRows.Text = script.BagRows.ToString(); Persist();
-        };
-        opts.Children.Add(bagCols);
-        opts.Children.Add(new TextBlock { Text = "×", Foreground = Hex("#5E7C9A"), FontSize = 11, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(4, 0, 0, 0) });
-        opts.Children.Add(bagRows);
         opts.Children.Add(hail);
         opts.Children.Add(hailKey);
         opts.Children.Add(targ);
@@ -931,11 +913,17 @@ public partial class MainWindow
                 ScreenPoint p = st.Slot;
                 if (script.SmartFind && script.BagSet && st.HasIcon)
                 {
-                    QuestFind.IconHit? hit = QuestFind.FindIconCell(_grindTarget, script, st);
-                    if (hit is not null && hit.Dist <= QuestFind.IconAcceptDistance)
+                    bool sliding = st.HasIconSize;
+                    QuestFind.IconHit? hit = sliding
+                        ? QuestFind.FindIconSliding(_grindTarget, script, st)
+                        : QuestFind.FindIconCell(_grindTarget, script, st);
+                    double accept = sliding ? QuestFind.SlidingAcceptDistance : QuestFind.IconAcceptDistance;
+                    if (hit is not null && hit.Dist <= accept)
                     {
                         p = new ScreenPoint { X = hit.X, Y = hit.Y };
-                        label += $" — FOUND in cell {hit.Row + 1},{hit.Col + 1} (match {hit.Dist:0})";
+                        label += sliding
+                            ? $" — FOUND (match {hit.Dist:0})"
+                            : $" — FOUND in cell {hit.Row + 1},{hit.Col + 1} (match {hit.Dist:0})";
                     }
                     else
                     {

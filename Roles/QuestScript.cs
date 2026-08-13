@@ -42,11 +42,17 @@ public sealed class TurnInStep
     /// lets the runner find the NEXT copy after this slot empties: an icon is a fixed sprite the UI
     /// stamps into whatever slot holds the item — the one screen element that never changes.</summary>
     public double[]? IconSig { get; set; }
+    /// <summary>The dragged icon box's size (normalized) — the sliding search compares windows of
+    /// EXACTLY this size, so a match is same-region-to-same-region and scores razor-sharp.</summary>
+    public double IconW { get; set; }
+    public double IconH { get; set; }
 
     [JsonIgnore] public bool HasIcon => IconSig is { Length: 108 };
+    [JsonIgnore] public bool HasIconSize => IconW > 0.002 && IconH > 0.002;
 
     public TurnInStep Clone() => new()
-    { Item = Item, Qty = Qty, Quest = Quest, Slot = new ScreenPoint { X = Slot.X, Y = Slot.Y }, IconSig = IconSig?.ToArray() };
+    { Item = Item, Qty = Qty, Quest = Quest, Slot = new ScreenPoint { X = Slot.X, Y = Slot.Y },
+      IconSig = IconSig?.ToArray(), IconW = IconW, IconH = IconH };
 }
 
 /// <summary>

@@ -240,21 +240,30 @@ public sealed class QuestRole
         ScreenPoint slot = step.Slot;
         if (_script.SmartFind && _script.BagSet && step.HasIcon)
         {
-            QuestFind.IconHit? hit = QuestFind.FindIconCell(_hwnd(), _script, step);
+            // The sliding search compares windows of the icon's OWN size, so its scores actually
+            // discriminate (the grid compare once called Indicolite Gauntlets a totem). Steps
+            // picked before icon sizes were stored fall back to the old grid scan.
+            bool sliding = step.HasIconSize;
+            QuestFind.IconHit? hit = sliding
+                ? QuestFind.FindIconSliding(_hwnd(), _script, step)
+                : QuestFind.FindIconCell(_hwnd(), _script, step);
+            double accept = sliding ? QuestFind.SlidingAcceptDistance : QuestFind.IconAcceptDistance;
             if (hit is null)
             {
                 Log?.Invoke($"⚠ couldn't scan the bag area for {step.Item} — using the picked slot.");
             }
-            else if (hit.Dist <= QuestFind.IconAcceptDistance)
+            else if (hit.Dist <= accept)
             {
                 slot = new ScreenPoint { X = hit.X, Y = hit.Y };
-                if (_narrate) Log?.Invoke($"· found {step.Item} in bag cell {hit.Row + 1},{hit.Col + 1} (match {hit.Dist:0})");
+                if (_narrate) Log?.Invoke(sliding
+                    ? $"· found {step.Item} at {hit.X * 100:0.0}%, {hit.Y * 100:0.0}% of the window (match {hit.Dist:0})"
+                    : $"· found {step.Item} in bag cell {hit.Row + 1},{hit.Col + 1} (match {hit.Dist:0})");
             }
             else
             {
-                // No cell holds this icon: the honest out-of-items signal, seen BEFORE an item is
+                // No spot holds this icon: the honest out-of-items signal, seen BEFORE an item is
                 // offered rather than inferred from two unanswered offers.
-                Log?.Invoke($"✖ no {step.Item} found in the bag area (closest cell matched {hit.Dist:0}, need ≤ {QuestFind.IconAcceptDistance:0}).");
+                Log?.Invoke($"✖ no {step.Item} found in the bag area (closest match {hit.Dist:0}, need ≤ {accept:0}).");
                 _emptyBagMiss = true;
                 return false;
             }
@@ -340,13 +349,18 @@ public sealed class QuestRole
             {
                 var unarmed = new List<string>();
                 if (!_script.BagSet) unarmed.Add("the bag area isn't dragged");
+                var oldSig = new List<string>();
                 foreach (TurnInStep st in _script.Steps)
                     if (!st.HasIcon) unarmed.Add($"{st.Item}'s icon isn't learned (re-pick its slot)");
+                    else if (!st.HasIconSize) oldSig.Add(st.Item);
                 if (!_script.NpcAnchorLearned) unarmed.Add("the NPC nameplate isn't anchored (re-pick him while targeted)");
                 Log?.Invoke(unarmed.Count == 0
                     ? "smart find ARMED: items by icon in the bag area, the NPC by nameplate."
                     : "⚠ smart find is ON but partly unarmed — " + string.Join("; ", unarmed)
                       + ". Unarmed parts fall back to the fixed picks, which is exactly what failed last time.");
+                if (oldSig.Count > 0)
+                    Log?.Invoke("· " + string.Join(", ", oldSig) + " still use(s) the old grid scan — "
+                              + "re-pick the slot once and the precise sliding search takes over.");
             }
 
             // PER STEP, not one counter for the run. A cycle restarts from the top after any

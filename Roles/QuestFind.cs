@@ -49,6 +49,11 @@ public static class QuestFind
     /// moves, and would send an item-laden click into UI chrome — so fall back to the fixed pick
     /// instead of trusting it.</summary>
     public const double NpcMaxDrift = 0.22;
+    /// <summary>Accept threshold for the SLIDING search, which compares windows of the exact
+    /// learned size: aligned true matches score under ~15, a different item's icon 50+. Far
+    /// tighter than the old grid compare — which once called Indicolite Gauntlets a totem at 24,
+    /// because inner-70%-of-a-guessed-cell versus a tight drag blurs everything toward everything.</summary>
+    public const double SlidingAcceptDistance = 35;
 
     // ---------------------------------------------------------------- capture
 
@@ -127,7 +132,37 @@ public static class QuestFind
         return sum / a.Length;
     }
 
+    /// <summary>Col/Row are -1 for sliding-search hits, which aren't grid-aligned.</summary>
     public sealed record IconHit(double X, double Y, int Col, int Row, double Dist);
+
+    /// <summary>
+    /// Slide a window of the learned icon's OWN size across the bag area in half-icon steps and
+    /// return the best-matching position. No columns, no rows, no questions for the user: the
+    /// tight box they dragged around one copy already says how big a slot's icon is, and comparing
+    /// same-sized regions is what makes the score mean something.
+    /// </summary>
+    public static IconHit? FindIconSliding(IntPtr hwnd, QuestScript script, TurnInStep step)
+    {
+        if (!script.BagSet || step.IconSig is not { Length: SigGrid * SigGrid * 3 } || !step.HasIconSize) return null;
+        using Bitmap? frame = Capture(hwnd);
+        if (frame is null) return null;
+
+        double bw = step.IconW, bh = step.IconH;
+        double stepX = Math.Max(bw / 2, 0.002), stepY = Math.Max(bh / 2, 0.002);
+        IconHit? best = null;
+        int guard = 0;
+        for (double y = script.BagY; y + bh <= script.BagY + script.BagH + 1e-9; y += stepY)
+            for (double x = script.BagX; x + bw <= script.BagX + script.BagW + 1e-9; x += stepX)
+            {
+                if (++guard > 20000) return best;              // a absurd bag/box ratio must not hang the gesture
+                double[]? sig = SigFromRegion(frame, x, y, bw, bh);
+                if (sig is null) continue;
+                double dist = SigDistance(sig, step.IconSig);
+                if (best is null || dist < best.Dist)
+                    best = new IconHit(x + bw / 2, y + bh / 2, -1, -1, dist);
+            }
+        return best;
+    }
 
     /// <summary>
     /// Scan the script's bag area for the cell that best matches a step's learned icon.
