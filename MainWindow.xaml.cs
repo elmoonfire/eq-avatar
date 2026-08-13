@@ -284,8 +284,7 @@ public partial class MainWindow : Window
         if (tier != null)
         {
             ChipTierBadge.Visibility = Visibility.Visible;
-            ChipTierBadge.Background = TierFill(tier);
-            ChipTierBadge.BorderBrush = TierBorder(tier);
+            StyleTierPill(tier);
             ChipTierText.Text = tier.ToUpperInvariant();
             ChipSub.Text = charLine.Length > 0 ? charLine : (_settings.HubServer ?? "Rivervale");
         }
@@ -299,6 +298,48 @@ public partial class MainWindow : Window
         UpdateProfilePanel();
         RefreshLoadoutUi();               // loadout line + hover menu; no-op until one is recorded
     }
+
+    /// <summary>
+    /// The subscription pill, styled to match the one the website puts in its own header bar, so
+    /// the app and the portal read as the same product.
+    ///
+    /// The site tints rather than fills: background is the tier colour at 13% alpha, the border is
+    /// the same colour at 40%, and THE TEXT IS THE TIER COLOUR. The app had been filling the pill
+    /// solid and printing near-black on top, which is the treatment the site reserves for Plaid
+    /// alone — so every tier looked like the top tier. Plaid keeps its Spaceballs three-stop
+    /// gradient with dark text, because on Plaid that IS the point.
+    ///
+    /// Colours come from <see cref="TierColor"/>, which mirrors the hub's $TIERS table; geometry
+    /// (2x8 padding, 1px border, 10px bold) mirrors the site's .tier rule.
+    /// </summary>
+    private void StyleTierPill(string tier)
+    {
+        ChipTierBadge.Padding = new Thickness(8, 2, 8, 2);
+        ChipTierBadge.BorderThickness = new Thickness(1);
+
+        if (string.Equals(tier, "Plaid", StringComparison.OrdinalIgnoreCase))
+        {
+            ChipTierBadge.Background = PlaidBrush();
+            ChipTierBadge.BorderBrush = Hex("#F2D9FF");
+            ChipTierText.Foreground = Hex("#0B0F16");
+            return;
+        }
+
+        Color c = TierColor(tier);
+        ChipTierBadge.Background = new SolidColorBrush(Color.FromArgb(0x22, c.R, c.G, c.B));
+        ChipTierBadge.BorderBrush = new SolidColorBrush(Color.FromArgb(0x66, c.R, c.G, c.B));
+        ChipTierText.Foreground = new SolidColorBrush(c);
+    }
+
+    /// <summary>Tier accent colours, mirroring the hub's $TIERS table.</summary>
+    private static Color TierColor(string tier) => tier switch
+    {
+        "Plaid" => Color.FromRgb(0xE8, 0x79, 0xF9),
+        "Hyper" => Color.FromRgb(0x7C, 0xE3, 0x8B),
+        "Ludicrous" => Color.FromRgb(0xFF, 0xB7, 0x4D),
+        "LDT Clan" => Color.FromRgb(0x4F, 0xC3, 0xF7),
+        _ => Color.FromRgb(0x9A, 0xA7, 0xB4),
+    };
 
     /// <summary>Brighter sibling of each tier's fill — the pill's rim light.</summary>
     private Brush TierBorder(string tier) => tier switch
