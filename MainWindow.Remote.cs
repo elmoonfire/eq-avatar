@@ -118,10 +118,17 @@ public partial class MainWindow
 
     private (bool ok, string result) RemoteStop()
     {
-        bool wasRunning = _grind is { Running: true } || _hunt is { Running: true } || _follower is { Running: true };
+        // Every role that can send input, exactly like F12 — the phone's Stop button meaning
+        // "stop, except the two newest runners" is not a promise anyone would expect it to make.
+        bool wasRunning = _grind is { Running: true } || _hunt is { Running: true }
+                       || _follower is { Running: true } || _questRun is { Running: true }
+                       || _mergeRun is { Running: true } || _questStarting;
         _grind?.Stop();
         _hunt?.Stop();
         _follower?.Stop();
+        _questRun?.Stop();
+        _mergeRun?.Stop();
+        _questStartCancelled = true;
         _grindTimer.Stop();
         _followerTimer.Stop();
         UpdateGrindStats();

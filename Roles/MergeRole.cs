@@ -284,6 +284,21 @@ public sealed class MergeRole
                 return;
             }
 
+            // Wait for the game to be in front AND to have drawn a frame before the very first
+            // read. ReadTierAsync photographs the desktop at fixed coordinates: run it while the
+            // app is still on top and it OCRs OUR pixels, then blames the user's pick — sending
+            // them off to re-pick a box that was never wrong.
+            // WaitFocus only gives up when the run was cancelled. Returning bare would skip Finish
+            // — and Finish is the only thing that clears _alive, so Running would stay true with
+            // nothing running and every other role would refuse to start until a restart.
+            if (!await WaitFocus(ct))
+            {
+                ct.ThrowIfCancellationRequested();        // the handler below homes the cursor and finishes
+                Finish("Stopped before the first slot — nothing was merged.");
+                return;
+            }
+            await Task.Delay(600, ct);
+
             (int Have, int Need)? start = await ReadTierAsync();
             if (start is null)
             {

@@ -219,7 +219,8 @@ public partial class MainWindow
     {
         if (_mergeRun is { Running: true }) { _mergeRun.Stop(); return; }
 
-        if (_grind is { Running: true } || _hunt is { Running: true } || _questRun is { Running: true })
+        if (_grind is { Running: true } || _hunt is { Running: true }
+            || _questRun is { Running: true } || _questStarting)
         { ShowToast("Something else is running — Stop (F12) first"); return; }
 
         if (_grindTarget == IntPtr.Zero) AutoTargetEq();
@@ -254,6 +255,9 @@ public partial class MainWindow
         });
         _mergeRun.Stopped += () => Dispatcher.Invoke(RenderMergeUi);
         _mergeRun.Start();
+        // Started from the app the game is behind us; started from Ctrl+Alt+M it is already in
+        // front and this costs nothing. The sweep waits for focus and for a painted frame itself.
+        FocusGameSoon();
         RenderMergeUi();
     }
 

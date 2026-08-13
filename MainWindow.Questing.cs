@@ -894,6 +894,18 @@ public partial class MainWindow
             QstStatus.Foreground = Hex("#9FE0B8");
         };
         opts.Children.Add(bagsKey);
+
+        var focusBox = new CheckBox
+        {
+            Content = "focus the game on start", IsChecked = _settings.FocusGameOnStart,
+            Foreground = Hex("#9FB6CC"), FontSize = 11, Margin = new Thickness(0, 0, 14, 0),
+            VerticalAlignment = VerticalAlignment.Center,
+            ToolTip = "Bring EverQuest to the front when you press Run, instead of you alt-tabbing to it while "
+                    + "she waits. Applies to every runner, not just this one. Only ever at the START — tabbing "
+                    + "away still pauses her, and she will never grab focus back off you mid-run.",
+        };
+        focusBox.Click += (_, _) => { _settings.FocusGameOnStart = focusBox.IsChecked == true; _settings.Save(); };
+        opts.Children.Add(focusBox);
         opts.Children.Add(new TextBlock { Text = "repeat", Foreground = Hex("#9FB6CC"), FontSize = 11, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 6, 0) });
         var repeat = new TextBox
         {
@@ -915,7 +927,10 @@ public partial class MainWindow
         stack.Children.Add(opts);
 
         // ---- run / stop ----
-        bool running = _questRun is { Running: true }
+        // "Starting" counts as running for the button: while the game is being brought to the
+        // front there is no role object yet, and a button still offering "Run" is an invitation to
+        // start a second one.
+        bool running = (_questStarting || _questRun is { Running: true })
                     && QuestCatalog.Norm(_questRunFor) == QuestCatalog.Norm(script.Quest);
         var bar = new StackPanel { Orientation = Orientation.Horizontal };
         var run = new Button
@@ -928,7 +943,13 @@ public partial class MainWindow
                 ? "Stop the run. F12 and tabbing away from the game also stop it."
                 : "Start repeating this cycle. The game must be the focused window; tab away and she pauses.",
         };
-        run.Click += (_, _) => { if (_questRun is { Running: true }) _questRun.Stop(); else { Persist(); StartQuestRun(script); } };
+        run.Click += async (_, _) =>
+        {
+            if (_questRun is { Running: true }) { _questRun.Stop(); return; }
+            if (_questStarting) { _questStartCancelled = true; return; }   // stop a start that's mid-flight
+            Persist();
+            await StartQuestRunAsync(script);
+        };
         bar.Children.Add(run);
 
         var hover = new Button
@@ -946,8 +967,13 @@ public partial class MainWindow
         var stats = new TextBlock
         {
             Foreground = Hex("#9FE0B8"), FontSize = 11, VerticalAlignment = VerticalAlignment.Center,
-            Text = running
-                ? $"{_questRun!.Stats.State} · {_questRun.Stats.Cycles} cycle(s), {_questRun.Stats.HandIns} hand-in(s)"
+            // NOT gated on `running` — that now includes the start window, where the role object
+            // does not exist yet and reading its stats would be a null dereference on the very
+            // first press of Run in a session.
+            Text = _questRun is { Running: true } live
+                        && QuestCatalog.Norm(_questRunFor) == QuestCatalog.Norm(script.Quest)
+                ? $"{live.Stats.State} · {live.Stats.Cycles} cycle(s), {live.Stats.HandIns} hand-in(s)"
+                : running ? "starting…"
                 : script.LifetimeCompleted > 0 ? $"{script.LifetimeCompleted} cycle(s) all time" : "",
         };
         bar.Children.Add(stats);
@@ -981,7 +1007,7 @@ public partial class MainWindow
     private async Task HoverTestAsync(QuestScript script)
     {
         if (_hoverTestBusy) return;
-        if (_questRun is { Running: true }) { ShowToast("Stop the run first"); return; }
+        if (_questStarting || _questRun is { Running: true }) { ShowToast("Stop the run first"); return; }
         if (_grindTarget == IntPtr.Zero) AutoTargetEq();
         if (_grindTarget == IntPtr.Zero)
         {
@@ -992,9 +1018,15 @@ public partial class MainWindow
         _hoverTestBusy = true;
         try
         {
-            for (int i = 3; i >= 1; i--)
+            // Same courtesy as a run: put the game on screen rather than asking the user to race a
+            // countdown to it. The countdown stays (shortened) even when focus succeeds — the whole
+            // point of this test is that you WATCH it, so you get a moment to look at the game.
+            bool front = _settings.FocusGameOnStart && await GameFocus.BringAndSettleAsync(_grindTarget, settleMs: 400);
+            for (int i = front ? 2 : 3; i >= 1; i--)
             {
-                QstStatus.Text = $"Hover test in {i}… bring EverQuest on screen (no clicks will be sent).";
+                QstStatus.Text = front
+                    ? $"Hover test in {i}… watch the cursor (no clicks will be sent)."
+                    : $"Hover test in {i}… bring EverQuest on screen (no clicks will be sent).";
                 QstStatus.Foreground = Hex("#9FE0FF");
                 await Task.Delay(1000);
             }
@@ -1186,9 +1218,24 @@ public partial class MainWindow
         finally { frameClone.Dispose(); }
     }
 
-    private void StartQuestRun(QuestScript script)
+    /// <summary>True from the moment Run is pressed until the runner is actually alive.
+    ///
+    /// Focusing the game is asynchronous, so there is now a window — up to a couple of seconds if
+    /// the game is minimized — in which the run has been ORDERED but <c>_questRun</c> is still
+    /// null. Every "is something running?" test in the app reads that field, so without this flag
+    /// the window is a hole: a second Run click starts a SECOND runner that nothing holds a
+    /// reference to (unstoppable, clicking against the first), F12 finds nothing to stop, and
+    /// Ctrl+Alt+M can start a merge sweep that ends up sharing the cursor with the quest run.
+    /// "Running" has to mean "ordered and not yet finished", not "the object exists".</summary>
+    private bool _questStarting;
+    /// <summary>Set when a stop arrives DURING that window — F12 must not be a no-op just because
+    /// the thing it stops hasn't been constructed yet.</summary>
+    private bool _questStartCancelled;
+
+    private async Task StartQuestRunAsync(QuestScript script)
     {
-        if (_questRun is { Running: true }) { ShowToast("Already running — Stop first"); return; }
+        if (_questStarting || _questRun is { Running: true }) { ShowToast("Already running — Stop first"); return; }
+        if (_hoverTestBusy) { ShowToast("The hover test is running — let it finish"); return; }
         if (_grind is { Running: true } || _hunt is { Running: true } || _mergeRun is { Running: true })
         { ShowToast("Something else is running — Stop (F12) first"); return; }
 
@@ -1206,22 +1253,58 @@ public partial class MainWindow
             return;
         }
 
-        _currentLog ??= EQAvatar.Spike.Log.EqLogWatcher.FindNewestLog(LogFolderBox.Text.Trim());
-        var sink = new ForegroundSendInputSink(() => _grindTarget);
-        _questRun = new QuestRole(script, sink, _settings, () => _grindTarget, _currentLog);
-        _questRunFor = script.Quest;
-        _questRun.Log += m => Dispatcher.Invoke(() =>
+        _questStarting = true;
+        _questStartCancelled = false;
+        _questRunFor = script.Quest;        // set BEFORE the await so this card owns the start
+        try
         {
-            QstStatus.Text = m;
-            QstStatus.Foreground = m.StartsWith("✖") ? Hex("#FFCB6B") : Hex("#7CE38B");
-            GrindLogLine("[quest] " + m);
-            // The runner speaks exactly when the picture changes — a hand-in confirmed, a miss, a
-            // cycle done — so this is what keeps the fire bar and the ×count column live mid-run.
+            // Inside the try: a render that throws must not strand _questStarting true, which
+            // would leave every role in the app refusing to start until a restart.
+            RenderQuests();                 // the button reads Stop from here on — one click, one run
+
+            // Hand control to the game. Pressing Run IS the intent to do that, and the runner
+            // refuses to act while anything else is focused — so without this the first thing the
+            // user sees is "Paused — EverQuest isn't the focused window" and a race to alt-tab.
+            if (_settings.FocusGameOnStart)
+            {
+                QstStatus.Text = "Bringing EverQuest to the front…";
+                QstStatus.Foreground = Hex("#9FE0FF");
+                if (!await GameFocus.BringAndSettleAsync(_grindTarget))
+                {
+                    QstStatus.Text = "Couldn't bring EverQuest to the front — click the game yourself and she'll pick up from there.";
+                    QstStatus.Foreground = Hex("#FFCB6B");
+                }
+            }
+
+            // Stopped while we were bringing the game up (F12, or the Stop button). Honour it: the
+            // whole value of a panic key is that it works at the moment you reach for it.
+            if (_questStartCancelled)
+            {
+                QstStatus.Text = "Stopped before she started.";
+                QstStatus.Foreground = Hex("#FFCB6B");
+                return;
+            }
+
+            _currentLog ??= EQAvatar.Spike.Log.EqLogWatcher.FindNewestLog(LogFolderBox.Text.Trim());
+            var sink = new ForegroundSendInputSink(() => _grindTarget);
+            _questRun = new QuestRole(script, sink, _settings, () => _grindTarget, _currentLog);
+            _questRun.Log += m => Dispatcher.Invoke(() =>
+            {
+                QstStatus.Text = m;
+                QstStatus.Foreground = m.StartsWith("✖") ? Hex("#FFCB6B") : Hex("#7CE38B");
+                GrindLogLine("[quest] " + m);
+                // The runner speaks exactly when the picture changes — a hand-in confirmed, a miss,
+                // a cycle done — so this keeps the fire bar and the ×count column live mid-run.
+                RenderQuests();
+            });
+            _questRun.Stopped += () => Dispatcher.Invoke(RenderQuests);
+            _questRun.Start();
+        }
+        finally
+        {
+            _questStarting = false;
             RenderQuests();
-        });
-        _questRun.Stopped += () => Dispatcher.Invoke(RenderQuests);
-        _questRun.Start();
-        RenderQuests();
+        }
     }
 
     // ---------------------------------------------------------------- the ⓘ guide

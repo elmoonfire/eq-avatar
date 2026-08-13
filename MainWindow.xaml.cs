@@ -736,7 +736,7 @@ public partial class MainWindow : Window
     private void StartGrind_Click(object sender, RoutedEventArgs e)
     {
         if (_grind is { Running: true } || _hunt is { Running: true }
-            || _questRun is { Running: true } || _mergeRun is { Running: true })
+            || _questRun is { Running: true } || _questStarting || _mergeRun is { Running: true })
         { ShowToast("Already running — Stop (F12) first"); return; }
         if (_grindTarget == IntPtr.Zero) AutoTargetEq();     // the game may have launched after this page opened
         if (_grindTarget == IntPtr.Zero)
@@ -759,6 +759,7 @@ public partial class MainWindow : Window
             _hunt.Log += m => Dispatcher.Invoke(() => GrindLogLine(m));
             _hunt.Stopped += () => Dispatcher.Invoke(() => { _grindTimer.Stop(); UpdateGrindStats(); EndRoleSession(); });
             _hunt.Start();
+            FocusGameSoon();
             _grindTimer.Start();
             Recorder.Begin(GrindModeLabel(), SnapshotGrindSettings(hunt: true));
             if (_mapsWatcher is null) StartMapsWatcher();
@@ -780,10 +781,39 @@ public partial class MainWindow : Window
         _grind.Log += m => Dispatcher.Invoke(() => GrindLogLine(m));
         _grind.Stopped += () => Dispatcher.Invoke(() => { _grindTimer.Stop(); UpdateGrindStats(); EndRoleSession(); });
         _grind.Start();
+        FocusGameSoon();
         _grindTimer.Start();
         Recorder.Begin("Grind", SnapshotGrindSettings(hunt: false));
         if (_mapsWatcher is null) StartMapsWatcher();
         if (_currentLog is null) GrindLogLine("No log found — kills/xp/death-safety are off until you set the log folder on the Log Reader panel.");
+    }
+
+    /// <summary>
+    /// Hand the foreground to EverQuest, off the UI thread, without waiting for it.
+    ///
+    /// Called AFTER a role has actually started — never before its validation — so a start that
+    /// refuses (empty rotation, missing pick) leaves its red banner on a window the user can still
+    /// see, instead of yanking them into the game and explaining nothing.
+    ///
+    /// Fire-and-forget by design: the roles all wait for focus themselves, and the remote-control
+    /// path calls the start handler and immediately reads _grind/_hunt to report whether the start
+    /// took — an await here would make it answer "could not start" every time.
+    /// </summary>
+    private void FocusGameSoon()
+    {
+        if (!_settings.FocusGameOnStart) return;
+        IntPtr h = _grindTarget;
+        _ = Task.Run(async () =>
+        {
+            bool ok = await GameFocus.BringAndSettleAsync(h, settleMs: 0);
+            if (ok) return;
+            try
+            {
+                await Dispatcher.BeginInvoke(new Action(() =>
+                    GrindLogLine("Couldn't bring EverQuest to the front — click the game and it'll pick up from there.")));
+            }
+            catch { /* window closing */ }
+        });
     }
 
     /// <summary>Read the Grind keybind boxes into settings (used before a run and by Save settings).</summary>
@@ -1376,6 +1406,7 @@ public partial class MainWindow : Window
         _grind?.Stop();
         _hunt?.Stop();
         _questRun?.Stop();          // F12 reaches every role that can send input, not just the grind ones
+        _questStartCancelled = true;   // ...including one that has been ordered but isn't built yet
         _mergeRun?.Stop();
         _grindTimer.Stop();
         UpdateGrindStats();

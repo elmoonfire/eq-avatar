@@ -70,6 +70,12 @@ public sealed class AppSettings
     /// build zip committed to the repo, so no release-asset upload is needed.</summary>
     public const string UpdateManifestUrl = "https://raw.githubusercontent.com/elmoonfire/eq-avatar/main/latest.json";
 
+    /// <summary>Bring EverQuest to the front when a run is started from the app, instead of making
+    /// the user alt-tab into it before the runner will do anything. Applies to every role. Only
+    /// ever done at the START of a run — losing focus mid-run is the panic brake, and a bot that
+    /// grabbed focus back would be fighting the user for the mouse.</summary>
+    public bool FocusGameOnStart { get; set; } = true;
+
     public bool HubEnabled { get; set; } = true;
 
     /// <summary>Phone/web remote control: poll the hub for commands, post live status, and sync
