@@ -36,9 +36,12 @@ public sealed class QuestStats
 /// and about what is on screen, but it is NOT silent about a completed hand-in: the server prints
 /// "You offered 1 &lt;item&gt; to &lt;npc&gt;", then some of "has been updated", "You have been
 /// given:", "has been assigned the task". Every hand-in waits for one of those before counting.
-/// A step that clicks perfectly and confirms nothing is a FAILED step, and two failures in a row
-/// stop the run — because the overwhelmingly likely cause is that the item ran out, the second
-/// most likely is that a picked point is wrong, and neither is improved by carrying on clicking.
+/// A step that clicks perfectly and confirms nothing is a FAILED step. Three failures in a row
+/// and the runner moves ON TO THE NEXT ITEM rather than stopping: this NPC only accepts what his
+/// current quest stage asks for, so a step that can't be satisfied usually means the stage it
+/// belongs to is already done — and the item he actually wants is the next one in the list. The
+/// run stops only when a whole pass gets nothing through, or when three passes in a row stick on
+/// the same item.
 ///
 /// Foreground-only, same as every other role: it uses <see cref="ForegroundSendInputSink"/> for
 /// keys and only moves the mouse while the game is the focused window, so tabbing away pauses it
@@ -80,8 +83,8 @@ public sealed class QuestRole
     /// <summary>The step currently in flight, so the log matcher can name-check its item.</summary>
     private volatile TurnInStep? _inFlight;
     /// <summary>Set when the last false from HandOverAsync meant "no icon in the bag" — a miss
-    /// where NOTHING was clicked and nothing is on the cursor, so the recovery click that shakes a
-    /// stuck item back into its slot must NOT run: over a bag it would pick an item UP.</summary>
+    /// where the scan gave up BEFORE any click, so nothing in THAT attempt can have picked an item
+    /// up — though an earlier one still might have; see WarnPossiblyHeld.</summary>
     private volatile bool _emptyBagMiss;
     /// <summary>
     /// Every line the log produced while the confirmation window was open, and any "You offered"
@@ -96,19 +99,22 @@ public sealed class QuestRole
     private readonly List<string> _windowLines = new();
     private string _wrongOffer = "";
     private readonly object _windowGate = new();
-    /// <summary>The bag point the item was actually taken from this attempt — which is the found
-    /// one, not the picked one, whenever smart find is doing its job. The recovery click has to go
-    /// HERE: sending it to the fixed pick shuffles the bag between attempts, and then the run's own
-    /// "found it somewhere else" lines look like evidence that an item was consumed.</summary>
-    private ScreenPoint _lastSlot = new();
     /// <summary>Whether the log has EVER produced an assignment line this run. EQ Legends may
     /// simply not print one — the quest appears in the journal either way — and waiting every
     /// cycle for a line that is never coming is dead time plus a warning that reads like a fault.</summary>
     private volatile bool _sawAssignEver;
+    /// <summary>Whether the log has shown ANY hand-over acknowledgement this run.</summary>
+    private volatile bool _sawAnyOffer;
     /// <summary>How many times this run has said the trigger phrase and then waited for a journal
     /// line. Two passes with nothing is evidence about THIS GAME's logging; a busy zone's chatter
     /// is evidence about the zone.</summary>
     private int _phrasePasses;
+    /// <summary>Attempts a single step gets before the runner moves on to the next item. Three,
+    /// not two: since nothing is clicked after a miss (see NoteCursorRisk), an item left on the
+    /// cursor costs the NEXT attempt — its first click puts the item down instead of picking one
+    /// up. Two attempts left no room for that, so a step could be skipped on one real refusal plus
+    /// one that was just the clean-up.</summary>
+    private const int MaxStepMisses = 3;
     private int _finished;
 
     public QuestRole(QuestScript script, IInputSink sink, AppSettings settings,
@@ -178,6 +184,13 @@ public sealed class QuestRole
         // Wrrrong", so the assignment for the NEXT cycle usually prints during the PREVIOUS cycle's
         // confirmation — before this cycle has even hailed. A flag reset at the hail would throw
         // that away and then wait the full window for a line that had already gone past.
+        // Run-wide, OUTSIDE the listening window: "has this NPC taken a single thing from us all
+        // run" is a different question from "did he take the one we just offered", and the answer
+        // changes which advice the ending should give.
+        if (line.IndexOf("you offered", StringComparison.OrdinalIgnoreCase) >= 0
+            || line.IndexOf("you have given", StringComparison.OrdinalIgnoreCase) >= 0)
+            _sawAnyOffer = true;
+
         if (line.IndexOf("has been assigned the task", StringComparison.OrdinalIgnoreCase) >= 0)
         {
             Volatile.Write(ref _assignAtTicks, DateTime.UtcNow.Ticks);
@@ -398,15 +411,28 @@ public sealed class QuestRole
             }
         }
 
-        _lastSlot = slot;                       // the recovery click must come back HERE, not to the pick
         if (!ClickAt(slot, 260, $"the bag slot for {step.Item}")) return null;   // pick the item up
 
-        // From here the item is ON THE CURSOR. Every early exit has to put it back in ITS OWN slot
-        // first: the cycle restarts at step 1, and step 1's first act is to click step 1's slot —
-        // which, with step 2's item still held, drops it into the wrong bag square and every
-        // pick-up after that grabs the wrong thing.
+        // From here the item is ON THE CURSOR — as far as anything here can tell. (ClickAt returns
+        // true for "I moved the mouse and clicked", not for "an item was under it", so on an old
+        // grid-scan signature that "found" an empty square this is optimistic. It is still the best
+        // available reading, and it only ever drives a warning.) Every early exit from here has to
+        // put it back in ITS OWN slot first: the cycle restarts at step 1, and step 1's first act
+        // is to click step 1's slot — which, with step 2's item still held, drops it into the wrong
+        // bag square and every pick-up after that grabs the wrong thing.
+        _maybeHolding = true;
         bool holding = true;
-        bool? Drop(bool? result) { if (holding) { ClickAt(slot, 260, "the bag slot (returning the item)"); holding = false; } return result; }
+        bool? Drop(bool? result)
+        {
+            if (holding)
+            {
+                // Its result matters: a refused click (focus lost) means the item is STILL held,
+                // which is exactly the state the warning exists for.
+                if (ClickAt(slot, 260, "the bag slot (returning the item)")) _maybeHolding = false;
+                holding = false;
+            }
+            return result;
+        }
 
         // Where the NPC actually stands. The nameplate follows him; the picked point doesn't.
         ScreenPoint npc = _script.Layout.Npc;
@@ -431,6 +457,16 @@ public sealed class QuestRole
         // says when it is. So this is a wait, tuned on the card, not a guess baked into the code.
         int settle = Math.Clamp(_script.GiveSettleMs, 200, 4000);
         if (!ClickAt(npc, settle, "the NPC")) return Drop(null);   // drop it on the NPC → give window
+        // THE NPC CLICK is what takes the item off the cursor — PROBABLY. Same caveat as every other
+        // click here: ClickAt reports that the mouse moved and clicked, not that the NPC was under
+        // it, so a stale NPC pick leaves the item in hand and this line is wrong. It is still the
+        // better default. Leaving `holding` true until after GIVE meant that when GIVE was refused
+        // — focus lost between the two, the ordinary case — Drop() ran with an EMPTY cursor and its
+        // "put it back" click picked a fresh copy UP, then reported success and cleared the held
+        // flag: an item genuinely on the cursor with every signal saying otherwise. Being wrong this
+        // way costs a stranded item that _maybeHolding still reports; being wrong the other way
+        // silently created one and hid it.
+        holding = false;
 
         // Arm the listener HERE, immediately before the button that commits the trade — not at the
         // top of the cycle. Everything above takes seconds, and a confirmation armed that early can
@@ -441,7 +477,6 @@ public sealed class QuestRole
         _listening = true;
 
         if (!ClickAt(_script.Layout.GiveButton, 500, "the GIVE button")) { _listening = false; _inFlight = null; return Drop(null); }
-        holding = false;                                            // GIVE was pressed; the item is the server's problem now
         if (_script.Layout.Confirm.Set) ClickAt(_script.Layout.Confirm, 400);
 
         Stats.State = "waiting for the server";
@@ -459,46 +494,91 @@ public sealed class QuestRole
 
 
     /// <summary>
-    /// Put the item back after a failed offer.
+    /// After a failed offer the runner touches NOTHING, and this says why once.
     ///
-    /// WHAT THIS CANNOT KNOW, and stopped pretending to. After a miss the item is in one of three
-    /// places — on the cursor, back in its square, or sitting in a trade window the server never
-    /// answered — and nothing available here distinguishes them. ClickAt returns true for "I moved
-    /// the mouse and clicked", not for "a window was under it". Two cleverer versions of this
-    /// method were written and both were wrong:
+    /// The item is in one of three places — on the cursor, in a trade window the server never
+    /// answered, or already taken — and nothing available here can tell which. A bag click is a
+    /// TOGGLE, so every "recovery" click means opposite things in different states. I shipped
+    /// three variants before accepting that, and wrote a fourth that did not survive review:
     ///
-    ///   • Escape, on the theory that past GIVE the item must be in a trade window. When no window
-    ///     was open Escape closed the BAGS instead, after which the icon scan reads a shut bag as
-    ///     an empty one and the run reports being out of items. Worse than the problem.
-    ///   • Re-scan the bag and click only if the item has gone. The scanner finds the best match
-    ///     ANYWHERE in the bag area and cannot see the cursor — so with a stack of totems, or any
-    ///     second copy, it always says "still there" no matter what is being held. It answers
-    ///     "was that the last copy", which is not the question.
+    ///   • click the square the item came from (0.10.22). With an empty cursor it picks a copy UP,
+    ///     which makes the next attempt's first click a DROP — after which the NPC click has
+    ///     nothing in hand and GIVE has nothing to give. Every second attempt was arithmetically
+    ///     impossible, which is exactly the pattern Hayden described from outside: "the bot just
+    ///     tries turning in each item twice in a row".
+    ///   • press Escape. Closed the BAGS whenever no trade window was open, after which a shut bag
+    ///     reads as an empty one and the run reports being out of items.
+    ///   • park it in a picked empty square. That square is then no longer empty, so the NEXT miss
+    ///     picks the parked item straight back up — the same bug, permanently, from the second miss
+    ///     on. Probing the square afterwards cannot save it: the probe runs with the mouse on that
+    ///     exact square, so a held item sits under the pointer and reads as though it were in the
+    ///     slot.
+    ///   • click the item's own slot, but only when the scan found no copy anywhere. Sound until
+    ///     the picked slot has gone stale and something else has moved into it, or the bags are
+    ///     shut so the click lands on the 3D world — both of which this file documents elsewhere
+    ///     as normal.
     ///
-    /// So: the plain click, at the square the item was actually taken from. Its known cost is that
-    /// when the cursor is already empty it picks an item up and the next attempt puts it down
-    /// somewhere else — the totem walking one row down the bag between attempts. That is cosmetic,
-    /// it is now understood, and it is narrated every time so it can never again be mistaken for
-    /// evidence that the server consumed something.
+    /// Doing nothing is the only option that cannot make things worse, and it is honest about what
+    /// it costs: if the item really is on the cursor, the next attempt may spend itself putting it
+    /// back down (which is why a step gets three attempts), and if it was the LAST copy the scan
+    /// cannot see it at all — see WarnPossiblyHeld, which says so out loud rather than guessing.
     /// </summary>
-    private void Recover(TurnInStep step)
+    private void NoteCursorRisk()
     {
-        ScreenPoint back = _lastSlot.Set ? _lastSlot : step.Slot;
-        if (!back.Set) return;
-        // NOT gated on _narrate. This click moves things in the bag, and a click that moves things
-        // invisibly is how the last three diagnoses went wrong.
-        // Reported AFTER the fact, from the result. Announcing it first would put a positive
-        // "I clicked here" in the log for a click that never happened — ClickAt refuses while the
-        // game isn't focused — and a false click in the record is the exact thing this line exists
-        // to prevent.
-        if (ClickAt(back, 300))
-            Log?.Invoke($"· clicked {back.X * 100:0.0}%, {back.Y * 100:0.0}% to put {step.Item} back "
-                      + "(if the cursor was already empty this picked one up instead, and the next "
-                      + "attempt will find it a row away — that is this click, not the server)");
-        else
-            Log?.Invoke($"⚠ couldn't put {step.Item} back: {_clickFailWhy}. If it was on the cursor "
-                      + "it still is — click it back into a bag square yourself before carrying on.");
+        if (_notedCursor) return;
+        _notedCursor = true;
+        Log?.Invoke("· not clicking the bag afterwards. Nothing here can tell whether the item is on the cursor, "
+                  + "in a trade window, or already gone, and a bag click means the opposite thing in each — every "
+                  + "version of that \"recovery\" I wrote broke the NEXT attempt. If one is stuck to the cursor "
+                  + "and there are other copies in the bag, the next attempt puts it down by itself; if it was the "
+                  + "last one, I'll say so rather than guess.");
     }
+
+    private bool _notedCursor;
+    /// <summary>An attempt clicked its way through the gesture and then failed, so the item may be
+    /// stuck to the cursor. Cleared the moment something proves otherwise.</summary>
+    private bool _maybeHolding;
+
+    /// <summary>
+    /// The scan found nothing AND an earlier attempt may have left the item on the cursor. Say so.
+    ///
+    /// This is a real blind spot, not a hypothetical one: the scan captures the BAG RECTANGLE, and
+    /// an item on the cursor is drawn wherever the mouse is — which after a miss is the GIVE
+    /// button, nowhere near the bags. So the LAST copy of an item, stuck to the cursor, is
+    /// invisible to the scan, and the run would otherwise report "no Desecrated Kejaar Totem found
+    /// in the bag area" while holding one.
+    ///
+    /// I wrote a click for this and talked myself into calling it provably safe: with no copy in
+    /// the bag, clicking the item's own slot either puts a held item down or does nothing. The
+    /// proof is wrong in three ordinary ways — the picked slot goes stale and something else moves
+    /// into it (this file's own note: "totems migrate through the bag as each one is consumed"); a
+    /// shut bag is indistinguishable from an empty one, so the click can land on the 3D world; and
+    /// the scan only ruled out THIS item's signature, not everything else. Every one of those ends
+    /// with a foreign item on the cursor and no way left to shed it. That is the same bug I have
+    /// now shipped three variants of, so this variant does not get written either. It tells the
+    /// user, who can see the cursor, and lets them decide.
+    /// </summary>
+    private void WarnPossiblyHeld()
+    {
+        // The FLAG is not cleared here. Only a confirmed hand-in or a successful put-back clears
+        // it, because it is also what carries "clicks demonstrably happened" into later passes —
+        // and in the very case this warns about, the last copy being the one on the cursor, the
+        // scan can never find a copy again, so nothing could ever set it a second time. Consuming
+        // it here meant one ⚠ scrolled past and then the run ENDED on "you're out of these items",
+        // contradicting itself a pass later. A separate gate keeps the line to once.
+        if (!_maybeHolding || _warnedHeld) return;
+        _warnedHeld = true;
+        // No item name: the flag is set by whichever step last got through its pick-up click, which
+        // may not be the step now in flight. Naming this one sends the user hunting the wrong icon.
+        Log?.Invoke("⚠ note: an earlier attempt may have left an item stuck to the cursor, and an item on the "
+                  + "cursor is invisible to the bag scan (it's drawn under the mouse, not in a slot). So \"none in "
+                  + "the bags\" might mean \"the last one is in your hand\". Look at the cursor — if something is "
+                  + "on it, click it into an empty bag square and run again. I won't click it back myself: after a "
+                  + "miss nothing here can tell a held item from an empty cursor, and every version of that guess I "
+                  + "have written broke the next attempt.");
+    }
+
+    private bool _warnedHeld;
 
     /// <summary>
     /// Say what the server actually said while we were waiting.
@@ -730,6 +810,9 @@ public sealed class QuestRole
                 bool cycleComplete = true;
                 bool abort = false;                       // cancelled or focus gone — leave entirely
                 int stepsDone = 0, stepsSkipped = 0;
+                // True while every step that gave up did so because the SCAN found nothing — the
+                // ordinary "you're out of items" ending, where no click ever happened.
+                bool scanFoundNothing = true;
                 List<TurnInStep> steps = _script.Steps.ToList();
                 for (int i = 0; i < steps.Count && !abort; i++)
                 {
@@ -748,6 +831,7 @@ public sealed class QuestRole
                             // vanished window is not, and looping on those is just being quiet
                             // about being broken.
                             gestureFails++;
+                            scanFoundNothing = false;     // clicks happened; this was not an empty bag
                             Log?.Invoke($"⚠ couldn't complete the {step.Item} gesture: {_clickFailWhy} "
                                       + $"(attempt {gestureFails}).");
                             if (_clickFailWhy.Contains("isn't set") || _clickFailWhy.Contains("gone away")
@@ -777,6 +861,7 @@ public sealed class QuestRole
                             }
                             offersToward[step] = toward;
                             Log?.Invoke($"✔ {step.Item} accepted — {Stats.LastLine}");
+                            _maybeHolding = false;        // it went to the NPC; nothing is held
                             stepsDone++;
                             await Task.Delay(1100 + _rng.Next(500), ct);
                             break;                            // next step
@@ -785,11 +870,21 @@ public sealed class QuestRole
                         int misses = stepMisses.TryGetValue(step, out int m) ? m + 1 : 1;
                         stepMisses[step] = misses;
                         Stats.Misses++;
+                        if (!_emptyBagMiss) scanFoundNothing = false;
                         if (_emptyBagMiss)
                         {
-                            // Nothing was clicked and nothing is on the cursor — the recovery
-                            // click below would PICK AN ITEM UP over a bag, not put one down.
-                            Log?.Invoke($"✖ {step.Item}: bag scan found none (miss {misses} of 2 for this item).");
+                            Log?.Invoke($"✖ {step.Item}: bag scan found none (miss {misses} of {MaxStepMisses} for this item).");
+                            // "None in the bag" does not mean "none anywhere" while an item may be
+                            // on the cursor — it is drawn under the mouse, which is parked over the
+                            // GIVE button, not the bags. So this is not the ordinary "you're out of
+                            // items" ending, whatever the scan says, and the ending must not claim
+                            // it is.
+                            // Only while the server has never acknowledged anything. If hand-overs
+                            // HAVE registered, the items really are going somewhere and "you're out
+                            // of them" is the accurate half — suppressing it would send someone to
+                            // re-pick an NPC that was working.
+                            if (_maybeHolding && !_sawAnyOffer && Stats.HandIns == 0) scanFoundNothing = false;
+                            WarnPossiblyHeld();
                         }
                         else
                         {
@@ -806,11 +901,11 @@ public sealed class QuestRole
                                 return;
                             }
                             Log?.Invoke($"✖ {step.Item}: nothing came back from the server within "
-                                      + $"{_script.ConfirmSeconds}s (miss {misses} of 2 for this item).");
+                                      + $"{_script.ConfirmSeconds}s (miss {misses} of {MaxStepMisses} for this item).");
                             ReportWindow(step);
-                            Recover(step);
+                            NoteCursorRisk();
                         }
-                        if (misses >= 2)
+                        if (misses >= MaxStepMisses)
                         {
                             // MOVE ON, don't stop. This used to end the run, and that was the bug
                             // Hayden hit twice: the Sha`rr takes ONE item per quest stage, so if the
@@ -822,12 +917,13 @@ public sealed class QuestRole
                             // called the whole thing "you're out of totems".
                             stepsSkipped++;
                             cycleComplete = false;
-                            stepMisses[step] = 0;             // next cycle gets its own two attempts
+                            stepMisses[step] = 0;             // next pass gets its own attempts
                             Log?.Invoke(i + 1 < steps.Count
                                 ? $"↷ giving up on {step.Item} for now and trying {steps[i + 1].Item} — the NPC "
                                   + "only takes the item his current quest stage asks for, so if this stage is "
                                   + "already done, the next item is the one he wants."
-                                : $"↷ {step.Item} was refused twice and it's the last item in the cycle.");
+                                : $"↷ {step.Item} went unanswered {MaxStepMisses} times and it's the last item "
+                                  + "in the cycle.");
                             break;                            // next STEP, not the end of the run
                         }
                         await Task.Delay(1500, ct);           // retry THIS step
@@ -835,16 +931,40 @@ public sealed class QuestRole
                 }
 
                 // Nothing at all got through this pass. Now — and only now — is stopping right:
-                // every item in the cycle has been offered twice and refused, so retrying the same
-                // list forever would be a loop, not persistence.
+                // every item in the cycle has been offered and refused, so retrying the same list
+                // forever would be a loop, not persistence.
                 if (!abort && stepsDone == 0 && stepsSkipped > 0)
                 {
-                    Finish($"Stopped after {Stats.Cycles} cycle(s) / {Stats.HandIns} hand-in(s): every item in "
-                         + "the cycle was offered twice and the server acknowledged none of them. The log IS "
-                         + (Volatile.Read(ref _linesSeen) > 0 ? "being read (other lines came through), so " : "quiet, so ")
-                         + "this is the NPC declining, not a missed click: either you're out of these items, or "
-                         + "the quest you're holding is at a stage that wants none of them. Check the journal, "
-                         + "hand one in by hand to see what he takes, then run again.");
+                    // The advice is only worth printing if the branch matches what actually
+                    // happened. "Nothing was acknowledged" covers an empty bag — where no click was
+                    // ever made — just as well as it covers a refused hand-in, and telling the
+                    // first group to re-pick their NPC sends them to fix picks that were fine.
+                    string why;
+                    if (scanFoundNothing)
+                        why = "Nothing was ever offered: the bag scan couldn't find these items to pick up. Either "
+                            + "you're out of them, or the bags aren't open (set an open-bags key on this card), or "
+                            + "the icon signatures need re-taking — re-pick each item's slot with a tight box.";
+                    else if (!_sawAnyOffer && Stats.HandIns == 0)
+                        why = "The log IS being read — chat and buffs came through — and in all that time it never "
+                            + "printed a hand-over line, not even a wrong one. So no trade ever completed, which "
+                            + "points at the gesture rather than at the items: stand exactly where you picked him, "
+                            + "re-pick the NPC on his body, then open a give window by hand and re-pick GIVE on its "
+                            + "button. Raising \"give wait\" gives the trade window longer to appear.";
+                    else
+                        why = "The log IS being read and a hand-over line DID appear, so the gesture works. Three "
+                            + "things look like this. If the lines above show the server taking something under a "
+                            + "different name, my name for that item is wrong — fix it on the card and these become "
+                            + "confirmed hand-ins. If a hand-over line arrived just after a miss, the server is "
+                            + $"slower than the {_script.ConfirmSeconds}s confirm wait — raise it. Otherwise this NPC "
+                            + "is declining these particular items: you're out of them, or the quest you're holding "
+                            + "is at a stage that wants none of them. Check the journal.";
+                    // The console line about the cursor may have scrolled past hours ago; the Finish
+                    // string is what stays on the card. If the most actionable thing the runner
+                    // knows is "something may be in your hand", the message that persists has to
+                    // carry it.
+                    if (_maybeHolding)
+                        why += " Also check the cursor: an item may be stuck to it, which the bag scan cannot see.";
+                    Finish($"Stopped after {Stats.Cycles} cycle(s) / {Stats.HandIns} hand-in(s). " + why);
                     HumanizedMouse.MoveInstant(home.x, home.y);
                     return;
                 }
@@ -866,7 +986,7 @@ public sealed class QuestRole
                 else if (stepsDone > 0)
                 {
                     // Something worked and something didn't. Worth another go — but not forever:
-                    // a step that can NEVER succeed would otherwise be offered twice a pass, for
+                    // a step that can NEVER succeed would otherwise be offered every pass, for
                     // the rest of the night, burning a real item each time.
                     partialRun++;
                     if (partialRun >= 3)
