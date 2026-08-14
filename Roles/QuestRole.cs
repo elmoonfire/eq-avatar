@@ -101,6 +101,14 @@ public sealed class QuestRole
     /// HERE: sending it to the fixed pick shuffles the bag between attempts, and then the run's own
     /// "found it somewhere else" lines look like evidence that an item was consumed.</summary>
     private ScreenPoint _lastSlot = new();
+    /// <summary>Whether the log has EVER produced an assignment line this run. EQ Legends may
+    /// simply not print one — the quest appears in the journal either way — and waiting every
+    /// cycle for a line that is never coming is dead time plus a warning that reads like a fault.</summary>
+    private volatile bool _sawAssignEver;
+    /// <summary>How many times this run has said the trigger phrase and then waited for a journal
+    /// line. Two passes with nothing is evidence about THIS GAME's logging; a busy zone's chatter
+    /// is evidence about the zone.</summary>
+    private int _phrasePasses;
     private int _finished;
 
     public QuestRole(QuestScript script, IInputSink sink, AppSettings settings,
@@ -171,7 +179,10 @@ public sealed class QuestRole
         // confirmation — before this cycle has even hailed. A flag reset at the hail would throw
         // that away and then wait the full window for a line that had already gone past.
         if (line.IndexOf("has been assigned the task", StringComparison.OrdinalIgnoreCase) >= 0)
+        {
             Volatile.Write(ref _assignAtTicks, DateTime.UtcNow.Ticks);
+            _sawAssignEver = true;
+        }
 
         if (!_listening) return;
         TurnInStep? step = _inFlight;
@@ -448,6 +459,48 @@ public sealed class QuestRole
 
 
     /// <summary>
+    /// Put the item back after a failed offer.
+    ///
+    /// WHAT THIS CANNOT KNOW, and stopped pretending to. After a miss the item is in one of three
+    /// places — on the cursor, back in its square, or sitting in a trade window the server never
+    /// answered — and nothing available here distinguishes them. ClickAt returns true for "I moved
+    /// the mouse and clicked", not for "a window was under it". Two cleverer versions of this
+    /// method were written and both were wrong:
+    ///
+    ///   • Escape, on the theory that past GIVE the item must be in a trade window. When no window
+    ///     was open Escape closed the BAGS instead, after which the icon scan reads a shut bag as
+    ///     an empty one and the run reports being out of items. Worse than the problem.
+    ///   • Re-scan the bag and click only if the item has gone. The scanner finds the best match
+    ///     ANYWHERE in the bag area and cannot see the cursor — so with a stack of totems, or any
+    ///     second copy, it always says "still there" no matter what is being held. It answers
+    ///     "was that the last copy", which is not the question.
+    ///
+    /// So: the plain click, at the square the item was actually taken from. Its known cost is that
+    /// when the cursor is already empty it picks an item up and the next attempt puts it down
+    /// somewhere else — the totem walking one row down the bag between attempts. That is cosmetic,
+    /// it is now understood, and it is narrated every time so it can never again be mistaken for
+    /// evidence that the server consumed something.
+    /// </summary>
+    private void Recover(TurnInStep step)
+    {
+        ScreenPoint back = _lastSlot.Set ? _lastSlot : step.Slot;
+        if (!back.Set) return;
+        // NOT gated on _narrate. This click moves things in the bag, and a click that moves things
+        // invisibly is how the last three diagnoses went wrong.
+        // Reported AFTER the fact, from the result. Announcing it first would put a positive
+        // "I clicked here" in the log for a click that never happened — ClickAt refuses while the
+        // game isn't focused — and a false click in the record is the exact thing this line exists
+        // to prevent.
+        if (ClickAt(back, 300))
+            Log?.Invoke($"· clicked {back.X * 100:0.0}%, {back.Y * 100:0.0}% to put {step.Item} back "
+                      + "(if the cursor was already empty this picked one up instead, and the next "
+                      + "attempt will find it a row away — that is this click, not the server)");
+        else
+            Log?.Invoke($"⚠ couldn't put {step.Item} back: {_clickFailWhy}. If it was on the cursor "
+                      + "it still is — click it back into a bag square yourself before carrying on.");
+    }
+
+    /// <summary>
     /// Say what the server actually said while we were waiting.
     ///
     /// Three failures wear the same face — nothing was picked up, the wrong thing was picked up
@@ -558,6 +611,8 @@ public sealed class QuestRole
             // while the run is stopped.
             var stepMisses = new Dictionary<TurnInStep, int>();
             int gestureFails = 0;
+            // Consecutive passes that got part way and then stuck. Reset by a complete cycle.
+            int partialRun = 0;
             // Items offered toward a step's Qty since its last recorded completion.
             var offersToward = new Dictionary<TurnInStep, int>();
 
@@ -592,11 +647,13 @@ public sealed class QuestRole
                 // THE PHRASE IS THE TRIGGER. Not the hail — saying the bracketed words is what puts
                 // the task in the journal, with or without any prior interaction with the NPC. The
                 // hail only exists to make him tell you the words in the first place.
+                bool saidSomething = false;
                 foreach (string phrase in _script.SayPhrases)
                 {
                     if (ct.IsCancellationRequested || phrase.Trim().Length == 0) continue;
                     Stats.State = "saying the trigger";
                     if (!Say("/say " + phrase.Trim())) break;
+                    saidSomething = true;
                     // Logged, because it is THE step that assigns the task. Its absence from a log
                     // is the first thing anyone diagnosing a refused hand-in needs to see.
                     if (_narrate) Log?.Invoke($"· said \"{phrase.Trim()}\" — that is what assigns the task");
@@ -609,11 +666,26 @@ public sealed class QuestRole
                     // only the retry — by then seconds past the assignment — went through, at
                     // identical click speed. Speed was never the difference; state was.
                     Stats.State = "waiting for the task";
+                    // Only when a phrase actually went out. Counting the pass regardless meant an
+                    // alt-tab at the wrong instant — Say refuses while the game isn't focused —
+                    // logged evidence about this game's logging that was never gathered, and two
+                    // of those armed the shortcut for the rest of the run.
+                    if (saidSomething) _phrasePasses++;
                     // The phrase assigns the task the moment it lands, so this is a safety net for a
                     // slow frame, not a schedule to keep. And if the watcher has heard NOTHING all
                     // run, waiting for a line it will never deliver is pure dead time.
                     int waitFor = Math.Clamp(_script.AssignWaitSeconds, 1, 30);
                     if (Volatile.Read(ref _linesSeen) == 0 && Stats.Cycles > 0) waitFor = 1;
+                    // The line we watch for is the WIKI's wording, not a wording anyone has seen
+                    // this game print. Hayden's journal shows the task assigned while the log for
+                    // the same seconds carries buffs and chat and nothing else — so on this server
+                    // the journal is probably updated silently. Once a run has read plenty of log
+                    // and never once seen that line, stop paying for it every cycle.
+                    // Gated on PASSES, not on line count. Counting log lines measured how busy the
+                    // zone was: forty lines of buffs and General chat accumulate before the first
+                    // phrase is even spoken, so the shortcut fired on cycle one and re-introduced
+                    // the early-offer miss it was written to avoid.
+                    if (!_sawAssignEver && _phrasePasses >= 2) waitFor = 1;
                     DateTime until = DateTime.UtcNow.AddSeconds(waitFor);
                     bool saw = false;
                     while (DateTime.UtcNow < until && !ct.IsCancellationRequested)
@@ -631,13 +703,20 @@ public sealed class QuestRole
                     {
                         if (_narrate) Log?.Invoke("· no log to read, so the task can't be confirmed — waited it out");
                     }
+                    else if (Volatile.Read(ref _linesSeen) == 0)
+                    {
+                        if (_narrate)
+                            Log?.Invoke($"⚠ nothing at all has been read from the log in {waitFor}s — either the "
+                                      + "task was already assigned, or the log isn't being read. Offering anyway.");
+                    }
                     else if (_narrate)
                     {
-                        Log?.Invoke(Volatile.Read(ref _linesSeen) == 0
-                            ? $"⚠ nothing at all has been read from the log in {waitFor}s — either the task was "
-                              + "already assigned, or the log isn't being read. Offering anyway."
-                            : $"⚠ no 'assigned the task' line within {waitFor}s — offering anyway; if this "
-                              + "hand-in misses, that is why.");
+                        // A STEP, not a warning. The log is plainly alive — other lines are coming
+                        // through — so the absence of this one is far more likely to mean the game
+                        // never prints it than to mean anything went wrong. Colouring that amber
+                        // sent Hayden looking for a fault in the one part that was working.
+                        Log?.Invoke($"· no journal line in the log after {waitFor}s — this game may not print one. "
+                                  + "The phrase was said, so the task should be assigned; offering now.");
                     }
                 }
 
@@ -649,14 +728,16 @@ public sealed class QuestRole
                 // after a step-2 hiccup would therefore offer an item the NPC is guaranteed to
                 // reject — turning one slow server reply into a spurious "out of items" stop.
                 bool cycleComplete = true;
+                bool abort = false;                       // cancelled or focus gone — leave entirely
+                int stepsDone = 0, stepsSkipped = 0;
                 List<TurnInStep> steps = _script.Steps.ToList();
-                for (int i = 0; i < steps.Count && cycleComplete; i++)
+                for (int i = 0; i < steps.Count && !abort; i++)
                 {
                     TurnInStep step = steps[i];
                     while (true)
                     {
-                        if (ct.IsCancellationRequested) { cycleComplete = false; break; }
-                        if (!await WaitFocus(ct)) { cycleComplete = false; break; }
+                        if (ct.IsCancellationRequested) { cycleComplete = false; abort = true; break; }
+                        if (!await WaitFocus(ct)) { cycleComplete = false; abort = true; break; }
 
                         bool? result = await HandOverAsync(step, ct);
                         if (result is null)
@@ -696,6 +777,7 @@ public sealed class QuestRole
                             }
                             offersToward[step] = toward;
                             Log?.Invoke($"✔ {step.Item} accepted — {Stats.LastLine}");
+                            stepsDone++;
                             await Task.Delay(1100 + _rng.Next(500), ct);
                             break;                            // next step
                         }
@@ -726,33 +808,80 @@ public sealed class QuestRole
                             Log?.Invoke($"✖ {step.Item}: nothing came back from the server within "
                                       + $"{_script.ConfirmSeconds}s (miss {misses} of 2 for this item).");
                             ReportWindow(step);
-                            // Drop whatever might still be stuck to the cursor before trying again —
-                            // back where it CAME FROM. Sending it to the fixed pick moved items
-                            // around between attempts, and the "found it somewhere else" lines that
-                            // produced were then read (by me, out loud, twice) as proof the item had
-                            // been consumed. It was proof of this click.
-                            ClickAt(_lastSlot.Set ? _lastSlot : step.Slot, 300, "the bag slot (putting it back)");
+                            Recover(step);
                         }
                         if (misses >= 2)
                         {
-                            Finish($"Stopped after {Stats.Cycles} cycle(s) / {Stats.HandIns} hand-in(s): this item "
-                                 + $"went unanswered twice. Most likely you're out of {step.Item} — if you're not, "
-                                 + "re-pick the NPC and GIVE points and check the NPC is in reach.");
-                            HumanizedMouse.MoveInstant(home.x, home.y);
-                            return;
+                            // MOVE ON, don't stop. This used to end the run, and that was the bug
+                            // Hayden hit twice: the Sha`rr takes ONE item per quest stage, so if the
+                            // stage this step belongs to is already satisfied — the quest was picked
+                            // up earlier, the totem already handed in — then this item can never be
+                            // accepted, and the item that CAN be is the next step down the list. The
+                            // runner sat on step 1 offering a totem the NPC had no use for while the
+                            // Orders it actually wanted were three inches away in the same bag, and
+                            // called the whole thing "you're out of totems".
+                            stepsSkipped++;
+                            cycleComplete = false;
+                            stepMisses[step] = 0;             // next cycle gets its own two attempts
+                            Log?.Invoke(i + 1 < steps.Count
+                                ? $"↷ giving up on {step.Item} for now and trying {steps[i + 1].Item} — the NPC "
+                                  + "only takes the item his current quest stage asks for, so if this stage is "
+                                  + "already done, the next item is the one he wants."
+                                : $"↷ {step.Item} was refused twice and it's the last item in the cycle.");
+                            break;                            // next STEP, not the end of the run
                         }
                         await Task.Delay(1500, ct);           // retry THIS step
                     }
                 }
 
+                // Nothing at all got through this pass. Now — and only now — is stopping right:
+                // every item in the cycle has been offered twice and refused, so retrying the same
+                // list forever would be a loop, not persistence.
+                if (!abort && stepsDone == 0 && stepsSkipped > 0)
+                {
+                    Finish($"Stopped after {Stats.Cycles} cycle(s) / {Stats.HandIns} hand-in(s): every item in "
+                         + "the cycle was offered twice and the server acknowledged none of them. The log IS "
+                         + (Volatile.Read(ref _linesSeen) > 0 ? "being read (other lines came through), so " : "quiet, so ")
+                         + "this is the NPC declining, not a missed click: either you're out of these items, or "
+                         + "the quest you're holding is at a stage that wants none of them. Check the journal, "
+                         + "hand one in by hand to see what he takes, then run again.");
+                    HumanizedMouse.MoveInstant(home.x, home.y);
+                    return;
+                }
+
+                // A PASS is one trip round the list; a CYCLE is a pass where every step confirmed.
+                // They used to be the same thing, and once a step could be skipped they stopped
+                // being: a script whose second item is exhausted (or whose name doesn't match the
+                // server's wording) would hand item one over forever, never counting a cycle, so
+                // "3 cycles" never ended, the pacing delay never ran, and the first-cycle narration
+                // never hushed — a run that quietly became infinite and chatty.
+                _narrate = false;                         // the first pass told the story; hush now
                 if (cycleComplete)
                 {
-                    _narrate = false;                     // the first cycle told the story; hush now
+                    partialRun = 0;
                     Stats.Cycles++;
                     _script.LifetimeCompleted++;
                     Log?.Invoke($"— cycle {Stats.Cycles} complete —");
-                    await Task.Delay(900 + _rng.Next(500), ct);
                 }
+                else if (stepsDone > 0)
+                {
+                    // Something worked and something didn't. Worth another go — but not forever:
+                    // a step that can NEVER succeed would otherwise be offered twice a pass, for
+                    // the rest of the night, burning a real item each time.
+                    partialRun++;
+                    if (partialRun >= 3)
+                    {
+                        Finish($"Stopped after {Stats.Cycles} full cycle(s) / {Stats.HandIns} hand-in(s): three "
+                             + "passes in a row got part of the way and then stuck on the same item. Something "
+                             + "about that step is wrong rather than unlucky — most likely the item's name on "
+                             + "the card isn't spelled the way the server spells it (so the hand-in works and "
+                             + "goes uncounted), or its slot pick needs re-taking. The lines above say which "
+                             + "item and what the server said.");
+                        HumanizedMouse.MoveInstant(home.x, home.y);
+                        return;
+                    }
+                }
+                await Task.Delay(900 + _rng.Next(500), ct);
             }
 
             HumanizedMouse.MoveInstant(home.x, home.y);
