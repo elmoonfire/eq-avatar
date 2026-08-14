@@ -502,6 +502,49 @@ public static class InventoryReader
         return added;
     }
 
+
+    /// <summary>
+    /// Turn the header band's lines into a name, a level and a loadout.
+    ///
+    /// The name is taken ONLY from the line that carries the loadout, or from the line directly
+    /// above it. It used to be "any capitalised word in the box", and the box contains the
+    /// window's own labels — which is how the character came to be called Weight on one read and
+    /// Mana on the next.
+    /// </summary>
+    private static void ResolveHeader(List<(double Y, double X, string Text)> lines,
+                                      InventorySnapshot snap, double scale)
+    {
+        if (lines.Count == 0) return;
+        lines.Sort((a, b) => a.Y.CompareTo(b.Y));
+
+        int at = -1;
+        for (int i = 0; i < lines.Count; i++)
+        {
+            if (!HeaderParse.TryParseLoadout(lines[i].Text, out int lv, out string cls)) continue;
+            snap.Level ??= lv;
+            snap.Classes ??= cls;
+            at = i;
+            break;
+        }
+        if (at < 0 || snap.Name is not null) return;
+
+        // On the same line, ahead of the level: "Bryari 50 WAR/DRU/BRD".
+        var lead = System.Text.RegularExpressions.Regex.Match(lines[at].Text, @"^\s*([A-Za-z]{3,14})\b");
+        if (lead.Success && HeaderParse.LooksLikeName(lead.Groups[1].Value))
+        { snap.Name = lead.Groups[1].Value; return; }
+
+        // Otherwise the line directly above it, and only if it is genuinely close: the name sits
+        // one row up in the same column, so anything further away is some other part of the window.
+        for (int i = at - 1; i >= 0; i--)
+        {
+            if (lines[at].Y - lines[i].Y > 40 * scale) break;
+            if (Math.Abs(lines[i].X - lines[at].X) > 120 * scale) continue;
+            string t = lines[i].Text.Trim();
+            if (HeaderParse.LooksLikeName(t)) { snap.Name = t; return; }
+        }
+    }
+
+
     /// <summary>EverQuest's sixteen playable races, longest first so "Half Elf" is not eaten by
     /// a substring match on "Elf".</summary>
     private static readonly string[] EqRaces =
@@ -537,8 +580,17 @@ public static class InventoryReader
                                             double ox, double oy, double scale)
     {
         double left = ox - 24 * scale, right = ox + (InventoryLayout.ColumnPitch * 2 + 140) * scale;
-        double top = oy - 200 * scale, bottom = oy + 260 * scale;
+        // The name sits ~199 units above the stat anchor — right on the old 200-unit lip, so any
+        // drift in the anchor or the scale pushed it out of the box entirely and the header was
+        // never seen. 260 clears it with room. Widening is safe now that a name is only accepted
+        // from the loadout line or the line directly above it.
+        double top = oy - 260 * scale, bottom = oy + 260 * scale;
         var coinRows = new List<(double Y, List<long> Nums)>();
+
+        // The header is drawn in the window's RIGHT-hand column — name, then "50 WAR/DRU/BRD" —
+        // so it is normally two stacked lines, not one line to regex. Collect the candidates and
+        // resolve them together rather than deciding line by line.
+        var headerLines = new List<(double Y, double X, string Text)>();
 
         foreach (OcrLine line in ocr.Lines)
         {
@@ -546,28 +598,23 @@ public static class InventoryReader
             double x = line.Words[0].BoundingRect.X, y = line.Words[0].BoundingRect.Y;
             if (x < left || x > right || y < top || y > bottom) continue;
 
-            var m = System.Text.RegularExpressions.Regex.Match(
-                line.Text, @"\b(\d{1,2})\s+([A-Z]{2,4}(?:/[A-Z]{2,4}){0,2})\b");
-            if (m.Success && snap.Level is null)
-            {
-                snap.Level = int.Parse(m.Groups[1].Value);
-                snap.Classes = m.Groups[2].Value;
-                string before = line.Text[..m.Index].Trim();
-                if (before.Length >= 2 && before.All(char.IsLetter)) snap.Name ??= before;
-            }
-            else if (snap.Name is null && line.Words.Count == 1 && line.Text.Length is >= 3 and <= 14
-                     && line.Text.All(char.IsLetter) && char.IsUpper(line.Text[0]))
-            {
-                snap.Name = line.Text;
-            }
+            headerLines.Add((y, x, line.Text));
 
             // Race, if the skin prints it anywhere in the header band. Free to look for: it is a
-            // closed list of sixteen names, so a match is a match and a miss costs nothing. The
-            // inventory window does not reliably show it, which is why this is opportunistic
-            // rather than a field the read reports as missing.
+            // closed list of sixteen names, so a match is a match and a miss costs nothing.
             if (snap.Race is null)
                 foreach (string r in EqRaces)
                     if (line.Text.Contains(r, StringComparison.OrdinalIgnoreCase)) { snap.Race = r; break; }
+
+        }
+
+        ResolveHeader(headerLines, snap, scale);
+
+        foreach (OcrLine line in ocr.Lines)
+        {
+            if (line.Words.Count == 0) continue;
+            double x = line.Words[0].BoundingRect.X, y = line.Words[0].BoundingRect.Y;
+            if (x < left || x > right || y < top || y > bottom) continue;
 
             var pure = new List<long>();
             bool onlyNumbers = true;
