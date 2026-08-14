@@ -153,7 +153,7 @@ public partial class MainWindow
 
             ("Game Data", "", "PanelSecGameData",
              "The world's reference data: who drops what, where they live, and what the gear does.",
-             new[] { NavData, navRaid, navSky, navGuide }),
+             GameDataNav(NavData, navRaid, navSky, navGuide)),
 
             // Tools sits between the reference data and the account pages on purpose: these are
             // hands for the jobs the game makes you do by hand, not things to read.
@@ -514,6 +514,18 @@ public partial class MainWindow
         return head;
     }
 
+    /// <summary>
+    /// The Game Data rail: the four world-data pages that ship with the app, then the nine
+    /// catalog pages that read from the hub. Kept as one list so the section reads top to bottom
+    /// the way the hub's own Game Data index does.
+    /// </summary>
+    private RadioButton[] GameDataNav(params RadioButton[] world)
+    {
+        var all = new List<RadioButton>(world);
+        all.AddRange(BuildCatalogNav());
+        return all.ToArray();
+    }
+
     private RadioButton MakeNavItem(string glyph, string label, string dataTab)
     {
         var rb = new RadioButton
@@ -617,6 +629,7 @@ public partial class MainWindow
         // a nav RadioButton being checked, and every one of them lands here.
         foreach (NavSection s in _navSections)
             if (s.Dashboard is { } d) d.Visibility = Visibility.Collapsed;
+        HideCatalog();
 
         SetActiveSection("");                       // a page, not a dashboard, is showing
         foreach (NavSection s in _navSections)
@@ -685,6 +698,7 @@ public partial class MainWindow
         foreach (NavSection s in _navSections)
             if (s.Dashboard is { } d) d.Visibility = ReferenceEquals(d, sec.Dashboard)
                                                     ? Visibility.Visible : Visibility.Collapsed;
+        HideCatalog();
 
         SetActiveSection(sec.Panel);
     }
@@ -825,25 +839,32 @@ public partial class MainWindow
                 break;
 
             case "PanelSecGameData":
-                sec.Pages = new[]
+            {
+                // The four world-data pages ship with the app; the nine catalog pages read from
+                // the hub. Both are rail entries now, so the dashboard just points at them --
+                // Items and Spells stopped being "open a browser" the moment they moved in-app.
+                var pages = new List<NavPage>
                 {
-                    new NavPage("", "Mobs", "7,872 creatures, searchable by name, by zone, or by what they drop.", NavData),
-                    new NavPage("", "Raid Targets", "32 raid encounters with their loot, and the zones they sit in.", NavSectionButton(sec, 1)),
-                    new NavPage("", "Plane of Sky", "Every island, key and class reward on the way up.", NavSectionButton(sec, 2)),
-                    new NavPage("", "Hunting Guide", "Zones ranked for your level — computed from the mob catalog, not hand-curated.", NavSectionButton(sec, 3)),
+                    new("\uE716", "Mobs", "7,872 creatures, searchable by name, by zone, or by what they drop.", NavData),
+                    new("\uE735", "Raid Targets", "32 raid encounters with their loot, and the zones they sit in.", NavSectionButton(sec, 1)),
+                    new("\uE753", "Plane of Sky", "Every island, key and class reward on the way up.", NavSectionButton(sec, 2)),
+                    new("\uE721", "Hunting Guide", "Zones ranked for your level \u2014 computed from the mob catalog, not hand-curated.", NavSectionButton(sec, 3)),
                 };
+                for (int i = 0; i < CatalogPages.Length; i++)
+                {
+                    CatalogPage c = CatalogPages[i];
+                    pages.Add(new NavPage(c.Glyph, c.Title, c.Blurb, NavSectionButton(sec, 4 + i)));
+                }
+                sec.Pages = pages.ToArray();
+
                 sec.HubPages = new[]
                 {
-                    new NavPage("", "Items", "Every item, searchable and filterable, with its in-game icon.", null, "items"),
-                    new NavPage("", "Spells", "Every spell by class and level, with its gem icon.", null, "spells"),
-                    new NavPage("", "Gear", "Items that occupy an armour slot, ranked by what they give you.", null, "gear"),
-                    new NavPage("", "Weapons", "Anything with a damage and delay, sorted by ratio.", null, "weapons"),
-                    new NavPage("", "Procs", "Items that fire a spell when you hit something.", null, "procs"),
-                    new NavPage("", "Focus Effects", "Gear that bends your spells — range, duration, damage.", null, "focus"),
-                    new NavPage("", "Clickies", "Items you can click for an effect, worn or in a bag.", null, "clickies"),
-                    new NavPage("", "Worn Effects", "Effects that apply just for having the item equipped.", null, "worn"),
+                    new NavPage("\uE774", "The same catalogs on the web",
+                                "Every page here, readable from a phone or shared with someone who does not run the app.",
+                                null, ""),
                 };
                 break;
+            }
 
             case "PanelSecTools":
                 sec.Pages = new[]
