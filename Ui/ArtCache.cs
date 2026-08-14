@@ -38,18 +38,45 @@ public static class ArtCache
         catch { /* art must never break the UI */ }
     }
 
-    private static async Task FetchThenSet(Image target, string name, string path)
+    /// <summary>
+    /// The same cache, for art that lives somewhere other than the art folder — an item icon cut
+    /// out of the hub's atlas, say. <paramref name="cacheName"/> is what it is filed under, so an
+    /// icon is fetched once per install and thereafter costs nothing.
+    /// </summary>
+    public static void BindUrl(Image target, string url, string cacheName)
     {
         try
         {
-            byte[] bytes = await Http.GetByteArrayAsync(BaseUrl + name);
-            if (bytes.Length < 200) return;
+            if (Loaded.TryGetValue(cacheName, out BitmapImage? ready)) { target.Source = ready; return; }
+            string path = Path.Combine(Dir, cacheName);
+            if (File.Exists(path)) { target.Source = FromFile(cacheName, path); return; }
+            lock (InFlight) { if (!InFlight.Add(cacheName + "|" + target.GetHashCode())) return; }
+            _ = FetchThenSet(target, cacheName, path, url);
+        }
+        catch { /* art must never break the UI */ }
+    }
+
+    private static async Task FetchThenSet(Image target, string name, string path, string? url = null)
+    {
+        try
+        {
+            byte[] bytes = await Http.GetByteArrayAsync(url ?? (BaseUrl + name));
+            // A 200 carrying an HTML error page is bigger than 200 bytes, and once written it can
+            // never load and never be replaced — File.Exists short-circuits every later attempt.
+            // So check it is actually an image before it earns a place on disk.
+            if (bytes.Length < 200 || !LooksLikeImage(bytes)) return;
             Directory.CreateDirectory(Dir);
             await File.WriteAllBytesAsync(path, bytes);
             target.Dispatcher.Invoke(() => { try { target.Source = FromFile(name, path); } catch { } });
         }
         catch { /* offline / blocked — captions carry the UI */ }
     }
+
+    private static bool LooksLikeImage(byte[] b) =>
+        (b[0] == 0x89 && b[1] == 'P' && b[2] == 'N' && b[3] == 'G')      // PNG
+        || (b[0] == 0xFF && b[1] == 0xD8)                                 // JPEG
+        || (b[0] == 'G' && b[1] == 'I' && b[2] == 'F')                    // GIF
+        || (b[0] == 'B' && b[1] == 'M');                                  // BMP
 
     private static BitmapImage FromFile(string name, string path)
     {

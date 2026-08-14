@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Animation;
 using System.Windows.Media.Effects;
@@ -299,6 +300,8 @@ public partial class MainWindow
     /// <summary>Copies counted by the last scan; -1 = never scanned.</summary>
     private int _mrgCopies = -1;
     private ItemInfo? _mrgInfo;
+    /// <summary>Shared with the Game Data catalog: one client, one cache, one icon atlas.</summary>
+    private EQAvatar.Spike.Net.GameDataClient? _mrgGd;
     private string _mrgInfoFor = "\u0000";
     private (int Have, int Need)? _mrgTier;
 
@@ -376,18 +379,27 @@ public partial class MainWindow
             MrgStatus.Foreground = Hex("#9FE0FF");
             ItemInfo? info = null;
             string? unreachable = null;
-            try { info = await ItemLookup.FetchAsync(name); }
-            catch (System.Net.Http.HttpRequestException) { unreachable = "couldn't reach eqlwiki.com"; }
-            catch (TaskCanceledException) { unreachable = "eqlwiki.com didn't answer in time"; }
+            try { info = await ItemLookup.FetchAsync(name, _settings); }
+            catch (System.Net.Http.HttpRequestException) { unreachable = "couldn't reach the hub or the wiki"; }
+            catch (TaskCanceledException) { unreachable = "neither the hub nor the wiki answered in time"; }
 
             // "The network is down" and "you spelled it wrong" are different problems, and telling
             // someone to check their spelling while they are offline sends them round in circles.
             MrgStatus.Text = unreachable is not null
                 ? $"{unreachable} — the forecast still works, it just can't show stats yet."
                 : info is null
-                    ? $"Couldn't find \"{name}\" on the wiki — check the spelling against the item window in game."
-                    : $"{info.Name}: {info.Stats.Count} stat(s) read from the wiki.";
+                    ? $"Couldn't find \"{name}\" — check the spelling against the item window in game."
+                    : $"{info.Name}: {info.Stats.Count} stat(s) read"
+                      + (info.Id > 0 ? " from our own item corpus." : " from the wiki.");
             MrgStatus.Foreground = info is null ? Hex("#FFCB6B") : Hex("#7CE38B");
+
+            // The icon sheet has to be on disk before Icon() can cut anything out of it. Without
+            // this the preview stays blank until the user happens to open the Game Data catalog,
+            // which is a dependency no one could ever guess at.
+            if (info is { Id: > 0, IconId: > 0 })
+                try { await (_mrgGd ??= new EQAvatar.Spike.Net.GameDataClient(_settings)).EnsureAtlasAsync(); }
+                catch { /* the forecast reads perfectly well without a picture */ }
+
             _mrgInfoFor = "\u0000";                 // force the cache to re-read what we just wrote
             RenderMergeUi();
         }
@@ -432,9 +444,18 @@ public partial class MainWindow
         var head = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 0, 0, 6) };
         head.Children.Add(new TextBlock
         {
-            Text = read is null ? "tier not read yet" : $"now +{tier}  ({progress}/{need})",
+            // The score, not just the tier: it is the number the game is really tracking, it moves
+            // by one for every copy that goes in, and "1006 of 1024" answers "how close am I?" in a
+            // way that "+9, 494/512" never quite does.
+            Text = read is null ? "tier not read yet"
+                 : (read is { } rd ? UpgradeScore.ScoreFrom(rd.Have, rd.Need) : null) is not { } sc
+                     ? "counter unreadable — re-pick a tight box round just the numbers"
+                     : $"score {sc} / 1024   ·   +{tier}  ({progress}/{need})",
             FontSize = 13, FontWeight = FontWeights.Bold, Foreground = Hex("#BFE3FF"),
             VerticalAlignment = VerticalAlignment.Center,
+            ToolTip = "Every item carries a score out of 1024. Its tier is the highest power of two the score has "
+                    + "passed, and the counter in game is the remainder over the next step. Merging ADDS scores, "
+                    + "so nothing is lost and the order you merge in cannot matter.",
         });
         head.Children.Add(new TextBlock
         {
@@ -444,7 +465,8 @@ public partial class MainWindow
         });
         MrgForecastHost.Children.Add(head);
 
-        if (read is null)
+        long score = read is { } rr ? (UpgradeScore.ScoreFrom(rr.Have, rr.Need) ?? -1) : -1;
+        if (read is null || score < 0)
         {
             // No counter, no projection. Drawing pips and a "you'll reach +5" from an ASSUMED +0
             // tells someone with a +8 that merging will demote them and that they need 992 runs
@@ -459,16 +481,15 @@ public partial class MainWindow
             return;
         }
 
-        // Spend the copies up the ladder.
-        int projTier = tier; long projProgress = progress, projNeed = need, left = Math.Max(0, copies);
-        if (copies > 0)
-            while (left > 0)
-            {
-                long toNext = projNeed - projProgress;
-                if (left >= toNext) { left -= toNext; projTier++; projProgress = 0; projNeed = MergePlan.StepCost(projTier); }
-                else { projProgress += left; left = 0; }
-                if (projTier > 20) break;
-            }
+        // ONE addition. The game keeps a single score out of 1024 and merging ADDS scores — a 510
+        // folded into an 8 is a 518, the same +9 either would have reached the long way round — so
+        // there is nothing to simulate and no order to get wrong. (Copies are counted as +0 drops
+        // worth 1 each, which is what a quest turn-in gives; a stack of part-upgraded copies would
+        // be worth MORE, never less, so this reads as the floor.)
+        long projScore = UpgradeScore.Plus(score, Math.Max(0, copies));
+        int projTier = UpgradeScore.TierFor(projScore);
+        (int projHaveI, int projNeedI) = UpgradeScore.CounterFor(projScore);
+        long projProgress = projHaveI, projNeed = projNeedI;
 
         // The ladder itself: one pip per level, filled to where you are, lit to where you land.
         var ladder = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 2, 0, 6) };
@@ -501,23 +522,35 @@ public partial class MainWindow
 
         if (copies >= 0)
         {
-            double frac = projNeed > 0 ? (double)projProgress / projNeed : 0;
-            MrgForecastHost.Children.Add(MakeFireBar(frac,
-                projTier > tier
-                    ? $"{copies} copy(s) → +{projTier} ({projProgress}/{projNeed} toward +{projTier + 1})"
-                    : $"{copies} copy(s) → still +{tier} ({projProgress}/{projNeed}) — not enough for the next level"));
+            // The bar is the SCORE out of 1024 — linear, so half full really is half way. A bar of
+            // "progress into the current tier" looks nearly finished at +9 and is in fact 512 runs
+            // from the end. At the top it must read as FINISHED: 1024 shows as 0/1024, which drew
+            // an empty bar and promised "toward +11" at the exact moment the grind ended.
+            bool finished = projTier >= UpgradeScore.MaxTier;
+            MrgForecastHost.Children.Add(MakeFireBar(finished ? 1.0 : (double)projScore / UpgradeScore.Max,
+                finished
+                    ? $"{copies} copy(s) → score 1024/1024 — a +10. Anything left over is spare."
+                    : $"{copies} copy(s) → score {projScore}/1024 = +{projTier} ({projProgress}/{projNeed} toward +{projTier + 1})"));
 
-            long toTen = MergePlan.Remaining(projTier, projProgress, 10);
+            long toTen = UpgradeScore.ToReach(projScore, UpgradeScore.MaxTier);
             MrgForecastHost.Children.Add(new TextBlock
             {
-                Text = $"After merging what you have: +{projTier}. A +10 needs {toTen:N0} more base item(s) — "
-                     + "and the Kerra cycle yields one per run, so that is the number of quest runs still ahead.",
-                FontSize = 11.5, TextWrapping = TextWrapping.Wrap, Foreground = Hex("#C6D2DE"),
+                Text = finished
+                    ? "That finishes it: what you already have takes this item to +10."
+                    : $"After merging what you have: +{projTier}, score {projScore}. A +10 is {toTen:N0} more base "
+                    + "copies — one per Kerra cycle, so that is the number of quest runs still ahead. Merge order "
+                    + "doesn't matter: scores simply add, and nothing is ever lost.",
+                FontSize = 11.5, TextWrapping = TextWrapping.Wrap, MaxWidth = 640, Foreground = Hex("#C6D2DE"),
                 Margin = new Thickness(0, 2, 0, 0),
             });
         }
 
         // ---- what the item is actually worth at that tier
+        //
+        // The picture is the GAME'S OWN icon when the hub knows the item (it cuts the cell out of
+        // the atlas for us at ?icon=), and the copy you pointed at otherwise. The first is what the
+        // item IS; the second is what she matches against — both are worth being able to see, and
+        // showing the real art next to your own snapshot is itself a check that they agree.
         // Read from disk ONCE per name, not once per log line: this method is re-run every time the
         // sweep speaks, and a file read per narration line is a stutter you can feel.
         string wantName = p.ItemName.Length > 0 ? p.ItemName : MrgItemName?.Text?.Trim() ?? "";
@@ -528,6 +561,23 @@ public partial class MainWindow
         }
         ItemInfo? info = _mrgInfo;
         var preview = new WrapPanel { Margin = new Thickness(0, 8, 0, 0) };
+        // Id > 0 means the row CAME FROM the hub, so its icon number is the hub's. A wiki result
+        // carries lucy_img_ID — a different numbering — and drawing that cell captioned "the game's
+        // own icon" would be a confident wrong picture. The art itself comes from the shared
+        // GameDataClient's cached sheet, the same one the Game Data catalog draws from.
+        if (info is { IconId: > 0, Id: > 0 }
+            && (_mrgGd ??= new EQAvatar.Spike.Net.GameDataClient(_settings)).Icon(info.IconId) is { } iconArt)
+        {
+            var art = new Image { Width = 80, Height = 80, Stretch = Stretch.Uniform, Source = iconArt };
+            RenderOptions.SetBitmapScalingMode(art, BitmapScalingMode.NearestNeighbor);
+            preview.Children.Add(new Border
+            {
+                CornerRadius = new CornerRadius(8), Background = Hex("#0C0F13"),
+                BorderBrush = Hex("#2E7D4F"), BorderThickness = new Thickness(1),
+                Padding = new Thickness(6), Margin = new Thickness(0, 0, 10, 0), Child = art,
+                ToolTip = $"{info.Name} — the game's own icon, from our item corpus.",
+            });
+        }
         if (p.Shots.TryGetValue("item", out PickShot? itemShot) && itemShot.Bytes() is { } bytes)
         {
             try
@@ -561,18 +611,36 @@ public partial class MainWindow
         else if (info.Stats.Count == 0)
             statStack.Children.Add(new TextBlock
             {
-                Text = $"{info.Name} — the wiki lists no numeric stats for this item, so there is nothing to "
-                     + "project. The tier ladder above still applies.",
+                Text = $"{info.Name} — no numeric stats recorded for this item, so there is nothing to project "
+                     + "from. The score and tier ladder above still apply.",
                 FontSize = 11.5, TextWrapping = TextWrapping.Wrap, MaxWidth = 520, Foreground = Hex("#9FB6CC"),
             });
         else
         {
-            statStack.Children.Add(new TextBlock
+            var nameRow = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 0, 0, 4) };
+            nameRow.Children.Add(new TextBlock
             {
                 Text = $"{info.Name}{(info.Slot.Length > 0 ? "  ·  " + info.Slot : "")}",
                 FontSize = 12.5, FontWeight = FontWeights.Bold, Foreground = Hex("#BFE3FF"),
-                Margin = new Thickness(0, 0, 0, 4),
+                VerticalAlignment = VerticalAlignment.Center,
             });
+            if (info.Url.Length > 0)
+            {
+                var link = new TextBlock
+                {
+                    Text = "  open on the hub ↗", FontSize = 10.5, Foreground = Hex("#4FC3F7"),
+                    VerticalAlignment = VerticalAlignment.Center, Cursor = Cursors.Hand,
+                    ToolTip = info.Url,
+                };
+                string url = info.Url;
+                link.MouseLeftButtonUp += (_, _) =>
+                {
+                    try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(url) { UseShellExecute = true }); }
+                    catch { }
+                };
+                nameRow.Children.Add(link);
+            }
+            statStack.Children.Add(nameRow);
             var grid = new Grid();
             grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(120) });
             grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(74) });

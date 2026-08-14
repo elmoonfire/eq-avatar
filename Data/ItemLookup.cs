@@ -17,6 +17,8 @@ public sealed record ItemStat(string Name, double Base, bool IsWeaponDamage);
 public sealed class ItemInfo
 {
     public string Name { get; set; } = "";
+    /// <summary>The hub's own row id, so the app can link straight to our page for it.</summary>
+    public int Id { get; set; }
     public string Slot { get; set; } = "";
     public int IconId { get; set; }
     /// <summary>The item window pasted as text — kept verbatim so a stat this parser doesn't know
@@ -28,13 +30,15 @@ public sealed class ItemInfo
 }
 
 /// <summary>
-/// Item facts from eqlwiki, for the Auto Merge forecast.
+/// Item facts for the Auto Merge forecast — from OUR hub, falling back to the wiki.
 ///
-/// WHY THE WIKI DIRECTLY, AND NOT THE HUB. The hub already holds the whole 10,956-item corpus, but
-/// reaching it needs an endpoint that doesn't exist yet; the wiki's own api.php is open, and Auto
-/// Merge only ever asks about ONE item — the thing you are pouring a thousand copies into. One
-/// page, cached on disk, is the right size of dependency for that. If a hub item API arrives
-/// later, only <see cref="FetchAsync"/> changes.
+/// The hub carries the whole 10,956-item corpus in typed columns (`hub/api/gamedata.php?p=items`
+/// and `?p=item&amp;id=`), which is better than re-parsing a wiki page in every way that matters:
+/// AC and HP arrive as numbers instead of being fished out of prose, the row carries an id we can
+/// link to our own page with, and `?icon=` returns the game's own 40×40 art so the preview is the
+/// real item rather than a photograph of your bag. The wiki stays as the fallback for the two
+/// cases the hub can't answer — no hub username configured, or the hub unreachable — because a
+/// forecast that works offline is worth more than one that is always perfectly sourced.
 ///
 /// WHAT IS AND ISN'T COMPUTED. The +0…+10 rules are documented on the wiki's "Item Upgrade System"
 /// page and implemented here exactly as written: a cumulative +10% per tier, rounded DOWN, with a
@@ -82,9 +86,146 @@ public static class ItemLookup
         catch { return null; }
     }
 
-    /// <summary>Fetch from the wiki and cache. Returns null when the page doesn't exist or the
-    /// network is unavailable — the forecast still works, it just shows tiers without stats.</summary>
-    public static async Task<ItemInfo?> FetchAsync(string name)
+    /// <summary>
+    /// Look the item up: our hub first, the wiki if the hub can't answer. Throws on a network
+    /// failure so the caller can say "couldn't reach it" rather than "check the spelling".
+    /// </summary>
+    public static async Task<ItemInfo?> FetchAsync(string name, EQAvatar.Spike.Config.AppSettings settings)
+    {
+        name = (name ?? "").Trim();
+        if (name.Length < 2) return null;
+        string root = (settings.HubUrl ?? "").Trim();
+        int cut = root.IndexOf("/hub/", StringComparison.OrdinalIgnoreCase);
+        root = cut > 0 ? root[..cut] : root.TrimEnd('/');
+
+        ItemInfo? hub = null;
+        if (!string.IsNullOrWhiteSpace(settings.HubUsername) && !string.IsNullOrWhiteSpace(settings.HubApiKey))
+            hub = await FromHubAsync(name, new EQAvatar.Spike.Net.GameDataClient(settings), root);
+
+        // A hub row with NO stats must not win. Our typed columns don't model regen, and the item
+        // this page exists for is entirely regen — so a row that came back bare would otherwise
+        // overwrite a perfectly good wiki-derived cache with "this item has no stats", forever.
+        if (hub is { Stats.Count: > 0 }) { Cache(name, hub); return hub; }
+
+        ItemInfo? wiki = await FetchWikiAsync(name);
+        if (wiki is not null && hub is not null)
+        {
+            // Keep what only the hub knows — its row id and the game's own icon — on the wiki result.
+            wiki.Id = hub.Id;
+            wiki.IconId = hub.IconId;
+            wiki.Url = hub.Url.Length > 0 ? hub.Url : wiki.Url;
+            if (wiki.Slot.Length == 0) wiki.Slot = hub.Slot;
+            Cache(name, wiki);
+        }
+        return wiki ?? hub;
+    }
+
+    /// <summary>
+    /// The hub's typed row, through the SHARED <see cref="EQAvatar.Spike.Net.GameDataClient"/> —
+    /// not a second HTTP path of our own. That client already owns the endpoint, the credentials,
+    /// the disk cache and the offline fallback, and two clients for one API is two places for the
+    /// hub URL to be derived slightly differently.
+    ///
+    /// `p=items&amp;q=` is a LIKE search, so the exact-name match is picked out here rather than
+    /// trusting the first row: "Talisman of Kejaar Kerrath" and a hypothetical "Greater Talisman of
+    /// Kejaar Kerrath" both come back, and forecasting the wrong one silently is worse than
+    /// forecasting nothing.
+    /// </summary>
+    private static async Task<ItemInfo?> FromHubAsync(string name, EQAvatar.Spike.Net.GameDataClient gd, string root)
+    {
+        try
+        {
+            JsonElement? listed = await gd.GetAsync("p=items&limit=25&q=" + Uri.EscapeDataString(name),
+                                                    TimeSpan.FromHours(12));
+            if (listed is not { } list || !list.TryGetProperty("rows", out JsonElement rows)) return null;
+
+            JsonElement? exact = null, first = null;
+            foreach (JsonElement r in rows.EnumerateArray())
+            {
+                first ??= r;
+                string n = r.TryGetProperty("name", out JsonElement nm) ? (nm.GetString() ?? "") : "";
+                if (string.Equals(n, name, StringComparison.OrdinalIgnoreCase)) { exact = r; break; }
+            }
+            // A LIKE search for "Rusty Sword" returns "Rusty Sword of Doom" too. Accepting a lone
+            // near-miss silently forecasts a DIFFERENT item under the name you typed, so the only
+            // fallback allowed is one that at least starts with what was asked for.
+            bool firstLooksRight = first is { } f0
+                && (f0.TryGetProperty("name", out JsonElement fn) ? (fn.GetString() ?? "") : "")
+                   .StartsWith(name, StringComparison.OrdinalIgnoreCase);
+            JsonElement? row = exact ?? (rows.GetArrayLength() == 1 && firstLooksRight ? first : null);
+            if (row is null) return null;
+
+            int id = row.Value.TryGetProperty("id", out JsonElement idv) && idv.ValueKind == JsonValueKind.Number
+                   ? idv.GetInt32() : 0;
+            var info = new ItemInfo
+            {
+                Id = id,
+                Name = Str(row.Value, "name") is { Length: > 0 } nn ? nn : name,
+                Slot = Str(row.Value, "slot_primary"),
+                IconId = EQAvatar.Spike.Net.GameDataClient.IconId(row.Value) ?? 0,
+                Url = root + "/hub/gamedata.php?p=items&q=" + Uri.EscapeDataString(name),
+                Fetched = DateTime.Now,
+            };
+            info.Stats = TypedStats(row.Value);
+
+            // The full record carries the statsblock, which is where regen — and anything else the
+            // typed columns don't model — still lives.
+            if (id > 0)
+            {
+                JsonElement? full = await gd.GetAsync($"p=item&id={id}", TimeSpan.FromDays(7));
+                if (full is { } fe && fe.TryGetProperty("item", out JsonElement it))
+                {
+                    info.StatsBlock = Str(it, "statsblock");
+                    if (info.Slot.Length == 0) info.Slot = Str(it, "slots");
+                    foreach (ItemStat extra in ParseStats(info.StatsBlock))
+                        if (!info.Stats.Any(x => string.Equals(x.Name, extra.Name, StringComparison.OrdinalIgnoreCase)))
+                            info.Stats.Add(extra);
+                }
+            }
+            return info;
+        }
+        catch { return null; }        // the wiki fallback covers everything this can't answer
+    }
+
+    private static string Str(JsonElement e, string key)
+        => e.TryGetProperty(key, out JsonElement v) && v.ValueKind == JsonValueKind.String ? (v.GetString() ?? "") : "";
+
+    /// <summary>The hub's typed columns, which need no parsing at all.</summary>
+    private static List<ItemStat> TypedStats(JsonElement row)
+    {
+        var stats = new List<ItemStat>();
+        (string Label, string Col, bool Weapon)[] map =
+        {
+            ("AC", "ac", false), ("HP", "hp", false), ("Mana", "mana", false), ("Endurance", "endur", false),
+            ("STR", "str", false), ("STA", "sta", false), ("AGI", "agi", false), ("DEX", "dex", false),
+            ("WIS", "wis", false), ("INT", "int", false), ("CHA", "cha", false),
+            ("SV Magic", "mr", false), ("SV Fire", "fr", false), ("SV Cold", "cr", false),
+            ("SV Disease", "dr", false), ("SV Poison", "pr", false),
+            ("DMG", "dmg", true), ("Delay", "delay", false),
+        };
+        foreach ((string label, string col, bool weapon) in map)
+            if (row.TryGetProperty(col, out JsonElement v) && v.ValueKind == JsonValueKind.Number)
+            {
+                double d = v.GetDouble();
+                if (d != 0) stats.Add(new ItemStat(label, d, weapon));
+            }
+        return stats;
+    }
+
+    private static void Cache(string name, ItemInfo info)
+    {
+        try
+        {
+            Directory.CreateDirectory(CacheDir);
+            string dest = CachePath(name), tmp = dest + "." + Environment.CurrentManagedThreadId + ".tmp";
+            File.WriteAllText(tmp, JsonSerializer.Serialize(info));
+            File.Move(tmp, dest, overwrite: true);
+        }
+        catch { }
+    }
+
+    /// <summary>The wiki fallback: parse the page's own statsblock.</summary>
+    private static async Task<ItemInfo?> FetchWikiAsync(string name)
     {
         name = (name ?? "").Trim();
         if (name.Length < 2) return null;
@@ -115,12 +256,9 @@ public static class ItemLookup
                 if (sm.Success) info.Slot = sm.Groups[1].Value.Trim();
             }
 
-            Directory.CreateDirectory(CacheDir);
-            // Temp-then-move: two impatient clicks used to race on the same file, and the loser's
-            // IOException was swallowed into "couldn't find it" for a fetch that actually worked.
-            string dest = CachePath(name), tmp = dest + "." + Environment.CurrentManagedThreadId + ".tmp";
-            File.WriteAllText(tmp, JsonSerializer.Serialize(info));
-            File.Move(tmp, dest, overwrite: true);
+            // Temp-then-move inside Cache(): two impatient clicks used to race on the same file, and
+            // the loser's IOException was swallowed into "couldn't find it" for a fetch that worked.
+            Cache(name, info);
             return info;
         }
         catch (HttpRequestException) { throw; }        // "couldn't reach the wiki" ≠ "no such item"

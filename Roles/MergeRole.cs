@@ -397,6 +397,10 @@ public sealed class MergeRole
                 return;
             }
             Stats.Tier = $"{start.Value.Have}/{start.Value.Need}";
+            long lastScore = UpgradeScore.ScoreFrom(start.Value.Have, start.Value.Need) ?? -1;
+            if (lastScore >= 0)
+                Log?.Invoke($"· target is score {lastScore}/1024 — a +{UpgradeScore.TierFor(lastScore)}, "
+                          + $"{UpgradeScore.Max - lastScore} base copies short of a +10.");
             Log?.Invoke(_plan.ScanReady
                 ? $"Auto Merge: target is at {Stats.Tier}. Finding copies by their icon — every slot in the bag "
                   + "area gets looked at, and only squares that actually hold one get clicked."
@@ -410,6 +414,13 @@ public sealed class MergeRole
             // and the put-back branch, which is the only cursor recovery in the sweep, would never
             // run again.
             int lastHave = start.Value.Have, lastNeed = start.Value.Need;
+            if (lastScore >= UpgradeScore.Max)
+            {
+                HumanizedMouse.MoveInstant(home.x, home.y);
+                Finish("Nothing to do — that item is already a +10 (score 1024/1024). Merging more into it "
+                     + "would consume copies for nothing.");
+                return;
+            }
             int blindMisses = 0;
             bool cancelled = false;
 
@@ -506,8 +517,23 @@ public sealed class MergeRole
                 blindMisses = 0;
                 Stats.Tier = $"{now.Value.Have}/{now.Value.Need}";
 
+                // The score is the honest witness. The displayed numerator FALLS on a level-up
+                // (518 shows as 6/512 the moment it passes 512), so "did the numerator change"
+                // needed two special cases and still couldn't tell a rise from a fall. A score can
+                // only go up, and by exactly what was fed in — which is also worth printing, since
+                // a jump of 32 says you just merged a +5 rather than a fresh drop.
+                long nowScore = UpgradeScore.ScoreFrom(now.Value.Have, now.Value.Need) ?? -1;
                 bool levelledUp = now.Value.Need != lastNeed;
-                bool moved = levelledUp || now.Value.Have != lastHave;
+                bool moved = nowScore >= 0 && lastScore >= 0
+                    ? nowScore > lastScore
+                    : levelledUp || now.Value.Have != lastHave;      // unreadable score: the old test
+                long gained = nowScore >= 0 && lastScore >= 0 ? nowScore - lastScore : 0;
+                // UNCONDITIONAL, including the -1. Keeping the last good score across an
+                // undecodable read meant the NEXT reading — a true one, one point higher after the
+                // merge we already counted — looked like a fresh merge on an empty square: a
+                // phantom that also reset deadEnds, the only guard against the scan picking the
+                // target item up and putting it back forever.
+                lastScore = nowScore;
                 lastHave = now.Value.Have;
                 lastNeed = now.Value.Need;
 
@@ -515,9 +541,18 @@ public sealed class MergeRole
                 {
                     deadEnds = 0;
                     Stats.Merged++;
-                    Log?.Invoke(levelledUp
-                        ? $"✔ merged — LEVELLED UP, now {Stats.Tier}"
-                        : $"✔ merged — now {Stats.Tier}");
+                    string worth = gained > 1 ? $" (+{gained} points — that copy was a +{UpgradeScore.TierFor(gained)})" : "";
+                    Log?.Invoke(levelledUp && nowScore >= 0
+                        ? $"✔ merged — LEVELLED UP to +{UpgradeScore.TierFor(nowScore)}, now {Stats.Tier}{worth}"
+                        : $"✔ merged — now {Stats.Tier}{worth}");
+
+                    if (nowScore >= UpgradeScore.Max)
+                    {
+                        HumanizedMouse.MoveInstant(home.x, home.y);
+                        Finish($"✔ DONE — that item is a +10. {Stats.Merged} merged this run. "
+                             + "Anything still in the bag is spare.");
+                        return;
+                    }
                 }
                 else
                 {
