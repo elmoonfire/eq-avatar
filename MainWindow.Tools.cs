@@ -91,9 +91,10 @@ public partial class MainWindow
         tiles.Children.Add(MakePickTile("ui-pick-slot.jpg", "the copy's icon",
             p.HasIcon ? (!p.HasIconSize ? "⚠ re-pick me" : p.HasPixels ? "pixel-exact" : "⚠ colour only") : "she matches this", "",
             p.HasIcon,
-            "Drag a TIGHT box around ONE of the copies in your bag. She learns its icon and then finds every other "
-            + "copy by sight — so only squares that actually hold one get clicked. Click the READY badge to see "
-            + "exactly what she compares against.\n\n"
+            "Put the FIXED SQUARE over ONE copy in your bag — the same square, the same size, every time, which is "
+            + "the size everything gets compared at. Click to place it, arrow keys nudge it a pixel, the wheel "
+            + "resizes it to match your slot, and the magnified picture beside it is exactly what gets stored. "
+            + "Free drag is still there for anything bigger.\n\n"
             + (p.HasIcon && !p.HasPixels
                 ? "⚠ This pick predates pixel matching, so only the COLOURS of the icon are being compared — which "
                 + "cannot separate two items drawn from the same palette, and twice hasn't. Re-pick it once and she "
@@ -102,7 +103,7 @@ public partial class MainWindow
                 + "copy, nudged a few pixels either way to find the best fit. A real copy matches over 85% even "
                 + "misaligned and dimmed; a different icon in the same colours scores around 45%."),
             () => { if (PickMergeRect(r => { }, "one copy of the item",
-                        "Drag a TIGHT box around ONE copy in your bag — right up to the icon's edges — then press Enter.",
+                        "Put the square over ONE copy in your bag, matched to the slot, then press Enter.",
                         sh => Shot(p, "item", sh),
                         (frame, box) =>
                         {
@@ -137,11 +138,15 @@ public partial class MainWindow
                             // quietly refuse to pick up a real copy and report an empty bag.
                             int forgotten = p.RejectCount;
                             p.ForgetAllRejects();
+                            ActivityLog.Detail(MergeSource,
+                                $"icon reference: {p.IconPixels?.W ?? 0}×{p.IconPixels?.H ?? 0} px, "
+                                + $"search radius ±{QuestFind.SearchPadFor(p.IconPixels?.W ?? 0)}");
                             ActivityLog.Record(MergeSource, forgotten > 0
                                 ? $"· re-picked the copy's icon — forgot {forgotten} learned non-copy icon(s), "
                                 + "they were measured against the old picture."
                                 : "· re-picked the copy's icon.");
-                        })) { p.Save(); RenderMergeUi(); } },
+                        },
+                        _settings.IconSwatchPx)) { p.Save(); RenderMergeUi(); } },
             p.HasIcon ? () => ShowMergeShot(p, "item", "The copy's icon",
                 p.HasIconSize
                     ? "She slides a window of exactly this size across the bag area and clicks the closest match."
@@ -408,9 +413,14 @@ public partial class MainWindow
         => PickMergeRect(r => { point.X = r.X + r.W / 2; point.Y = r.Y + r.H / 2; }, what,
                          hint + "  (drag a small box — she clicks its centre)", shot);
 
+    /// <param name="swatchPx">Non-zero opens the picker on the FIXED SQUARE instead of free drag —
+    /// the right tool for an inventory slot, where the box has to be the same size every time and
+    /// the mouse cannot resolve a single frame pixel through the picker's scaled-down view. The
+    /// size the user settles on is written back to settings so the next pick starts there.</param>
     private bool PickMergeRect(Action<(double X, double Y, double W, double H)> store, string what, string hint,
                                Action<PickShot?>? shot = null,
-                               Action<System.Drawing.Bitmap, (double X, double Y, double W, double H)>? learn = null)
+                               Action<System.Drawing.Bitmap, (double X, double Y, double W, double H)>? learn = null,
+                               int swatchPx = 0)
     {
         // MergePlan.Current is the SAME object the running sweep reads every pass. Re-picking the
         // bag area under it would move the rectangle it is scanning mid-run — and a modal opened
@@ -429,8 +439,13 @@ public partial class MainWindow
             MrgStatus.Foreground = Hex("#FFCB6B");
             return false;
         }
-        var dlg = new CompassPickWindow(frame, "Pick " + what, hint) { Owner = this };
+        var dlg = new CompassPickWindow(frame, "Pick " + what, hint, swatchPx) { Owner = this };
         if (dlg.ShowDialog() != true) return false;
+        if (dlg.UsedSwatch && dlg.SwatchPx != swatchPx)
+        {
+            _settings.IconSwatchPx = dlg.SwatchPx;
+            try { _settings.Save(); } catch { /* a remembered size is not worth an exception */ }
+        }
         store((dlg.NX, dlg.NY, dlg.NW, dlg.NH));
         // Learning and the snapshot both read the PICKER'S frame, never a fresh grab — the modal
         // was covering the game, and a new capture would photograph this app (the 0.9.37 lesson).

@@ -665,11 +665,12 @@ public partial class MainWindow
                 howFound,
                 $"{i + 1} of {total}",
                 step.Slot.Set,
-                "Drag a TIGHT box around one copy of the item in your bag. The pick learns the item's ICON, so at "
-                + "run time she scans the bag area for wherever a copy actually is — the picked slot is only the "
-                + "fallback. Click to pick. Click the READY badge to see what she's comparing against.",
+                "Put the FIXED SQUARE over one copy of the item in your bag — same size every time, which matters "
+                + "because that size is also the stride she searches with. Arrow keys nudge it a pixel, the wheel "
+                + "resizes it to your slot, and the magnified picture shows exactly what gets learned. At run time "
+                + "she scans the bag area for wherever a copy actually is; the picked slot is only the fallback.",
                 () => { if (PickQuestPoint(captured.Slot, "where " + captured.Item + " sits in your bags",
-                            $"Drag a TIGHT box around one {captured.Item} in your inventory, then press Enter.",
+                            $"Put the square over one {captured.Item} in your inventory, then press Enter.",
                             (frame, box) =>
                             {
                                 captured.IconSig = QuestFind.SigFromRegion(frame, box.X, box.Y, box.W, box.H);
@@ -679,7 +680,8 @@ public partial class MainWindow
                                     QstStatus.Text = $"Saved — and learned {captured.Item}'s icon, so she'll find the "
                                                    + "next copy wherever it sits in the bag area.";
                             },
-                            sh => captured.Shot = sh)) Persist(); RenderQuests(); },
+                            sh => captured.Shot = sh,
+                            _settings.IconSwatchPx)) Persist(); RenderQuests(); },
                 captured.Slot.Set ? () => ShowStepShot(captured, script.IconTolerance) : null));
 
             if (total > 1)
@@ -1409,7 +1411,8 @@ public partial class MainWindow
     /// (the 0.9.37 lesson: the modal covers the game).</param>
     private bool PickQuestPoint(ScreenPoint point, string what, string hint,
                                 Action<System.Drawing.Bitmap, (double X, double Y, double W, double H)>? learn = null,
-                                Action<PickShot?>? shot = null)
+                                Action<PickShot?>? shot = null,
+                                int swatchPx = 0)
     {
         if (_grindTarget == IntPtr.Zero) AutoTargetEq();
         // Disposed here, not by the picker: CaptureFrame allocates a full-window 32bpp bitmap
@@ -1421,9 +1424,14 @@ public partial class MainWindow
             QstStatus.Foreground = Hex("#FFCB6B");
             return false;
         }
-        var dlg = new CompassPickWindow(frame, "Pick " + what, hint + "  (drag a small box — she clicks its centre)")
-        { Owner = this };
+        var dlg = new CompassPickWindow(frame, "Pick " + what,
+            swatchPx > 0 ? hint : hint + "  (drag a small box — she clicks its centre)", swatchPx) { Owner = this };
         if (dlg.ShowDialog() != true) return false;
+        if (dlg.UsedSwatch && dlg.SwatchPx != swatchPx)
+        {
+            _settings.IconSwatchPx = dlg.SwatchPx;
+            try { _settings.Save(); } catch { /* a remembered size is not worth an exception */ }
+        }
 
         point.X = dlg.NX + dlg.NW / 2;
         point.Y = dlg.NY + dlg.NH / 2;

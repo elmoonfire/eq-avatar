@@ -89,6 +89,17 @@ public sealed class AppSettings
     /// reading when something has already gone wrong.</summary>
     public bool ConsoleDetail { get; set; } = false;
 
+    /// <summary>
+    /// The side, in real screen pixels, of the fixed square used to pick an inventory icon.
+    ///
+    /// Remembered so every pick is the SAME size. That is the point of the square: the size of the
+    /// reference sets the stride the bot searches with and its contents are what everything is
+    /// compared against, so a reference that changes size between picks makes every run a different
+    /// experiment. 32 is a starting guess — the picker shows the number and the magnified pixels,
+    /// and whatever the user settles on for their UI scale is kept.
+    /// </summary>
+    public int IconSwatchPx { get; set; } = 32;
+
     public bool HubEnabled { get; set; } = true;
 
     /// <summary>Phone/web remote control: poll the hub for commands, post live status, and sync
