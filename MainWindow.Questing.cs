@@ -604,9 +604,10 @@ public partial class MainWindow
         {
             Text = "say after hail", Foreground = Hex("#9FB6CC"), FontSize = 11,
             VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 6, 0),
-            ToolTip = "The bracketed words the NPC asks you to say back — saying them does the same thing as "
-                    + "clicking the bracketed link in chat, and it is what puts the task in your journal. "
-                    + "Spoken in order after the hail, every cycle. Separate several with ;",
+            ToolTip = "The bracketed words the NPC asks you to say back. THIS is what puts the task in your "
+                    + "journal — not the hail. You can walk up with no prior interaction, say these words, and "
+                    + "hand the items straight over; the hail only exists to make him tell you the words in the "
+                    + "first place. Separate several with ;",
         });
         var sayBox = new TextBox
         {
@@ -625,7 +626,9 @@ public partial class MainWindow
         if (script.SayPhrases.Count > 0)
             sayBar.Children.Add(new TextBlock
             {
-                Text = "puts the task in the journal", Foreground = Hex("#5E7C9A"), FontSize = 10,
+                Text = script.HailFirst ? "puts the task in the journal"
+                                        : "this alone assigns the task — no hail, no target needed",
+                Foreground = Hex("#7CE38B"), FontSize = 10,
                 VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(8, 0, 0, 0),
             });
         stack.Children.Add(sayBar);
@@ -840,8 +843,9 @@ public partial class MainWindow
         {
             Content = "hail first", IsChecked = script.HailFirst, Foreground = Hex("#9FB6CC"), FontSize = 11,
             Margin = new Thickness(0, 0, 6, 0), VerticalAlignment = VerticalAlignment.Center,
-            ToolTip = "Press the in-game hail key with the NPC targeted at the top of each cycle — one keystroke, "
-                    + "not a typed sentence. On Kerra Isle the hail is also what re-assigns the task.",
+            ToolTip = "Press the in-game hail key at the top of each cycle. OFF by default now: the SAY-PHRASE is "
+                    + "what assigns the task, not the hail — the hail is only how you learn the words. Leave it off "
+                    + "unless an NPC genuinely needs waking up; it costs about two seconds a cycle.",
         };
         hail.Click += (_, _) => { script.HailFirst = hail.IsChecked == true; Persist(); };
 
@@ -863,7 +867,10 @@ public partial class MainWindow
         {
             Content = "/target by name", IsChecked = script.TargetByName, Foreground = Hex("#9FB6CC"), FontSize = 11,
             Margin = new Thickness(0, 0, 14, 0), VerticalAlignment = VerticalAlignment.Center,
-            ToolTip = "Type /target <NPC> before hailing rather than trusting whatever is currently selected.",
+            ToolTip = "Type /target <NPC> first. OFF by default now: a say-phrase is spoken aloud to everyone in "
+                    + "range and needs no target. The trade-off is that his nameplate is only drawn when he is "
+                    + "TARGETED, so with this off the fixed NPC pick does all the work — turn it on if you move "
+                    + "around between runs.",
         };
         targ.Click += (_, _) => { script.TargetByName = targ.IsChecked == true; Persist(); };
 

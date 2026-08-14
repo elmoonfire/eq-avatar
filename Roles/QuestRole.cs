@@ -351,7 +351,10 @@ public sealed class QuestRole
 
         // Where the NPC actually stands. The nameplate follows him; the picked point doesn't.
         ScreenPoint npc = _script.Layout.Npc;
-        if (_script.SmartFind && _script.NpcAnchorLearned)
+        // Only worth an OCR pass if he could be targeted: the nameplate is drawn over the TARGET,
+        // so with /target off it will never be there and the read is a guaranteed miss costing a
+        // screen capture and an OCR on every single hand-in.
+        if (_script.SmartFind && _script.NpcAnchorLearned && _script.TargetByName)
         {
             QuestFind.NpcHit? found = await QuestFind.FindNpcAsync(_hwnd(), _script);
             if (found is not null)
@@ -424,7 +427,11 @@ public sealed class QuestRole
                 foreach (TurnInStep st in _script.Steps)
                     if (!st.HasIcon) unarmed.Add($"{st.Item}'s icon isn't learned (re-pick its slot)");
                     else if (!st.HasIconSize) oldSig.Add(st.Item);
-                if (!_script.NpcAnchorLearned) unarmed.Add("the NPC nameplate isn't anchored (re-pick him while targeted)");
+                if (!_script.TargetByName)
+                    Log?.Invoke("· not targeting by name (the say-phrase needs no target), so the nameplate can't "
+                              + "be read and the fixed NPC pick does the work. Stand where you picked him.");
+                else if (!_script.NpcAnchorLearned)
+                    unarmed.Add("the NPC nameplate isn't anchored (re-pick him while targeted)");
                 Log?.Invoke(unarmed.Count == 0
                     ? "smart find ARMED: items by icon in the bag area, the NPC by nameplate."
                     : "⚠ smart find is ON but partly unarmed — " + string.Join("; ", unarmed)
@@ -483,11 +490,15 @@ public sealed class QuestRole
                     if (hail.IsNone || !_sink.Send(hail, 45)) { await Task.Delay(500, ct); continue; }
                     await Task.Delay(900 + _rng.Next(350), ct);
                 }
+                // THE PHRASE IS THE TRIGGER. Not the hail — saying the bracketed words is what puts
+                // the task in the journal, with or without any prior interaction with the NPC. The
+                // hail only exists to make him tell you the words in the first place.
                 foreach (string phrase in _script.SayPhrases)
                 {
                     if (ct.IsCancellationRequested || phrase.Trim().Length == 0) continue;
+                    Stats.State = "saying the trigger";
                     if (!Say("/say " + phrase.Trim())) break;
-                    await Task.Delay(900 + _rng.Next(300), ct);
+                    await Task.Delay(700 + _rng.Next(200), ct);
                 }
                 if (_script.HailFirst || _script.SayPhrases.Count > 0)
                 {
@@ -507,7 +518,7 @@ public sealed class QuestRole
                     if (saw)
                     {
                         if (_narrate) Log?.Invoke("· the task is in the journal — handing over now");
-                        await Task.Delay(400, ct);            // let the journal settle before the offer
+                        await Task.Delay(250, ct);            // let the journal settle before the offer
                     }
                     else if (_watcher is null)
                     {

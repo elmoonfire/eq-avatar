@@ -95,14 +95,28 @@ public sealed class QuestScript
     public List<TurnInStep> Steps { get; set; } = new();
     /// <summary>0 = keep going until the items run out (i.e. until hand-ins stop confirming).</summary>
     public int Repeat { get; set; }
-    /// <summary>Hail at the start of each cycle. Some NPCs need waking up — and on Kerra Isle the
-    /// hail is what re-assigns the task after a full cycle.</summary>
-    public bool HailFirst { get; set; } = true;
+    /// <summary>
+    /// Hail at the start of each cycle. OFF by default since 0.10.20.
+    ///
+    /// The hail was assumed to be what assigns the task. It isn't — the SAY-PHRASE is. Hayden
+    /// tested it directly: walk up to the Sha`rr with no prior interaction at all, say "explorrre
+    /// the island", and the task is assigned; the totem and then the orders are both accepted.
+    /// The hail's real job is to make the NPC TELL you the bracketed words in the first place, and
+    /// once you know them it is two seconds of ceremony per cycle for nothing.
+    /// </summary>
+    public bool HailFirst { get; set; }
     /// <summary>The in-game hail key, pressed with the NPC targeted. EQL binds "h" by default,
     /// which is one keystroke instead of typing "Hail, The Kerran Sha`rr" a thousand times.</summary>
     public string HailKey { get; set; } = "h";
-    /// <summary>Issue /target NPC before hailing, rather than trusting the current target.</summary>
-    public bool TargetByName { get; set; } = true;
+    /// <summary>
+    /// Issue /target NPC before the cycle. OFF by default since 0.10.20: a say-phrase is spoken
+    /// aloud to everyone in range and needs no target, and the hail it used to serve is gone.
+    ///
+    /// The trade is worth knowing rather than discovering: the NPC's nameplate is only drawn when
+    /// he is TARGETED, so with this off the nameplate anchor can never fire and the fixed NPC pick
+    /// carries every click. The runner says so at the start of a run instead of quietly degrading.
+    /// </summary>
+    public bool TargetByName { get; set; }
     /// <summary>The key (chord allowed, e.g. "alt+b") bound in game to OPEN ALL BAGS. Pressed once
     /// at the start of a run and again whenever an item scan finds nothing, because "the bags are
     /// shut" and "I'm out of totems" look identical to a screen reader — and only one of them is
@@ -123,6 +137,9 @@ public sealed class QuestScript
     /// offer that beats the assignment is refused — which cost one wasted offer and one full
     /// confirm timeout per cycle until this existed.</summary>
     public int AssignWaitSeconds { get; set; } = 8;
+    /// <summary>Set once the script has been moved to the say-only flow, so a user who turns the
+    /// hail back on deliberately is never overruled by the migration a second time.</summary>
+    public bool FastFlowApplied { get; set; }
 
     // ---- smart find (0.10.8): the picks that MOVE get found, not remembered ----
     /// <summary>Find items by icon and the NPC by nameplate, falling back to the fixed picks.</summary>
@@ -195,6 +212,15 @@ public sealed class QuestScript
         Layout.ItemSlot = null;
         foreach (TurnInStep s in Steps) { s.Item ??= ""; s.Quest ??= ""; s.Slot ??= new ScreenPoint(); }
         if (string.IsNullOrWhiteSpace(HailKey)) HailKey = "h";
+        // ONE-TIME move to the say-only flow. A script that already knows the words does not need
+        // the hail that taught them, and the /target existed to give the hail something to act on.
+        // Applied once and remembered, so turning the hail back on by hand sticks.
+        if (!FastFlowApplied && SayPhrases.Count > 0)
+        {
+            FastFlowApplied = true;
+            HailFirst = false;
+            TargetByName = false;
+        }
         if (AssignWaitSeconds <= 0) AssignWaitSeconds = 8;
         OpenBagsKey = (OpenBagsKey ?? "").Trim();       // null from an older file, or a hand edit
         Shots ??= new Dictionary<string, PickShot>();
