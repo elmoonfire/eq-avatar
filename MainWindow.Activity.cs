@@ -55,6 +55,31 @@ public partial class MainWindow
         }), System.Windows.Threading.DispatcherPriority.Background);
     }
 
+    /// <summary>
+    /// Put the visible stream on the clipboard.
+    ///
+    /// The console is TextBlocks in a panel, which cannot be selected with a mouse — so the one
+    /// time a user most wants these lines (pasting a failure to someone who can read it) was the
+    /// one time they could not have them. A button is a smaller answer than making every line
+    /// selectable, and it copies exactly what the filters are showing.
+    /// </summary>
+    private void ActCopy_Click(object sender, RoutedEventArgs e)
+    {
+        List<ActivityEntry> lines = ActivityLog.Snapshot()
+            .Where(x => !_actHidden.Contains(x.Source)).ToList();
+        if (lines.Count == 0) { ShowToast("Nothing to copy"); return; }
+        var sb = new System.Text.StringBuilder();
+        foreach (ActivityEntry x in lines)
+            sb.Append(x.When.ToString("HH:mm:ss")).Append("  ")
+              .Append(x.Source.PadRight(6)).Append("  ").AppendLine(x.Text);
+        try
+        {
+            Clipboard.SetText(sb.ToString());
+            ShowToast($"Copied {lines.Count} line(s)");
+        }
+        catch { ShowToast("Couldn't reach the clipboard"); }
+    }
+
     private void ActClear_Click(object sender, RoutedEventArgs e)
     {
         ActivityLog.Clear();

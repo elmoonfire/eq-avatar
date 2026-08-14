@@ -118,6 +118,11 @@ public sealed class QuestScript
     public TurnInLayout Layout { get; set; } = new();
     /// <summary>Seconds to wait for the log to confirm a hand-in before calling it a miss.</summary>
     public int ConfirmSeconds { get; set; } = 12;
+    /// <summary>How long to wait after the hail for the server to say the task has been assigned,
+    /// before offering the first item. The hail is what re-assigns the task each cycle, and an
+    /// offer that beats the assignment is refused — which cost one wasted offer and one full
+    /// confirm timeout per cycle until this existed.</summary>
+    public int AssignWaitSeconds { get; set; } = 8;
 
     // ---- smart find (0.10.8): the picks that MOVE get found, not remembered ----
     /// <summary>Find items by icon and the NPC by nameplate, falling back to the fixed picks.</summary>
@@ -190,6 +195,7 @@ public sealed class QuestScript
         Layout.ItemSlot = null;
         foreach (TurnInStep s in Steps) { s.Item ??= ""; s.Quest ??= ""; s.Slot ??= new ScreenPoint(); }
         if (string.IsNullOrWhiteSpace(HailKey)) HailKey = "h";
+        if (AssignWaitSeconds <= 0) AssignWaitSeconds = 8;
         OpenBagsKey = (OpenBagsKey ?? "").Trim();       // null from an older file, or a hand edit
         Shots ??= new Dictionary<string, PickShot>();
         if (BagCols <= 0) BagCols = 2;

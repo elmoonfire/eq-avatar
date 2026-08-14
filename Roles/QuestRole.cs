@@ -66,6 +66,9 @@ public sealed class QuestRole
     /// Armed only for the window between the GIVE click and the confirm deadline.</summary>
     private volatile bool _offered, _advanced;
     private volatile bool _listening;
+    /// <summary>When the server last said a task had been assigned. The only honest "you may now
+    /// offer the item" — an offer that beats the assignment is refused.</summary>
+    private long _assignAtTicks;
     /// <summary>The step currently in flight, so the log matcher can name-check its item.</summary>
     private volatile TurnInStep? _inFlight;
     /// <summary>Set when the last false from HandOverAsync meant "no icon in the bag" — a miss
@@ -127,7 +130,23 @@ public sealed class QuestRole
     /// </summary>
     private void OnLine(string line)
     {
-        if (line.Length == 0 || !_listening) return;
+        if (line.Length == 0) return;
+
+        // ASSIGNMENT WATCH — armed across the hail, independent of the hand-in listener.
+        //
+        // Field evidence (three cycles, 2026-08-14): the FIRST totem offer of every cycle went
+        // unanswered and the retry ~15 s later always worked, at identical click speed. Speed was
+        // never the difference; STATE was. The hail is what (re)assigns the task, and an item
+        // offered before the server has actually assigned it is refused — so the run paid one
+        // wasted offer and one 12-second confirm timeout per cycle, every cycle.
+        // Recorded ALWAYS, not only while waiting. Completing the Orders re-opens "Something is
+        // Wrrrong", so the assignment for the NEXT cycle usually prints during the PREVIOUS cycle's
+        // confirmation — before this cycle has even hailed. A flag reset at the hail would throw
+        // that away and then wait the full window for a line that had already gone past.
+        if (line.IndexOf("has been assigned the task", StringComparison.OrdinalIgnoreCase) >= 0)
+            Volatile.Write(ref _assignAtTicks, DateTime.UtcNow.Ticks);
+
+        if (!_listening) return;
         TurnInStep? step = _inFlight;
         if (step is null) return;
 
@@ -450,6 +469,10 @@ public sealed class QuestRole
                     if (!Say("/target " + _script.Npc)) { await Task.Delay(500, ct); continue; }
                     await Task.Delay(700 + _rng.Next(250), ct);
                 }
+                // Anything assigned from here on counts for THIS cycle. Three seconds of grace
+                // reaches back over the previous cycle's last confirmation, which is where the
+                // re-assignment usually lands.
+                DateTime cycleFrom = DateTime.UtcNow.AddSeconds(-3);
                 if (_script.HailFirst)
                 {
                     // One keystroke, not a typed sentence: EQL binds hail to a key ("h" by
@@ -466,9 +489,36 @@ public sealed class QuestRole
                     if (!Say("/say " + phrase.Trim())) break;
                     await Task.Delay(900 + _rng.Next(300), ct);
                 }
-                // Give the server a beat to put the task in the journal before the first offer —
-                // an offer that beats the assignment is refused and costs a retry.
-                if (_script.SayPhrases.Count > 0) await Task.Delay(800, ct);
+                if (_script.HailFirst || _script.SayPhrases.Count > 0)
+                {
+                    // WAIT FOR THE JOURNAL, don't guess at it. The old 800 ms beat was a guess and
+                    // the log showed it losing: the first offer of EVERY cycle went unanswered and
+                    // only the retry — by then seconds past the assignment — went through, at
+                    // identical click speed. Speed was never the difference; state was.
+                    Stats.State = "waiting for the task";
+                    DateTime until = DateTime.UtcNow.AddSeconds(Math.Clamp(_script.AssignWaitSeconds, 1, 30));
+                    bool saw = false;
+                    while (DateTime.UtcNow < until && !ct.IsCancellationRequested)
+                    {
+                        if (new DateTime(Volatile.Read(ref _assignAtTicks), DateTimeKind.Utc) > cycleFrom)
+                        { saw = true; break; }
+                        await Task.Delay(150, ct);
+                    }
+                    if (saw)
+                    {
+                        if (_narrate) Log?.Invoke("· the task is in the journal — handing over now");
+                        await Task.Delay(400, ct);            // let the journal settle before the offer
+                    }
+                    else if (_watcher is null)
+                    {
+                        if (_narrate) Log?.Invoke("· no log to read, so the task can't be confirmed — waited it out");
+                    }
+                    else if (_narrate)
+                    {
+                        Log?.Invoke($"⚠ no 'assigned the task' line within {Math.Clamp(_script.AssignWaitSeconds, 1, 30)}s "
+                                  + "— offering anyway; if this hand-in misses, that is why.");
+                    }
+                }
 
                 // ---- the hand-ins, in order.
                 //

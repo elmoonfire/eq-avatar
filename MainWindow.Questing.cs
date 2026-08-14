@@ -1060,6 +1060,29 @@ public partial class MainWindow
         };
         openAll.MouseLeftButtonUp += (_, _) => { NavActivity.IsChecked = true; };
         head.Children.Add(openAll);
+
+        // Same reason as the Activity Console's copy button: these lines are TextBlocks, so the
+        // mouse cannot select them, and the moment you most want them is the moment you're trying
+        // to show someone else what went wrong.
+        var copy = new TextBlock
+        {
+            Text = "   copy", FontSize = 9.5, Foreground = Hex("#4FC3F7"),
+            VerticalAlignment = VerticalAlignment.Center, Cursor = Cursors.Hand,
+            ToolTip = "Copy this quest's activity to the clipboard.",
+        };
+        string forQuest = questName;
+        copy.MouseLeftButtonUp += (_, _) =>
+        {
+            List<ActivityEntry> all = ActivityLog.Snapshot(
+                e => e.Source == QuestSource && QuestCatalog.Norm(e.Tag) == QuestCatalog.Norm(forQuest));
+            if (all.Count == 0) { ShowToast("Nothing to copy"); return; }
+            var sb = new System.Text.StringBuilder();
+            foreach (ActivityEntry e in all)
+                sb.Append(e.When.ToString("HH:mm:ss")).Append("  ").AppendLine(e.Text);
+            try { Clipboard.SetText(sb.ToString()); ShowToast($"Copied {all.Count} line(s)"); }
+            catch { ShowToast("Couldn't reach the clipboard"); }
+        };
+        head.Children.Add(copy);
         host.Children.Add(head);
 
         // 150, not everything: this console is rebuilt on every line she speaks, and the full

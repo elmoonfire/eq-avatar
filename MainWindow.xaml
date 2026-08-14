@@ -2026,7 +2026,9 @@
                             <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,8">
                                 <TextBlock Text="ACTIVITY CONSOLE" FontWeight="Bold" FontSize="15" Foreground="#BFE3FF" VerticalAlignment="Center"/>
                                 <TextBlock x:Name="ActCount" Text="" FontSize="11" Foreground="#5E7C9A" VerticalAlignment="Center" Margin="10,0,0,0"/>
-                                <Button x:Name="ActClearBtn" Content="Clear" Click="ActClear_Click" Padding="10,3" Margin="14,0,0,0"
+                                <Button x:Name="ActCopyBtn" Content="Copy" Click="ActCopy_Click" Padding="10,3" Margin="14,0,0,0"
+                                        ToolTip="Copy every line the filters are showing to the clipboard, ready to paste."/>
+                                <Button x:Name="ActClearBtn" Content="Clear" Click="ActClear_Click" Padding="10,3" Margin="8,0,0,0"
                                         ToolTip="Empty the in-memory console. The durable copy on disk is untouched."/>
                             </StackPanel>
 
