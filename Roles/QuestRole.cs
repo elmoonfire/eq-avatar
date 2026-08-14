@@ -100,10 +100,34 @@ public sealed class QuestRole
     private string _wrongOffer = "";
     /// <summary>An offer of the RIGHT item to the WRONG creature. Not a hand-in; a donation.</summary>
     private string _wrongNpc = "";
+    /// <summary>This window saw an offer naming ANOTHER step of this script — the signature of a
+    /// trade window committing a backlog, which means its consequence lines are about that hand-in
+    /// and not this one. Sticky for the window: a later wrong offer must not erase it.</summary>
+    private bool _spilled;
+    /// <summary>Every step's item name, lower-cased, snapshotted at construction. The card can add
+    /// and remove steps while a run is going; the log thread must not walk that list.</summary>
+    private readonly string[] _stepNames;
     /// <summary>Offer lines that matched the in-flight item inside ONE confirmation window. More
     /// than one means the trade window had been accumulating and committed a pile at once — which
     /// is several items gone for a single counted hand-in, and the reason retries were removed.</summary>
     private int _offersThisWindow;
+    /// <summary>The user's own "that worked" phrases, lower-cased once at construction.</summary>
+    private readonly List<string> _successLines;
+    /// <summary>Set the instant an offer is acknowledged, so the NEXT line can be captured.</summary>
+    private volatile bool _grabNext;
+    /// <summary>The line that followed a confirmed hand-in — a ready-made success phrase.</summary>
+    private volatile string? _suggestedSuccess;
+    private bool _suggestedShown;
+    /// <summary>The hand-in that just "succeeded" was assumed, not acknowledged. Kept apart so the
+    /// durable completion history never records something nobody saw happen.</summary>
+    private bool _assumedThisStep;
+    private bool _assumedAnyThisPass;
+
+    /// <summary>"confirmed", or nothing at all when confirmation is switched off. A tally the
+    /// server never acknowledged must not be reported as one it did.</summary>
+    private string ConfirmTail => _script.WaitForConfirm
+        ? " confirmed this run."
+        : " this run — assumed, since confirmation was switched off.";
     private readonly object _windowGate = new();
     /// <summary>Whether the log has EVER produced an assignment line this run. EQ Legends may
     /// simply not print one — the quest appears in the journal either way — and waiting every
@@ -144,6 +168,12 @@ public sealed class QuestRole
         _sink = sink;
         _s = settings;
         _hwnd = gameWindow;
+        _stepNames = script.Steps.Select(x => (x.Item ?? "").Trim().ToLowerInvariant())
+                                 .Where(x => x.Length > 0).ToArray();
+        _successLines = (script.SuccessLines ?? new List<string>())
+            .Select(x => (x ?? "").Trim().ToLowerInvariant())
+            .Where(x => x.Length >= 6)          // shorter than this and it would match half the log
+            .ToList();
         if (!string.IsNullOrEmpty(logPath)) _watcher = new EqLogWatcher(logPath);
     }
 
@@ -267,6 +297,7 @@ public sealed class QuestRole
                 // printed both, counting both would tell the user two items had vanished and send
                 // them off to re-pick a GIVE button that was working perfectly.
                 if (l.Contains("you offered")) Interlocked.Increment(ref _offersThisWindow);
+                _grabNext = true;               // the very next line is the quest's own success line
                 _offered = true;
                 Stats.LastLine = line.Trim();
                 return;
@@ -275,7 +306,88 @@ public sealed class QuestRole
             // the failure space in half: the gesture worked and the bag search picked the wrong
             // icon. Without it, giving away the wrong item and clicking an empty square produce
             // word-for-word the same report.
-            lock (_windowGate) _wrongOffer = line.Trim();
+            // Decided HERE, once, and remembered — not re-derived later from _wrongOffer, which is
+            // last-writer-wins: a second wrong offer would overwrite the first and erase the fact
+            // that a spill had happened. Read off a snapshot taken in the constructor rather than
+            // by walking _script.Steps, because this runs on the log-watcher thread while the card
+            // can remove a step from the UI thread — and a "collection was modified" throw here
+            // skips the watcher's offset advance, so the whole batch replays and every count in it
+            // doubles.
+            lock (_windowGate)
+            {
+                _wrongOffer = line.Trim();
+                foreach (string other in _stepNames)
+                    if (!string.Equals(other, item, StringComparison.Ordinal) && l.Contains(other))
+                    { _spilled = true; break; }
+            }
+            return;
+        }
+
+        // LEARN the quest's success line rather than asking for it blind. The line immediately
+        // after an accepted offer is the quest-specific consequence — "You validated the Kerran
+        // Sha`rr's concerns…" — which is exactly what belongs in the box on the card, and which no
+        // wiki scrape could ever have supplied. Faction and experience lines are skipped: both are
+        // word-for-word identical for every turn-in on the island, so neither can tell one hand-in
+        // from the one before it.
+        if (_grabNext)
+        {
+            _grabNext = false;
+            string body = StripStamp(line);
+            // No digits. Every EQ line carries a 27-character timestamp, so testing the RAW line's
+            // length rejected nothing at all — and the lines that slipped through were combat and
+            // chat spam ("Grimfang hits a patrolling tiger for 42 points of damage"), which is the
+            // worst possible thing to suggest: pasted into the card it is true several times a
+            // second and every hand-in "confirms" instantly for the rest of the night. A quest's
+            // own success line is prose; a number in it means it is about something else.
+            if (!l.Contains("you offered") && !l.Contains("you have given")
+                && !l.Contains("you have been given")
+                && !l.Contains("faction standing") && !l.Contains("you gain experience")
+                && body.Length >= 20 && !body.Any(char.IsDigit)
+                && body.StartsWith("you", StringComparison.OrdinalIgnoreCase))
+                _suggestedSuccess = body;
+        }
+
+        // THE QUEST'S OWN SUCCESS LINE. Hayden's chat prints one immediately after every accepted
+        // hand-in — "You validated the Kerran Sha`rr's concerns…" for the totem, "You've dealt a
+        // blow to the Heretics…" for the orders — and they are per turn-in and unmistakable. No
+        // scrape can know them, so they are typed into the card, and matching one ends the wait at
+        // once instead of sitting out a timeout for a hand-in that plainly worked.
+        // GUARD FIRST. Everything below is weaker evidence than "You offered 1 <item>", and it is
+        // only safe while this window is uncontaminated. Two things contaminate it, and both are
+        // observed in the field:
+        //   • an offer line naming a DIFFERENT item — which is what a trade window committing the
+        //     previous step's backlog looks like. Its consequence lines (the reward, the quest's
+        //     own success line) land in THIS window and would confirm a hand-in that gave nothing.
+        //   • a donation to a passing creature. LooksLikeACreature refuses to confirm it, but that
+        //     refusal is worth nothing if the next line confirms the step anyway — the ✖ that
+        //     whole design exists to print is only reached on a miss.
+        // Narrowly. "An offer naming something other than this step's item" has two causes with
+        // opposite meanings: the previous step's backlog committing (a real spill — contaminate),
+        // or this very hand-in succeeding under a name the wiki spelled differently (in which case
+        // contaminating would disable the success lines for exactly the people they were added
+        // for, on every single hand-in). So it only counts as a spill if the line names ANOTHER
+        // STEP of this script.
+        bool spilled, mob;
+        lock (_windowGate) { spilled = _spilled; mob = _wrongNpc.Length > 0; }
+        if (spilled || mob) return;
+
+        foreach (string phrase in _successLines)
+            if (l.Contains(phrase))
+            {
+                _advanced = true;
+                Stats.LastLine = line.Trim();
+                return;
+            }
+
+        // The reward. "You have been given: <thing>" is printed by the hand-in that earned it and
+        // names a different thing for each step of a cycle, so inside the few seconds this listener
+        // is armed it is evidence about THIS hand-in. (The faction line that arrives alongside it is
+        // deliberately NOT used: its text is identical for every turn-in on the island, so it can't
+        // distinguish the hand-in it belongs to from the one before.)
+        if (l.Contains("you have been given:"))
+        {
+            _advanced = true;
+            Stats.LastLine = line.Trim();
             return;
         }
 
@@ -288,7 +400,7 @@ public sealed class QuestRole
 
         bool questLine = l.Contains("has been updated") || l.Contains("has been assigned the task")
                       || l.Contains("you have completed") || l.Contains("your task");
-        if ((questLine && quest.Length > 0 && l.Contains(quest)) || l.Contains("you have been given"))
+        if (questLine && quest.Length > 0 && l.Contains(quest))
         {
             _advanced = true;
             Stats.LastLine = line.Trim();
@@ -319,6 +431,14 @@ public sealed class QuestRole
             return false;
         return tail.StartsWith("a ", StringComparison.Ordinal)
             || tail.StartsWith("an ", StringComparison.Ordinal);
+    }
+
+    /// <summary>Drop EQ's "[Fri Aug 14 05:22:48 2026] " stamp, so a suggested phrase is one the
+    /// user can paste straight into the card without it matching only that one second.</summary>
+    private static string StripStamp(string line)
+    {
+        int close = line.IndexOf(']');
+        return close > 0 && line.StartsWith("[") ? line[(close + 1)..].Trim() : line.Trim();
     }
 
     // ---------------------------------------------------------------- screen
@@ -379,7 +499,7 @@ public sealed class QuestRole
     /// so pressing it when the bags are already open costs nothing, while a toggle pressed on a
     /// guess is a coin flip that closes them half the time.
     /// </summary>
-    private bool OpenBags(string why)
+    private bool OpenBags(string why, bool quiet = false)
     {
         string spec = (_script.OpenBagsKey ?? "").Trim();
         if (spec.Length == 0) return false;
@@ -401,9 +521,14 @@ public sealed class QuestRole
         try { sent = _sink.Send(key, 45); }
         finally { for (int i = mods.Length - 1; i >= 0; i--) InputProbe.KeyUp(mods[i]); }
 
-        Log?.Invoke(sent
-            ? $"· pressed {spec} to open the bags ({why})"
-            : $"· the open-bags key ({spec}) didn't send — focus was lost mid-press.");
+        // Quiet on the routine per-pass press: it happens 1,024 times on a full grind, every one a
+        // blocking hop to the UI thread immediately before a click sequence, and every one repaints
+        // the card's single-line status over whatever warning was there. A press that FAILS is
+        // never quiet — that one changes what the next empty scan means.
+        if (!quiet || !sent)
+            Log?.Invoke(sent
+                ? $"· pressed {spec} to open the bags ({why})"
+                : $"· the open-bags key ({spec}) didn't send — focus was lost mid-press.");
         return sent;
     }
 
@@ -429,6 +554,7 @@ public sealed class QuestRole
     {
         Stats.State = $"handing over {step.Item}";
         Stats.Attempts++;
+        _assumedThisStep = false;
         _emptyBagMiss = false;
 
         // Where the item ACTUALLY is right now. The picked slot is only the fallback: totems
@@ -543,15 +669,41 @@ public sealed class QuestRole
         // be satisfied by the tail of the PREVIOUS hand-in.
         _inFlight = step;
         _offered = _advanced = false;
-        lock (_windowGate) { _windowLines.Clear(); _wrongOffer = ""; _wrongNpc = ""; }
+        _grabNext = false;              // never let a previous window's capture spill into this one
+        lock (_windowGate) { _windowLines.Clear(); _wrongOffer = ""; _wrongNpc = ""; _spilled = false; }
         Interlocked.Exchange(ref _offersThisWindow, 0);
         _listening = true;
 
         if (!ClickAt(_script.Layout.GiveButton, 500, "the GIVE button")) { _listening = false; _inFlight = null; return Drop(null); }
         if (_script.Layout.Confirm.Set) ClickAt(_script.Layout.Confirm, 400);
 
+        // NOT WAITING AT ALL is a supported answer, and on a 1,024-cycle grind it is often the
+        // right one: the clicking takes about five seconds and a confirmation that doesn't land
+        // costs the confirm window again, per item. The cost is honest and stated — an assumed
+        // hand-in is not a counted one, so a run in this mode can never notice it has stopped
+        // working. The listener stays armed through the beat anyway, so a fast acknowledgement is
+        // still USED; this only stops us waiting for a slow one.
+        if (!_script.WaitForConfirm)
+        {
+            Stats.State = "handed over";
+            await Task.Delay(600 + _rng.Next(150), ct);
+            bool heard = _offered || _advanced;
+            _listening = false;
+            _inFlight = null;
+            if (heard) _maybeHolding = false;
+            // ASSUMED, not confirmed — and the difference is kept. The run carries on (that is the
+            // point of the switch), but the permanent completion history only ever records hand-ins
+            // the server actually acknowledged. Writing an assumption into a file with no UI to
+            // correct it would overstate a 1,024-item grind by however long the mode was left on.
+            _assumedThisStep = !heard;
+            if (!heard && _narrate)
+                Log?.Invoke("· not waiting for the server (confirmation is off) — assuming that worked and moving on. "
+                          + "Assumed hand-ins don't go into the completion history.");
+            return true;
+        }
+
         Stats.State = "waiting for the server";
-        DateTime deadline = DateTime.UtcNow.AddSeconds(Math.Clamp(_script.ConfirmSeconds, 3, 60));
+        DateTime deadline = DateTime.UtcNow.AddSeconds(Math.Clamp(_script.ConfirmSeconds, 2, 60));
         bool confirmed = false;
         while (DateTime.UtcNow < deadline && !ct.IsCancellationRequested)
         {
@@ -637,7 +789,10 @@ public sealed class QuestRole
         // scan can never find a copy again, so nothing could ever set it a second time. Consuming
         // it here meant one ⚠ scrolled past and then the run ENDED on "you're out of these items",
         // contradicting itself a pass later. A separate gate keeps the line to once.
-        if (!_maybeHolding || _warnedHeld) return;
+        // Not in assumed mode: nothing there ever clears the flag, so this would fire on the first
+        // empty scan of every run and then read as boilerplate — worse than silence in the one mode
+        // with no other error signal.
+        if (!_maybeHolding || _warnedHeld || !_script.WaitForConfirm) return;
         _warnedHeld = true;
         // No item name: the flag is set by whichever step last got through its pick-up click, which
         // may not be the step now in flight. Naming this one sends the user hunting the wrong icon.
@@ -717,6 +872,14 @@ public sealed class QuestRole
         (int x, int y) home = HumanizedMouse.CursorPos();
         try
         {
+            if (!_script.WaitForConfirm && _script.Repeat <= 0)
+            {
+                Finish("Can't start — \"wait for the server to confirm\" is OFF and repeat is 0 (\"until the items "
+                     + "run out\"). Without confirmation nothing can ever tell that they HAVE run out, so that pair "
+                     + "means clicking at an empty bag until you stop it. Set a cycle count, or turn confirmation "
+                     + "back on.");
+                return;
+            }
             if (!_script.Ready)
             {
                 Finish("Can't start — still need a pick for: " + _script.Missing()
@@ -765,6 +928,11 @@ public sealed class QuestRole
             // Open the bags before the first scan rather than hoping they're up. Nothing in the
             // log or on screen says whether they are, so this is the one place a keystroke buys
             // certainty — and if no key is bound, the run simply proceeds as before.
+            if ((_script.OpenBagsKey ?? "").Trim().Length == 0)
+                Log?.Invoke("⚠ no open-bags key is set on this card, so I can't make sure your bags are open — and "
+                          + "a SHUT bag looks exactly like an empty one to the scan, which is why a run can stop "
+                          + "with \"you're out of items\" while your bag is full. Bind one in game (Hayden's is "
+                          + "alt+b, set to OPEN rather than toggle) and type the same chord into \"open bags\" here.");
             if (await WaitFocus(ct)) OpenBags("starting the run");
 
             // Per step, and with MaxStepMisses at 1 it never exceeds 1 — kept because the count is
@@ -786,9 +954,14 @@ public sealed class QuestRole
             while (!ct.IsCancellationRequested)
             {
                 if (_script.Repeat > 0 && Stats.Cycles >= _script.Repeat)
-                { Finish($"Done — {Stats.Cycles} cycle(s), {Stats.HandIns} hand-in(s) confirmed."); return; }
+                { Finish($"Done — {Stats.Cycles} cycle(s), {Stats.HandIns} hand-in(s){ConfirmTail}"); return; }
 
                 if (!await WaitFocus(ct)) break;
+
+                // Every pass, not just the first. A bag that was open at the start can be shut by
+                // hand fifty cycles in, and the key Hayden bound is an OPEN, not a toggle — so
+                // pressing it when they are already open costs one keystroke and nothing else.
+                OpenBags("top of the cycle", quiet: !_narrate);
 
                 // ---- top of the cycle: make sure the right NPC is selected and awake
                 if (_script.TargetByName && _script.Npc.Length > 0)
@@ -900,6 +1073,7 @@ public sealed class QuestRole
                 // True while every step that gave up did so because the SCAN found nothing — the
                 // ordinary "you're out of items" ending, where no click ever happened.
                 bool scanFoundNothing = true;
+                _assumedAnyThisPass = false;
                 List<TurnInStep> steps = _script.Steps.ToList();
                 for (int i = 0; i < steps.Count && !abort; i++)
                 {
@@ -946,27 +1120,49 @@ public sealed class QuestRole
                             // completion late by exactly the number of items already lost.
                             int burst = Interlocked.Exchange(ref _offersThisWindow, 0);
                             // CLAMPED before it touches the durable history. The burst is counted
-                            // over a 12-second window of live zone log, and questcompletions.json is
+                            // over a window of live zone log, and questcompletions.json is
                             // permanent with no UI to correct it — one stray line must not be able
                             // to overstate progress on a 1,024-item grind. The ⚠ below still reports
                             // the raw number, because that is a diagnosis, not a tally.
+                            // ONLY confirmed offers move this counter. Mixing assumed ones in and
+                            // then deciding at the boundary got it wrong in both directions: three
+                            // assumptions plus one real offer recorded a completion that never
+                            // happened, and three real ones plus an assumption threw them away.
+                            // An assumption isn't partial progress, it is no evidence at all.
                             int credit = Math.Clamp(burst, 1, 4);
-                            int toward = (offersToward.TryGetValue(step, out int t) ? t : 0) + credit;
+                            int toward = offersToward.TryGetValue(step, out int t) ? t : 0;
                             int need = Math.Max(1, step.Qty);
-                            while (toward >= need)
+                            if (!_assumedThisStep)
                             {
-                                QuestCompletions.Record(step.Quest);
-                                toward -= need;           // carry the remainder, don't discard it
+                                toward += credit;
+                                while (toward >= need)
+                                {
+                                    QuestCompletions.Record(step.Quest);
+                                    toward -= need;       // carry the remainder, don't discard it
+                                }
                             }
                             offersToward[step] = toward;
-                            Log?.Invoke($"✔ {step.Item} accepted — {Stats.LastLine}");
+                            Log?.Invoke(_assumedThisStep
+                                ? $"✔ {step.Item} handed over (assumed — nothing confirmed it)"
+                                : $"✔ {step.Item} accepted — {Stats.LastLine}");
+                            if (!_suggestedShown && _successLines.Count == 0 && _suggestedSuccess is { Length: > 0 } sug)
+                            {
+                                _suggestedShown = true;
+                                Log?.Invoke($"· tip: the line right after that hand-in was \"{sug}\". Paste "
+                                          + "it into \"also count as success\" on this card and the runner stops "
+                                          + "waiting the moment it sees it — which is most of the time a cycle costs.");
+                            }
                             if (burst > 1)
                                 Log?.Invoke($"⚠ the server took {burst} × {(step.Item.Length > 0 ? step.Item : "that item")} in that one moment, not one. "
                                           + "Earlier offers had gone into a trade window that hadn't committed yet, "
                                           + "and this GIVE committed the lot. Counting it as ONE hand-in, but "
                                           + $"{burst} left your bag. If this keeps happening, re-pick the GIVE "
                                           + "button — a GIVE press that doesn't land is what leaves items waiting.");
-                            _maybeHolding = false;        // it went to the NPC; nothing is held
+                            if (_assumedThisStep) _assumedAnyThisPass = true;
+                            // Only a REAL acknowledgement proves the cursor is clear. Clearing it on
+                            // an assumed hand-in put the stuck-cursor warning permanently out of
+                            // reach in the one mode that can't otherwise notice anything is wrong.
+                            if (!_assumedThisStep) _maybeHolding = false;
                             stepsDone++;
                             await Task.Delay(700 + _rng.Next(250), ct);   // ~1s, Hayden's measure
                             break;                            // next step
@@ -1081,7 +1277,7 @@ public sealed class QuestRole
                     // string is what stays on the card. If the most actionable thing the runner
                     // knows is "something may be in your hand", the message that persists has to
                     // carry it.
-                    if (_maybeHolding)
+                    if (_maybeHolding && _script.WaitForConfirm)
                         why += " Also check the cursor: an item may be stuck to it, which the bag scan cannot see.";
                     Finish($"Stopped after {Stats.Cycles} cycle(s) / {Stats.HandIns} hand-in(s). " + why);
                     HumanizedMouse.MoveInstant(home.x, home.y);
@@ -1099,7 +1295,7 @@ public sealed class QuestRole
                 {
                     partialRun = 0;
                     Stats.Cycles++;
-                    _script.LifetimeCompleted++;
+                    if (!_assumedAnyThisPass) _script.LifetimeCompleted++;
                     Log?.Invoke($"— cycle {Stats.Cycles} complete —");
                 }
                 else if (stepsDone > 0)
@@ -1124,12 +1320,12 @@ public sealed class QuestRole
             }
 
             HumanizedMouse.MoveInstant(home.x, home.y);
-            Finish($"Stopped — {Stats.Cycles} cycle(s), {Stats.HandIns} hand-in(s) confirmed this run.");
+            Finish($"Stopped — {Stats.Cycles} cycle(s), {Stats.HandIns} hand-in(s){ConfirmTail}");
         }
         catch (OperationCanceledException)
         {
             try { HumanizedMouse.MoveInstant(home.x, home.y); } catch { }
-            Finish($"Stopped — {Stats.Cycles} cycle(s), {Stats.HandIns} hand-in(s) confirmed this run.");
+            Finish($"Stopped — {Stats.Cycles} cycle(s), {Stats.HandIns} hand-in(s){ConfirmTail}");
         }
         catch (Exception ex)
         {

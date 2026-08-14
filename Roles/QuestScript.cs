@@ -131,7 +131,34 @@ public sealed class QuestScript
     public List<string> SayPhrases { get; set; } = new();
     public TurnInLayout Layout { get; set; } = new();
     /// <summary>Seconds to wait for the log to confirm a hand-in before calling it a miss.</summary>
-    public int ConfirmSeconds { get; set; } = 12;
+    public int ConfirmSeconds { get; set; } = 6;
+
+    /// <summary>
+    /// Wait for the server to acknowledge each hand-in, or hand over and move straight on.
+    ///
+    /// Waiting is what makes a hand-in COUNTED rather than assumed, and it is the only reason the
+    /// run can ever say "you've run out" instead of clicking at an empty bag all night. But the
+    /// wait is also the whole cost of a cycle: on Hayden's Kerra loop the clicking takes about five
+    /// seconds and a confirmation that doesn't land costs twice that again, per item.
+    ///
+    /// So it is a switch, not a policy. Off, the runner offers, waits a beat, counts it and goes —
+    /// which is right when you are watching, and wrong when you are not, because a run that assumes
+    /// success can never notice it has stopped succeeding.
+    /// </summary>
+    public bool WaitForConfirm { get; set; } = true;
+
+    /// <summary>
+    /// Extra lines that count as "that hand-in worked", one per line, matched anywhere in a log
+    /// line and case-insensitively.
+    ///
+    /// The definitive acknowledgement is "You offered 1 &lt;item&gt; to &lt;npc&gt;", and when it
+    /// arrives nothing else is needed. But EQ Legends prints a quest-specific consequence right
+    /// after it — "You validated the Kerran Sha`rr's concerns…", "You've dealt a blow to the
+    /// Heretics…" — and those are per turn-in, unambiguous, and impossible to know in advance from
+    /// a wiki scrape. So there is a box for them: paste the line your own quest prints and the
+    /// runner stops waiting the moment it sees it.
+    /// </summary>
+    public List<string> SuccessLines { get; set; } = new();
     /// <summary>How long to wait after the hail for the server to say the task has been assigned,
     /// before offering the first item. The hail is what re-assigns the task each cycle, and an
     /// offer that beats the assignment is refused — which cost one wasted offer and one full
@@ -155,6 +182,8 @@ public sealed class QuestScript
     /// <summary>Whether the one-time drop of the old 8-second assignment wait has been applied to
     /// this script. Remembered so a deliberately longer wait is never overruled twice.</summary>
     public bool AssignWaitTrimmed { get; set; }
+    /// <summary>Whether the one-time drop of the old 12-second confirm wait has been applied.</summary>
+    public bool ConfirmTrimmed { get; set; }
 
     // ---- smart find (0.10.8): the picks that MOVE get found, not remembered ----
     /// <summary>Find items by icon and the NPC by nameplate, falling back to the fixed picks.</summary>
@@ -249,6 +278,15 @@ public sealed class QuestScript
         }
         if (AssignWaitSeconds <= 0 || AssignWaitSeconds > 30) AssignWaitSeconds = 3;
         if (GiveSettleMs < 200 || GiveSettleMs > 4000) GiveSettleMs = 1100;
+        if (ConfirmSeconds < 2 || ConfirmSeconds > 60) ConfirmSeconds = 6;
+        // ONE-TIME drop of the old 12-second default, the same shape as the other migrations: a
+        // number nobody chose shouldn't sit there costing a quarter of every cycle, and a number
+        // somebody DID choose shouldn't be overwritten every launch.
+        // `== 12`, not `>= 12`: 12 was the old default, and the runner's own failure advice tells
+        // people to RAISE this when the server is slow. Catching everything above the default would
+        // have silently undone that advice on the first launch after the upgrade.
+        if (!ConfirmTrimmed) { ConfirmTrimmed = true; if (ConfirmSeconds == 12) ConfirmSeconds = 6; }
+        SuccessLines ??= new List<string>();
         OpenBagsKey = (OpenBagsKey ?? "").Trim();       // null from an older file, or a hand edit
         Shots ??= new Dictionary<string, PickShot>();
         if (BagCols <= 0) BagCols = 2;
@@ -266,6 +304,7 @@ public sealed class QuestScript
             // a migration that was only ever meant for scripts written by an older build.
             FastFlowApplied = true,
             AssignWaitTrimmed = true,
+            ConfirmTrimmed = true,
         };
         foreach (QuestTurnIn t in q.TurnIns)
             script.Steps.Add(new TurnInStep { Item = t.Item, Qty = Math.Max(1, t.Qty), Quest = q.Name });

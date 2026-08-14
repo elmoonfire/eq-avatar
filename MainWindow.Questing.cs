@@ -839,7 +839,26 @@ public partial class MainWindow
         stack.Children.Add(addBar);
 
         // ---- the switches ----
-        var opts = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 0, 0, 8) };
+        // A WrapPanel, not a StackPanel. This row lives inside a ScrollViewer with horizontal
+        // scrolling disabled, so a horizontal StackPanel that outgrows the window CLIPS its tail
+        // with no way to reach it — and the tail is where "repeat" lives, the only control that
+        // bounds a run. Every child gets a bottom margin so wrapped lines don't collide.
+        var opts = new WrapPanel { Margin = new Thickness(0, 0, 0, 8) };
+        // A label and the box it annotates must wrap as ONE unit, or "confirm wait" ends a line
+        // and its field starts the next. Pairs go in their own little StackPanel.
+        void OptPair(params UIElement[] parts)
+        {
+            var row = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+            foreach (UIElement part in parts) row.Children.Add(part);
+            Opt(row);
+        }
+        void Opt(UIElement e)
+        {
+            if (e is FrameworkElement fe)
+                fe.Margin = new Thickness(fe.Margin.Left, fe.Margin.Top, fe.Margin.Right,
+                                          Math.Max(fe.Margin.Bottom, 6));
+            opts.Children.Add(e);
+        }
         var hail = new CheckBox
         {
             Content = "hail first", IsChecked = script.HailFirst, Foreground = Hex("#9FB6CC"), FontSize = 11,
@@ -888,20 +907,19 @@ public partial class MainWindow
         // TIGHT box dragged around the item itself, so every slot in the bag area gets scanned
         // without the user ever counting slots. BagCols/BagRows live on only as a fallback grid
         // for steps picked before icon sizes were stored.)
-        opts.Children.Add(smart);
-        opts.Children.Add(hail);
-        opts.Children.Add(hailKey);
-        opts.Children.Add(targ);
+        Opt(smart);
+        OptPair(hail, hailKey);
+        Opt(targ);
 
-        opts.Children.Add(new TextBlock
+        var bagsLbl = new TextBlock
         {
             Text = "open bags", Foreground = Hex("#9FB6CC"), FontSize = 11,
             VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 5, 0),
-            ToolTip = "The key you've bound in game to OPEN ALL BAGS (chords welcome: alt+b). She presses it "
-                    + "when the run starts, and again if an item scan comes up empty — a shut bag and an empty "
-                    + "bag look the same to her otherwise. Bind the OPEN command, not the show/hide toggle. "
-                    + "Leave blank to never press anything.",
-        });
+            ToolTip = "The key you've bound in game to OPEN ALL BAGS (chords welcome: alt+b). She presses it at the "
+                    + "start of the run, at the top of every cycle, and again if an item scan comes up empty — a "
+                    + "shut bag and an empty bag look the same to her otherwise. Bind the OPEN command, not the "
+                    + "show/hide toggle. Leave blank to never press anything.",
+        };
         var bagsKey = new TextBox
         {
             Text = script.OpenBagsKey ?? "", Width = 62, FontSize = 11.5,
@@ -921,11 +939,11 @@ public partial class MainWindow
             script.OpenBagsKey = want;
             Persist();
             QstStatus.Text = want.Length > 0
-                ? $"Open-bags key set to {want} — she'll press it at the start of a run and whenever a scan comes up empty."
+                ? $"Open-bags key set to {want} — she'll press it at the start of a run, at the top of every cycle, and whenever a scan comes up empty."
                 : "Open-bags key cleared — she won't press anything.";
             QstStatus.Foreground = Hex("#9FE0B8");
         };
-        opts.Children.Add(bagsKey);
+        OptPair(bagsLbl, bagsKey);
 
         var focusBox = new CheckBox
         {
@@ -937,8 +955,42 @@ public partial class MainWindow
                     + "away still pauses her, and she will never grab focus back off you mid-run.",
         };
         focusBox.Click += (_, _) => { _settings.FocusGameOnStart = focusBox.IsChecked == true; _settings.Save(); };
-        opts.Children.Add(focusBox);
-        opts.Children.Add(new TextBlock { Text = "give wait", Foreground = Hex("#9FB6CC"), FontSize = 11, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 6, 0) });
+        Opt(focusBox);
+        var confirmBox = new CheckBox
+        {
+            Content = "wait for the server to confirm", IsChecked = script.WaitForConfirm,
+            Foreground = Hex("#9FB6CC"), FontSize = 11, Margin = new Thickness(0, 0, 14, 0),
+            VerticalAlignment = VerticalAlignment.Center,
+            ToolTip = "ON: every hand-in waits for the log to acknowledge it, so the counts are real and the run can "
+                    + "tell you when the items run out. OFF: hand over, wait a beat, move on — much faster, and the "
+                    + "honest cost is that a run which stops working can't notice — so an assumed hand-in moves the "
+                    + "run along but is kept OUT of the permanent completion history, and this needs a cycle count "
+                    + "rather than \"until they run out\". A fast acknowledgement is still used either way.",
+        };
+        confirmBox.Click += (_, _) => { script.WaitForConfirm = confirmBox.IsChecked == true; Persist(); };
+        Opt(confirmBox);
+
+        var confirmLbl = new TextBlock { Text = "confirm wait", Foreground = Hex("#9FB6CC"), FontSize = 11, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 6, 0) };
+        var confirmSecs = new TextBox
+        {
+            Text = script.ConfirmSeconds.ToString(), Width = 44, FontSize = 11.5, VerticalAlignment = VerticalAlignment.Center,
+            ToolTip = "Seconds to wait for the server to acknowledge a hand-in before calling it a miss. The "
+                    + "acknowledgement normally lands within a second, so this is a ceiling, not a schedule — but it "
+                    + "is what a FAILED hand-in costs you, once per item.",
+        };
+        confirmSecs.LostFocus += (_, _) =>
+        {
+            script.ConfirmSeconds = int.TryParse(confirmSecs.Text.Trim(), out int cs) ? Math.Clamp(cs, 2, 60) : 6;
+            confirmSecs.Text = script.ConfirmSeconds.ToString();
+            Persist();
+        };
+        OptPair(confirmLbl, confirmSecs, new TextBlock
+        {
+            Text = "s", Foreground = Hex("#5E7C9A"), FontSize = 10,
+            VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(4, 0, 14, 0),
+        });
+
+        var giveLbl = new TextBlock { Text = "give wait", Foreground = Hex("#9FB6CC"), FontSize = 11, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 6, 0) };
         var giveWait = new TextBox
         {
             Text = script.GiveSettleMs.ToString(), Width = 56, FontSize = 11.5, VerticalAlignment = VerticalAlignment.Center,
@@ -953,13 +1005,12 @@ public partial class MainWindow
             giveWait.Text = script.GiveSettleMs.ToString();
             Persist();
         };
-        opts.Children.Add(giveWait);
-        opts.Children.Add(new TextBlock
+        OptPair(giveLbl, giveWait, new TextBlock
         {
             Text = "ms before GIVE", Foreground = Hex("#5E7C9A"), FontSize = 10,
             VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(8, 0, 14, 0),
         });
-        opts.Children.Add(new TextBlock { Text = "repeat", Foreground = Hex("#9FB6CC"), FontSize = 11, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 6, 0) });
+        var repeatLbl = new TextBlock { Text = "repeat", Foreground = Hex("#9FB6CC"), FontSize = 11, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 6, 0) };
         var repeat = new TextBox
         {
             Text = script.Repeat.ToString(), Width = 56, FontSize = 11.5, VerticalAlignment = VerticalAlignment.Center,
@@ -971,13 +1022,46 @@ public partial class MainWindow
             repeat.Text = script.Repeat.ToString();
             Persist();
         };
-        opts.Children.Add(repeat);
-        opts.Children.Add(new TextBlock
+        OptPair(repeatLbl, repeat, new TextBlock
         {
             Text = "cycles · 0 = until they run out", Foreground = Hex("#5E7C9A"), FontSize = 10,
             VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(8, 0, 0, 0),
         });
         stack.Children.Add(opts);
+
+        // The quest's own "that worked" line. No scrape can know it — it is different for every
+        // turn-in — but it is the fastest and least ambiguous confirmation there is, so there is a
+        // box for it rather than a timeout standing in for one.
+        var okRow = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 6, 0, 0) };
+        okRow.Children.Add(new TextBlock
+        {
+            Text = "also count as success", Foreground = Hex("#9FB6CC"), FontSize = 11,
+            VerticalAlignment = VerticalAlignment.Top, Margin = new Thickness(0, 3, 6, 0),
+        });
+        var okLines = new TextBox
+        {
+            Text = string.Join(Environment.NewLine, script.SuccessLines ?? new List<string>()),
+            Width = 470, MinHeight = 40, FontSize = 11, AcceptsReturn = true, TextWrapping = TextWrapping.Wrap,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+            ToolTip = "One phrase per line. Any log line containing one of these ends the wait and counts the "
+                    + "hand-in. Paste the line your quest prints right after a successful turn-in — for the Kerra "
+                    + "cycle that's \"You validated the Kerran Sha`rr's concerns\" and \"You've dealt a blow to the "
+                    + "Heretics\". Part of the line is enough; six characters minimum.",
+        };
+        okLines.LostFocus += (_, _) =>
+        {
+            script.SuccessLines = okLines.Text
+                .Split('\n').Select(x => x.Trim()).Where(x => x.Length > 0).ToList();
+            okLines.Text = string.Join(Environment.NewLine, script.SuccessLines);
+            Persist();
+        };
+        okRow.Children.Add(okLines);
+        stack.Children.Add(okRow);
+        stack.Children.Add(new TextBlock
+        {
+            Text = "one phrase per line — the log line your quest prints right after a successful turn-in",
+            Foreground = Hex("#5E7C9A"), FontSize = 10, Margin = new Thickness(112, 2, 0, 0),
+        });
 
         // ---- run / stop ----
         // "Starting" counts as running for the button: while the game is being brought to the
