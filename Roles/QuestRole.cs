@@ -69,6 +69,14 @@ public sealed class QuestRole
     /// <summary>When the server last said a task had been assigned. The only honest "you may now
     /// offer the item" — an offer that beats the assignment is refused.</summary>
     private long _assignAtTicks;
+    /// <summary>Every line the watcher has delivered since the run began.
+    ///
+    /// This exists because "the server said nothing" and "I am not reading the server" produce the
+    /// IDENTICAL symptom — a hand-in that clicks perfectly and confirms nothing — and the runner
+    /// used to blame the first, telling a user with a full bag that he was probably out of items.
+    /// A log that has delivered ZERO lines during a run that has been clicking for half a minute
+    /// is not a quiet server; it is the wrong file, or /log turned off in game.</summary>
+    private int _linesSeen;
     /// <summary>The step currently in flight, so the log matcher can name-check its item.</summary>
     private volatile TurnInStep? _inFlight;
     /// <summary>Set when the last false from HandOverAsync meant "no icon in the bag" — a miss
@@ -131,6 +139,7 @@ public sealed class QuestRole
     private void OnLine(string line)
     {
         if (line.Length == 0) return;
+        Interlocked.Increment(ref _linesSeen);
 
         // ASSIGNMENT WATCH — armed across the hail, independent of the hand-in listener.
         //
@@ -498,7 +507,10 @@ public sealed class QuestRole
                     if (ct.IsCancellationRequested || phrase.Trim().Length == 0) continue;
                     Stats.State = "saying the trigger";
                     if (!Say("/say " + phrase.Trim())) break;
-                    await Task.Delay(700 + _rng.Next(200), ct);
+                    // Logged, because it is THE step that assigns the task. Its absence from a log
+                    // is the first thing anyone diagnosing a refused hand-in needs to see.
+                    if (_narrate) Log?.Invoke($"· said \"{phrase.Trim()}\" — that is what assigns the task");
+                    await Task.Delay(500 + _rng.Next(150), ct);
                 }
                 if (_script.HailFirst || _script.SayPhrases.Count > 0)
                 {
@@ -507,7 +519,12 @@ public sealed class QuestRole
                     // only the retry — by then seconds past the assignment — went through, at
                     // identical click speed. Speed was never the difference; state was.
                     Stats.State = "waiting for the task";
-                    DateTime until = DateTime.UtcNow.AddSeconds(Math.Clamp(_script.AssignWaitSeconds, 1, 30));
+                    // The phrase assigns the task the moment it lands, so this is a safety net for a
+                    // slow frame, not a schedule to keep. And if the watcher has heard NOTHING all
+                    // run, waiting for a line it will never deliver is pure dead time.
+                    int waitFor = Math.Clamp(_script.AssignWaitSeconds, 1, 30);
+                    if (Volatile.Read(ref _linesSeen) == 0 && Stats.Cycles > 0) waitFor = 1;
+                    DateTime until = DateTime.UtcNow.AddSeconds(waitFor);
                     bool saw = false;
                     while (DateTime.UtcNow < until && !ct.IsCancellationRequested)
                     {
@@ -526,8 +543,11 @@ public sealed class QuestRole
                     }
                     else if (_narrate)
                     {
-                        Log?.Invoke($"⚠ no 'assigned the task' line within {Math.Clamp(_script.AssignWaitSeconds, 1, 30)}s "
-                                  + "— offering anyway; if this hand-in misses, that is why.");
+                        Log?.Invoke(Volatile.Read(ref _linesSeen) == 0
+                            ? $"⚠ nothing at all has been read from the log in {waitFor}s — either the task was "
+                              + "already assigned, or the log isn't being read. Offering anyway."
+                            : $"⚠ no 'assigned the task' line within {waitFor}s — offering anyway; if this "
+                              + "hand-in misses, that is why.");
                     }
                 }
 
@@ -601,6 +621,18 @@ public sealed class QuestRole
                         }
                         else
                         {
+                            if (Volatile.Read(ref _linesSeen) == 0)
+                            {
+                                // Nothing at all has been read since the run started. That is not a
+                                // refused hand-in, it is a log we are not hearing — and saying "you
+                                // are probably out of totems" to someone whose bag is full, whose
+                                // items visibly left the bag, is the worst answer available.
+                                Finish($"✖ Stopped: not a single line has been read from the EverQuest log since this "
+                                     + "run began, so nothing can ever be confirmed — the clicks may well be working. "
+                                     + "Check /log is ON in game, then press \"Find newest log\" on the Log Reader "
+                                     + "page (a new character or a re-login writes to a NEW file).");
+                                return;
+                            }
                             Log?.Invoke($"✖ {step.Item}: nothing came back from the server within "
                                       + $"{_script.ConfirmSeconds}s (miss {misses} of 2 for this item).");
                             // Drop whatever might still be stuck to the cursor before trying again.

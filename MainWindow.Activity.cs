@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Documents;
 using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Effects;
@@ -32,12 +33,24 @@ public partial class MainWindow
     /// <summary>Rendering is throttled: a run narrating every click would otherwise rebuild a
     /// 400-line panel on the UI thread several times a second.</summary>
     private bool _actDirty;
+    /// <summary>The parsed search box. Chips answer "which module"; this answers "which lines".</summary>
+    private TextFilter _actQuery = TextFilter.None;
+    /// <summary>Exactly what is in the document right now, in order — the basis for appending
+    /// instead of rebuilding. See <see cref="RenderStream"/> for why that distinction matters.</summary>
+    private List<ActivityEntry> _actRendered = new();
 
     private void InitActivityUi()
     {
         if (!_actInit)
         {
             _actInit = true;
+            if (ActStream is not null)
+            {
+                // Wide enough that nothing wraps: a wrapped line breaks the column alignment AND
+                // makes a dragged selection pick up half of the line below it.
+                ActStream.Document.PageWidth = 4000;
+                ActStream.Document.PagePadding = new Thickness(2);
+            }
             ActivityLog.Record("App", "Activity Console opened.");
         }
         RenderActivity();
@@ -55,18 +68,100 @@ public partial class MainWindow
         }), System.Windows.Threading.DispatcherPriority.Background);
     }
 
+    /// <summary>Does this line survive BOTH filters — the source chips and the search box?</summary>
+    private bool ActPasses(ActivityEntry x)
+        => !_actHidden.Contains(x.Source) && _actQuery.Matches(x.Text, x.Source, x.Tag);
+
+    private void ActSearch_TextChanged(object sender, TextChangedEventArgs e)
+    {
+        // ActStream is the last-declared control on this panel, so its existence proves the rest;
+        // this fires once during InitializeComponent, before any of them exist.
+        if (ActStream is null || ActSearchNote is null) return;
+        _actQuery = TextFilter.Parse(ActSearch.Text);
+        ActSearchNote.Text = _actQuery.Error is null
+            ? "two words = both must appear · OR · NOR · -word to drop it · \"a phrase\" · source:quest"
+            : "✖ " + _actQuery.Error + " — showing everything until it reads straight";
+        ActSearchNote.Foreground = _actQuery.Error is null ? Hex("#5E7C9A") : Hex("#FFCB6B");
+        RenderActivity();
+    }
+
+    private void ActSearchClear_Click(object sender, RoutedEventArgs e)
+    {
+        if (ActSearch is null) return;
+        ActSearch.Text = "";
+        ActSearch.Focus();
+    }
+
+    private void ActSearchHelp_Click(object sender, MouseButtonEventArgs e)
+    {
+        var text = new TextBlock
+        {
+            TextWrapping = TextWrapping.Wrap, Foreground = Hex("#C6D2DE"),
+            FontSize = 12.5, LineHeight = 19, Margin = new Thickness(18), Text = SearchHelpText,
+        };
+        new Window
+        {
+            Title = "Searching the console",
+            Owner = this, Width = 620, Height = 520,
+            WindowStartupLocation = WindowStartupLocation.CenterOwner,
+            Background = Hex("#0B0F18"),
+            Content = new ScrollViewer { Content = text, VerticalScrollBarVisibility = ScrollBarVisibility.Auto },
+        }.ShowDialog();
+    }
+
+    private const string SearchHelpText =
+        "The chips above choose WHICH MODULE you're reading. The search box chooses WHICH LINES.\n\n" +
+        "PUTTING WORDS TOGETHER\n" +
+        "totem offered            both words must appear — a space means AND\n" +
+        "totem AND offered        the same thing, spelled out\n" +
+        "totem OR orders          either one is enough\n" +
+        "totem NOR orders         neither — the lines that mention one of them go away\n\n" +
+        "TAKING THINGS OUT\n" +
+        "-stopped                 drop every line containing it\n" +
+        "!stopped                 the same\n" +
+        "NOT stopped              the same again\n\n" +
+        "PHRASES AND BRACKETS\n" +
+        "\"has been assigned\"      matched with its spaces, as one thing\n" +
+        "(totem OR orders) -miss  brackets, so the junction you meant is the junction you get\n\n" +
+        "FIELDS\n" +
+        "source:quest             match the module name, not the words of the line\n" +
+        "tag:kerra                match what inside that module spoke — a quest name, say\n" +
+        "text:offered             match only the line itself, ignoring source and tag\n\n" +
+        "OR and NOR bind loosest and read left to right; NOT binds tightest. Everything ignores "
+        + "case, including the keywords.\n\n" +
+        "A query that doesn't read straight — a bracket left open, say — says so under the box and "
+        + "shows you everything meanwhile. A filter that silently empties the console looks exactly "
+        + "like a bot that did nothing, and that is the one mistake this page cannot afford to make.";
+
     /// <summary>
     /// Put the visible stream on the clipboard.
     ///
-    /// The console is TextBlocks in a panel, which cannot be selected with a mouse — so the one
-    /// time a user most wants these lines (pasting a failure to someone who can read it) was the
-    /// one time they could not have them. A button is a smaller answer than making every line
-    /// selectable, and it copies exactly what the filters are showing.
+    /// The lines themselves are selectable now, so this is the "all of it" path: it copies exactly
+    /// what the chips and the search are showing, which is usually what someone pasting a failure
+    /// into a chat window actually wants.
     /// </summary>
     private void ActCopy_Click(object sender, RoutedEventArgs e)
     {
-        List<ActivityEntry> lines = ActivityLog.Snapshot()
-            .Where(x => !_actHidden.Contains(x.Source)).ToList();
+        // A selection wins over the filters: if the user went to the trouble of dragging out four
+        // lines, copying four hundred is not being helpful.
+        if (ActStream is not null && !ActStream.Selection.IsEmpty)
+        {
+            string picked = ActStream.Selection.Text;
+            if (!string.IsNullOrWhiteSpace(picked))
+            {
+                try
+                {
+                    Clipboard.SetText(picked);
+                    // TrimEnd first: a FlowDocument's TextRange ends every paragraph with a
+                    // newline, including the last, so Ctrl+A would have reported one line too many.
+                    ShowToast($"Copied the {picked.TrimEnd('\r', '\n').Split('\n').Length} selected line(s)");
+                }
+                catch { ShowToast("Couldn't reach the clipboard"); }
+                return;
+            }
+        }
+
+        List<ActivityEntry> lines = ActivityLog.Snapshot().Where(ActPasses).ToList();
         if (lines.Count == 0) { ShowToast("Nothing to copy"); return; }
         var sb = new System.Text.StringBuilder();
         foreach (ActivityEntry x in lines)
@@ -88,9 +183,9 @@ public partial class MainWindow
 
     private void RenderActivity()
     {
-        // ActLines is the LAST of this panel's named controls in document order, so a null check on
+        // ActStream is the LAST of this panel's named controls in document order, so a null check on
         // it proves the rest were created (this can run before InitializeComponent has finished).
-        if (ActFilterHost is null || ActNowText is null || ActLines is null) return;
+        if (ActFilterHost is null || ActNowText is null || ActStream is null) return;
 
         List<string> sources = ActivityLog.Sources();
         List<ActivityEntry> all = ActivityLog.Snapshot();
@@ -98,13 +193,26 @@ public partial class MainWindow
         // ---- the filter bar. Rebuilt only when the SET of chips or their counts change: this
         // method runs on every line a running role speaks, and re-creating chips under the user's
         // cursor mid-click is both wasteful and rude.
+        // The count on a chip is how many of that source's lines match the SEARCH — so typing
+        // "totem" tells you at a glance which module ever mentioned one. It deliberately ignores
+        // the chips' own on/off state; a chip that reported 0 because it was off would be lying
+        // about the thing its own click is meant to reveal.
+        // Counted in ONE pass over the log rather than one pass per chip: this runs on every line
+        // a running role speaks, and a five-thousand-line night times six sources is thirty
+        // thousand string comparisons for a bar that usually hasn't changed.
+        var counts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        foreach (string sc in sources) counts[sc] = 0;
+        foreach (ActivityEntry x in all)
+            if (_actQuery.Matches(x.Text, x.Source, x.Tag))
+                counts[x.Source] = counts.TryGetValue(x.Source, out int c) ? c + 1 : 1;
+
         string chipSig = string.Join("|", sources.Select(sc =>
-            sc + ":" + all.Count(x => string.Equals(x.Source, sc, StringComparison.OrdinalIgnoreCase))
+            sc + ":" + (counts.TryGetValue(sc, out int n) ? n : 0)
                + ":" + (_actHidden.Contains(sc) ? "0" : "1")));
         if (chipSig != _actChipSig)
         {
             _actChipSig = chipSig;
-            BuildChips(sources, all);
+            BuildChips(sources, counts);
         }
 
         RenderStream(all);
@@ -112,7 +220,7 @@ public partial class MainWindow
 
     private string _actChipSig = "\u0000";
 
-    private void BuildChips(List<string> sources, List<ActivityEntry> all)
+    private void BuildChips(List<string> sources, Dictionary<string, int> counts)
     {
         ActFilterHost.Children.Clear();
         if (sources.Count == 0)
@@ -124,7 +232,7 @@ public partial class MainWindow
         {
             string captured = src;
             bool shown = !_actHidden.Contains(src);
-            int count = all.Count(x => string.Equals(x.Source, src, StringComparison.OrdinalIgnoreCase));
+            int count = counts.TryGetValue(src, out int n) ? n : 0;
             Color tone = SourceColor(src);
 
             var dot = new Border
@@ -193,50 +301,57 @@ public partial class MainWindow
         }
     }
 
+    /// <summary>
+    /// Draw the filtered stream into the selectable console.
+    ///
+    /// WHY THIS APPENDS INSTEAD OF REBUILDING. The whole point of the RichTextBox is that you can
+    /// drag out three lines and press Ctrl+C. Rebuilding the document is what a running role would
+    /// force several times a second — and every rebuild throws the selection away, so the feature
+    /// would work perfectly right up until the moment there was something worth copying. So: the
+    /// entries currently in the document are remembered, and when the new list is the old one with
+    /// lines added (the overwhelmingly common case) only the new paragraphs are appended. A rebuild
+    /// happens only when the filters change, which is a moment the user asked for anyway.
+    /// </summary>
     private void RenderStream(List<ActivityEntry> all)
     {
-        // ---- the stream
-        List<ActivityEntry> shownLines = all.Where(x => !_actHidden.Contains(x.Source)).ToList();
+        List<ActivityEntry> shownLines = all.Where(ActPasses).ToList();
         // Rendering every line of a long night would build tens of thousands of visuals; the tail
         // is what anyone reads, and the count says plainly what is above it.
         const int RenderCap = 300;
-        int hidden = Math.Max(0, shownLines.Count - RenderCap);
-        List<ActivityEntry> tail = hidden > 0 ? shownLines.GetRange(hidden, RenderCap) : shownLines;
+        int over = Math.Max(0, shownLines.Count - RenderCap);
+        List<ActivityEntry> tail = over > 0 ? shownLines.GetRange(over, RenderCap) : shownLines;
 
         ActCount.Text = $"{shownLines.Count} line(s) shown · {all.Count} recorded"
-                      + (hidden > 0 ? $" · showing the last {RenderCap}" : "");
+                      + (over > 0 ? $" · showing the last {RenderCap}" : "");
 
         // Only follow the tail if the user was ALREADY at the tail. Snapping them back down on
         // every new line makes scrolling back impossible for as long as anything is running — which
         // is precisely when someone reads this page.
-        bool atEnd = ActScroll is null || ActScroll.ScrollableHeight <= 0
-                  || ActScroll.VerticalOffset >= ActScroll.ScrollableHeight - 4;
+        ScrollViewer? sv = ActStreamScroll();
+        bool atEnd = sv is null || sv.ScrollableHeight <= 0
+                  || sv.VerticalOffset >= sv.ScrollableHeight - 4;
 
-        ActLines.Children.Clear();
-        foreach (ActivityEntry e in tail)
+        FlowDocument doc = ActStream.Document;
+
+        // How much of what is on screen is still wanted, and where does it sit in the new tail?
+        int drop = ActPrefixDrop(tail);
+        if (drop < 0)
         {
-            var row = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 0, 0, 1) };
-            row.Children.Add(new TextBlock
-            {
-                Text = e.When.ToString("HH:mm:ss"), FontFamily = new FontFamily("Consolas"), FontSize = 11,
-                Foreground = Hex("#4A5A6C"), Margin = new Thickness(0, 0, 8, 0),
-            });
-            row.Children.Add(new TextBlock
-            {
-                Text = e.Source, FontFamily = new FontFamily("Consolas"), FontSize = 11, FontWeight = FontWeights.Bold,
-                Foreground = new SolidColorBrush(SourceColor(e.Source)), Width = 58,
-                TextTrimming = TextTrimming.CharacterEllipsis,
-            });
-            row.Children.Add(new TextBlock
-            {
-                Text = e.Text, FontFamily = new FontFamily("Consolas"), FontSize = 11,
-                TextWrapping = TextWrapping.Wrap, MaxWidth = 980,
-                Foreground = e.IsBad ? Hex("#FFCB6B") : e.IsGood ? Hex("#7CE38B")
-                           : e.IsStep ? Hex("#8AA0B6") : Hex("#C6D2DE"),
-            });
-            ActLines.Children.Add(row);
+            doc.Blocks.Clear();
+            _actRendered = new List<ActivityEntry>();
+            foreach (ActivityEntry e in tail) doc.Blocks.Add(MakeStreamLine(e));
+            _actRendered.AddRange(tail);
         }
-        if (atEnd) ActScroll?.ScrollToEnd();
+        else
+        {
+            for (int i = 0; i < drop && doc.Blocks.FirstBlock is not null; i++)
+                doc.Blocks.Remove(doc.Blocks.FirstBlock);
+            for (int i = _actRendered.Count - drop; i < tail.Count; i++)
+                doc.Blocks.Add(MakeStreamLine(tail[i]));
+            _actRendered = tail;
+        }
+
+        if (atEnd) ActStream.ScrollToEnd();
 
         // ---- the latest line, big. Taken from EVERYTHING, not from the filtered view: a chip
         // hides chatter from the stream, it must not make an hour-old line masquerade as "NOW"
@@ -253,6 +368,71 @@ public partial class MainWindow
         ActNowBorder.BorderBrush = live ? Hex("#3FCB74") : Hex("#26303F");
         ActNowBorder.Background = live ? Hex("#10301F") : Hex("#0C1420");
     }
+
+    /// <summary>
+    /// How many of the lines already on screen have scrolled off the top of the window, or −1 when
+    /// the document no longer matches at all and must be rebuilt.
+    ///
+    /// Reference equality, not the record's value equality: two lines logged in the same second
+    /// with the same words are equal by value, and matching the wrong one would splice the document
+    /// silently out of step with the list that describes it.
+    /// </summary>
+    private int ActPrefixDrop(List<ActivityEntry> tail) => PrefixDrop(_actRendered, tail);
+
+    /// <summary>Shared with the Questing card's console, which has the same job and the same
+    /// eviction problem — its log window slides too, once a long night pushes the ring past its
+    /// cap, and counting lines instead of identifying them loses one every time it does.</summary>
+    internal static int PrefixDrop(List<ActivityEntry> rendered, List<ActivityEntry> tail)
+    {
+        if (rendered.Count == 0) return 0;
+        if (tail.Count == 0) return -1;
+
+        int k = -1;
+        for (int i = 0; i < rendered.Count; i++)
+            if (ReferenceEquals(rendered[i], tail[0])) { k = i; break; }
+        if (k < 0) return -1;
+
+        int keep = rendered.Count - k;
+        if (keep > tail.Count) return -1;
+        for (int j = 0; j < keep; j++)
+            if (!ReferenceEquals(rendered[k + j], tail[j])) return -1;
+        return k;
+    }
+
+    /// <summary>One line: dim clock, the source in its own colour, then what it said.</summary>
+    private static Paragraph MakeStreamLine(ActivityEntry e)
+    {
+        var p = new Paragraph { Margin = new Thickness(0) };
+        p.Inlines.Add(new Run(e.When.ToString("HH:mm:ss") + "  ") { Foreground = Hex("#4A5A6C") });
+        p.Inlines.Add(new Run(Pad(e.Source, 6) + "  ")
+        {
+            Foreground = new SolidColorBrush(SourceColor(e.Source)),
+            FontWeight = FontWeights.Bold,
+        });
+        p.Inlines.Add(new Run(e.Text)
+        {
+            Foreground = e.IsBad ? Hex("#FFCB6B") : e.IsGood ? Hex("#7CE38B")
+                       : e.IsStep ? Hex("#8AA0B6") : Hex("#C6D2DE"),
+        });
+        return p;
+    }
+
+    /// <summary>Monospace column padding — the source names line up so the eye can skip them.</summary>
+    private static string Pad(string s, int width)
+        => s.Length >= width ? s.Substring(0, width) : s.PadRight(width);
+
+    /// <summary>The RichTextBox's own scroller, so "was the user reading history" can be asked
+    /// before new lines land.</summary>
+    private ScrollViewer? ActStreamScroll()
+    {
+        if (_actScroll is not null) return _actScroll;
+        if (ActStream is null) return null;
+        ActStream.ApplyTemplate();
+        _actScroll = ActStream.Template?.FindName("PART_ContentHost", ActStream) as ScrollViewer;
+        return _actScroll;
+    }
+
+    private ScrollViewer? _actScroll;
 
     /// <summary>A stable colour per source so the eye can track one module down the stream.
     /// Derived from the name, so a source added later still gets its own without a registry to

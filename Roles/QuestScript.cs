@@ -136,7 +136,7 @@ public sealed class QuestScript
     /// before offering the first item. The hail is what re-assigns the task each cycle, and an
     /// offer that beats the assignment is refused — which cost one wasted offer and one full
     /// confirm timeout per cycle until this existed.</summary>
-    public int AssignWaitSeconds { get; set; } = 8;
+    public int AssignWaitSeconds { get; set; } = 3;
     /// <summary>Set once the script has been moved to the say-only flow, so a user who turns the
     /// hail back on deliberately is never overruled by the migration a second time.</summary>
     public bool FastFlowApplied { get; set; }
@@ -221,7 +221,7 @@ public sealed class QuestScript
             HailFirst = false;
             TargetByName = false;
         }
-        if (AssignWaitSeconds <= 0) AssignWaitSeconds = 8;
+        if (AssignWaitSeconds <= 0 || AssignWaitSeconds > 8) AssignWaitSeconds = 3;
         OpenBagsKey = (OpenBagsKey ?? "").Trim();       // null from an older file, or a hand edit
         Shots ??= new Dictionary<string, PickShot>();
         if (BagCols <= 0) BagCols = 2;

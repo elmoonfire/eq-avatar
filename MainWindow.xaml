@@ -2039,6 +2039,31 @@
                                 <StackPanel>
                                     <TextBlock Text="SHOW" FontSize="9" FontWeight="Bold" Foreground="#5E7C9A" Margin="0,0,0,6"/>
                                     <WrapPanel x:Name="ActFilterHost"/>
+
+                                    <Grid Margin="0,8,0,0">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="Auto"/>
+                                            <ColumnDefinition Width="*"/>
+                                            <ColumnDefinition Width="Auto"/>
+                                            <ColumnDefinition Width="Auto"/>
+                                        </Grid.ColumnDefinitions>
+                                        <TextBlock Grid.Column="0" Text="FIND" FontSize="9" FontWeight="Bold" Foreground="#5E7C9A"
+                                                   VerticalAlignment="Center" Margin="0,0,8,0"/>
+                                        <TextBox Grid.Column="1" x:Name="ActSearch" FontSize="11.5" FontFamily="Consolas"
+                                                 TextChanged="ActSearch_TextChanged"
+                                                 ToolTip="Words together mean AND. Also: OR, NOR, NOT, -word, &quot;a whole phrase&quot;, brackets, and source: / tag: fields."/>
+                                        <Button Grid.Column="2" Content="✕" Click="ActSearchClear_Click" Padding="8,2" Margin="6,0,0,0"
+                                                ToolTip="Clear the search."/>
+                                        <Border Grid.Column="3" Background="#16202E" BorderBrush="#2A4A57" BorderThickness="1" CornerRadius="999"
+                                                Width="22" Height="22" Cursor="Hand" MouseLeftButtonUp="ActSearchHelp_Click" Margin="6,0,0,0"
+                                                ToolTip="What you can type in the search box.">
+                                            <TextBlock Text="i" FontFamily="Georgia" FontStyle="Italic" FontWeight="Bold" FontSize="13"
+                                                       Foreground="#7FB2D9" HorizontalAlignment="Center" VerticalAlignment="Center" Margin="0,-1,0,0"/>
+                                        </Border>
+                                    </Grid>
+                                    <TextBlock x:Name="ActSearchNote" FontSize="10.5" Foreground="#5E7C9A" Margin="34,4,0,0"
+                                               TextWrapping="Wrap"
+                                               Text="two words = both must appear · OR · NOR · -word to drop it · &quot;a phrase&quot; · source:quest"/>
                                 </StackPanel>
                             </Border>
 
@@ -2052,9 +2077,12 @@
                             </Border>
 
                             <Border Grid.Row="4" CornerRadius="8" BorderBrush="#26303F" BorderThickness="1" ClipToBounds="True">
-                                <ScrollViewer x:Name="ActScroll" VerticalScrollBarVisibility="Auto" Background="#0C0F13" Padding="10,8,10,8">
-                                    <StackPanel x:Name="ActLines"/>
-                                </ScrollViewer>
+                                <RichTextBox x:Name="ActStream" IsReadOnly="True" IsDocumentEnabled="False"
+                                             Background="#0C0F13" Foreground="#C6D2DE" BorderThickness="0"
+                                             Padding="10,8,10,8" FontFamily="Consolas" FontSize="11"
+                                             VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto"
+                                             SelectionBrush="#1F4D6B"
+                                             ToolTip="Drag to select any lines, then Ctrl+C — or use Copy above for everything the filters show."/>
                             </Border>
                         </Grid>
                     </Grid>

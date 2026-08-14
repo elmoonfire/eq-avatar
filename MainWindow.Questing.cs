@@ -1071,14 +1071,15 @@ public partial class MainWindow
         // Same reason as the Activity Console's copy button: these lines are TextBlocks, so the
         // mouse cannot select them, and the moment you most want them is the moment you're trying
         // to show someone else what went wrong.
-        var copy = new TextBlock
+        var copy = new Button
         {
-            Text = "   copy", FontSize = 9.5, Foreground = Hex("#4FC3F7"),
-            VerticalAlignment = VerticalAlignment.Center, Cursor = Cursors.Hand,
-            ToolTip = "Copy this quest's activity to the clipboard.",
+            Content = "⧉ Copy", FontSize = 10, Padding = new Thickness(8, 1, 8, 2),
+            Margin = new Thickness(10, 0, 0, 0), VerticalAlignment = VerticalAlignment.Center,
+            ToolTip = "Copy this quest's whole activity log to the clipboard. (You can also select "
+                    + "individual lines in the console below and press Ctrl+C.)",
         };
         string forQuest = questName;
-        copy.MouseLeftButtonUp += (_, _) =>
+        copy.Click += (_, _) =>
         {
             List<ActivityEntry> all = ActivityLog.Snapshot(
                 e => e.Source == QuestSource && QuestCatalog.Norm(e.Tag) == QuestCatalog.Norm(forQuest));
@@ -1111,11 +1112,14 @@ public partial class MainWindow
             Padding = new Thickness(10, 7, 10, 8),
         };
         var nowStack = new StackPanel();
-        nowStack.Children.Add(new TextBlock
+        var nowLabel = new TextBlock
         {
             Text = running ? "NOW" : "LAST", FontSize = 8.5, FontWeight = FontWeights.Bold,
             Foreground = running ? Hex("#49F27E") : Hex("#5E7C9A"),
-        });
+        };
+        _qcNowLabel = nowLabel;
+        nowStack.Children.Add(nowLabel);
+        _qcNowBorder = nowBorder;
         var nowText = new TextBlock
         {
             Text = now?.Text ?? "nothing yet — press Run and she'll narrate every step here.",
@@ -1133,34 +1137,117 @@ public partial class MainWindow
 
         // The steps behind it. Scrolls back through the whole run; the newest sits at the bottom,
         // nearest the NOW line, so reading downward is reading forward in time.
-        var lineStack = new StackPanel();
-        foreach (ActivityEntry e in lines.Count > 1 ? lines.GetRange(0, lines.Count - 1) : new List<ActivityEntry>())
-            lineStack.Children.Add(new TextBlock
-            {
-                Text = $"{e.When:HH:mm:ss}  {e.Text}",
-                FontFamily = new FontFamily("Consolas"), FontSize = 11, TextWrapping = TextWrapping.Wrap,
-                Foreground = e.IsBad ? Hex("#FFCB6B") : e.IsGood ? Hex("#7CE38B") : e.IsStep ? Hex("#8AA0B6") : Hex("#C6D2DE"),
-                Margin = new Thickness(0, 0, 0, 1),
-            });
+        List<ActivityEntry> history = lines.Count > 1
+            ? lines.GetRange(0, lines.Count - 1) : new List<ActivityEntry>();
+        var body = MakeConsoleBody(
+            history
+            .Select(e => ($"{e.When:HH:mm:ss}  {e.Text}",
+                          e.IsBad ? Color.FromRgb(0xFF, 0xCB, 0x6B)
+                        : e.IsGood ? Color.FromRgb(0x7C, 0xE3, 0x8B)
+                        : e.IsStep ? Color.FromRgb(0x8A, 0xA0, 0xB6)
+                                   : Color.FromRgb(0xC6, 0xD2, 0xDE))));
+        body.Height = 96;                            // ~5 steps, scrollable back through the run
+        body.Margin = new Thickness(0, 4, 0, 0);
+        body.Loaded += (_, _) => body.ScrollToEnd();
 
-        var scroll = new ScrollViewer
-        {
-            // ~5 steps tall, per the ask, and scrollable back through everything above them.
-            Height = 96, VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
-            Margin = new Thickness(0, 4, 0, 0), Content = lineStack,
-            Background = Hex("#0C0F13"), Padding = new Thickness(8, 5, 8, 5),
-        };
-        // Show the newest without the user having to drag: the interesting end is the bottom.
-        scroll.Loaded += (_, _) => scroll.ScrollToEnd();
+        // Remember the live pieces so a step arriving mid-run can be APPENDED instead of forcing
+        // the whole card to be rebuilt. Rebuilding drops any selection the user has made — so
+        // "select the two lines that went wrong and copy them" worked right up until the moment
+        // there was something worth selecting. See QuestConsoleAppend.
+        _qcBody = body;
+        _qcQuest = questName;
+        _qcNowText = nowText;
+        _qcRunning = running;
+        _qcRendered = history;
         host.Children.Add(new Border
         {
             CornerRadius = new CornerRadius(8), BorderBrush = Hex("#26303F"), BorderThickness = new Thickness(1),
-            ClipToBounds = true, Child = scroll,
+            ClipToBounds = true, Child = body,
         });
         return host;
     }
 
     // ---------------------------------------------------------------- picking + running
+
+    // The live console's parts, held so a narrated step can be appended in place.
+    private System.Windows.Controls.RichTextBox? _qcBody;
+    private TextBlock? _qcNowText;
+    private TextBlock? _qcNowLabel;
+    private Border? _qcNowBorder;
+    private string _qcQuest = "";
+    private bool _qcRunning;
+    /// <summary>Exactly which entries are in the console body, in order — identity, not a count.
+    /// The log window slides once a long session pushes the ring past its cap, and a count would
+    /// then say "nothing new" on the very line that pushed the oldest one out.</summary>
+    private List<ActivityEntry> _qcRendered = new();
+    /// <summary>Everything the card draws from the runner, as one string. When it hasn't moved,
+    /// the card doesn't need redrawing — only the console does.</summary>
+    private string _qcStatSig = "\u0000";
+
+    /// <summary>
+    /// Add the newest narrated lines to the console that is already on screen, and refresh the NOW
+    /// panel — without rebuilding the card.
+    ///
+    /// WHY BOTHER. Rebuilding drops whatever the user had selected, so "select the two lines that
+    /// went wrong and paste them to me" worked right up until the moment there was something worth
+    /// selecting — which is to say, never.
+    ///
+    /// Returns false when it can't PROVE the document still matches this quest's log: a different
+    /// card, an unloaded one, or a window that has slid out from under what is drawn. The caller
+    /// then falls back to a full render, so the worst case of this is the behaviour it replaced.
+    /// </summary>
+    private bool QuestConsoleAppend(string questName, bool running)
+    {
+        if (_qcBody is null || _qcNowText is null || _qcNowLabel is null || _qcNowBorder is null) return false;
+        if (!_qcBody.IsLoaded) return false;
+        if (running != _qcRunning) return false;         // the glow and the label change — redraw it
+        if (!string.Equals(QuestCatalog.Norm(_qcQuest), QuestCatalog.Norm(questName), StringComparison.Ordinal))
+            return false;
+
+        List<ActivityEntry> lines = ActivityLog.Snapshot(
+            e => e.Source == QuestSource && QuestCatalog.Norm(e.Tag) == QuestCatalog.Norm(questName), 150);
+        List<ActivityEntry> history = lines.Count > 1
+            ? lines.GetRange(0, lines.Count - 1) : new List<ActivityEntry>();
+
+        int drop = PrefixDrop(_qcRendered, history);
+        if (drop < 0) return false;                      // out of step — a rebuild is the honest fix
+
+        System.Windows.Documents.FlowDocument doc = _qcBody.Document;
+        for (int i = 0; i < drop && doc.Blocks.FirstBlock is not null; i++)
+            doc.Blocks.Remove(doc.Blocks.FirstBlock);
+        int added = 0;
+        for (int i = _qcRendered.Count - drop; i < history.Count; i++)
+        {
+            ActivityEntry e = history[i];
+            doc.Blocks.Add(new System.Windows.Documents.Paragraph(
+                new System.Windows.Documents.Run($"{e.When:HH:mm:ss}  {e.Text}"))
+            {
+                Margin = new Thickness(0),
+                Foreground = e.IsBad ? Hex("#FFCB6B") : e.IsGood ? Hex("#7CE38B")
+                           : e.IsStep ? Hex("#8AA0B6") : Hex("#C6D2DE"),
+            });
+            added++;
+        }
+        _qcRendered = history;
+        if (added > 0) _qcBody.ScrollToEnd();
+
+        // The NOW panel, in full. Updating only the text used to leave an amber warning wearing the
+        // green "all is well" halo from the step before it — and that halo is the whole reason this
+        // panel is oversized, so a stale one is worse than no panel at all.
+        ActivityEntry? now = lines.Count > 0 ? lines[^1] : null;
+        _qcNowLabel.Text = running ? "NOW" : "LAST";
+        _qcNowLabel.Foreground = running ? Hex("#49F27E") : Hex("#5E7C9A");
+        _qcNowText.Text = now?.Text ?? "nothing yet — press Run and she'll narrate every step here.";
+        _qcNowText.Foreground = now is null ? Hex("#5E7C9A")
+                              : now.IsBad ? Hex("#FFCB6B")
+                              : now.IsGood ? Hex("#49F27E") : Hex("#DDE7F0");
+        _qcNowText.Effect = running && now is not null && !now.IsBad
+            ? new DropShadowEffect { Color = Color.FromRgb(0x49, 0xF2, 0x7E), BlurRadius = 12, ShadowDepth = 0, Opacity = 0.35 }
+            : null;
+        _qcNowBorder.Background = running ? Hex("#10301F") : Hex("#0C1420");
+        _qcNowBorder.BorderBrush = running ? Hex("#3FCB74") : Hex("#26303F");
+        return true;
+    }
 
     /// <summary>The name this page records its activity under. One string, so the console that
     /// reads it and the runner that writes it can never drift apart.</summary>
@@ -1520,21 +1607,43 @@ public partial class MainWindow
                 return;
             }
 
-            _currentLog ??= EQAvatar.Spike.Log.EqLogWatcher.FindNewestLog(LogFolderBox.Text.Trim());
+            // RE-RESOLVE, never reuse. `??=` meant the first log found in a session was tailed
+            // forever — but EQ writes a NEW file for a new character or a re-login, so after one
+            // relog every hand-in clicked perfectly and confirmed nothing, and the run blamed an
+            // empty bag for a file it was no longer reading.
+            string? newest = EQAvatar.Spike.Log.EqLogWatcher.FindNewestLog(LogFolderBox.Text.Trim());
+            if (newest is not null && !string.Equals(newest, _currentLog, StringComparison.OrdinalIgnoreCase))
+            {
+                _currentLog = newest;
+                ActivityLog.Record(QuestSource, "· reading " + System.IO.Path.GetFileName(newest), script.Quest);
+            }
+            _currentLog ??= newest;
             var sink = new ForegroundSendInputSink(() => _grindTarget);
-            _questRun = new QuestRole(script, sink, _settings, () => _grindTarget, _currentLog);
-            _questRun.Log += m => Dispatcher.Invoke(() =>
+            // Held as a local as well as a field: the handlers below outlive this method, and a
+            // later run replacing the field must not make an old line report the NEW run's numbers.
+            var runner = new QuestRole(script, sink, _settings, () => _grindTarget, _currentLog);
+            _questRun = runner;
+            runner.Log += m => Dispatcher.Invoke(() =>
             {
                 QstStatus.Text = m;
                 QstStatus.Foreground = m.StartsWith("✖") || m.StartsWith("⚠") ? Hex("#FFCB6B") : Hex("#7CE38B");
                 // Its OWN source, not the Grind console. Mixing them made both logs unreadable.
                 ActivityLog.Record(QuestSource, m, script.Quest);
                 // The runner speaks exactly when the picture changes — a hand-in confirmed, a miss,
-                // a cycle done — so this keeps the fire bar and the ×count column live mid-run.
-                RenderQuests();
+                // a cycle done — so the fire bar and the ×count column stay live mid-run. But most
+                // lines are just steps, and rebuilding the card for one of those throws away any
+                // selection the user was making in the console. So: redraw only when the numbers
+                // the card shows have actually moved, and otherwise append the line in place.
+                QuestStats st = runner.Stats;
+                string sig = $"{st.State}|{st.Cycles}|{st.HandIns}|{st.Attempts}|{st.Misses}|{runner.Running}";
+                if (sig != _qcStatSig || !QuestConsoleAppend(script.Quest, runner.Running))
+                {
+                    _qcStatSig = sig;
+                    RenderQuests();
+                }
             });
-            _questRun.Stopped += () => Dispatcher.Invoke(RenderQuests);
-            _questRun.Start();
+            runner.Stopped += () => Dispatcher.Invoke(RenderQuests);
+            runner.Start();
         }
         finally
         {
