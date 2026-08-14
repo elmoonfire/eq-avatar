@@ -680,7 +680,7 @@ public partial class MainWindow
                                                    + "next copy wherever it sits in the bag area.";
                             },
                             sh => captured.Shot = sh)) Persist(); RenderQuests(); },
-                captured.Slot.Set ? () => ShowStepShot(captured) : null));
+                captured.Slot.Set ? () => ShowStepShot(captured, script.IconTolerance) : null));
 
             if (total > 1)
             {
@@ -988,6 +988,36 @@ public partial class MainWindow
         {
             Text = "s", Foreground = Hex("#5E7C9A"), FontSize = 10,
             VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(4, 0, 14, 0),
+        });
+
+        var tolLbl = new TextBlock { Text = "icon match", Foreground = Hex("#9FB6CC"), FontSize = 11, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 6, 0) };
+        var tolBox = new TextBox
+        {
+            Text = script.IconTolerance.ToString("0"), Width = 40, FontSize = 11.5, VerticalAlignment = VerticalAlignment.Center,
+            ToolTip = "How close an icon has to look before she believes it — LOWER IS STRICTER. Watch the \"found "
+                    + "…(match N of M allowed)\" lines: a real match scores well under the limit, and anything just "
+                    + "inside it is a guess that will pick up the wrong item. If she starts handing over the wrong "
+                    + "thing, drop it until the wrong item stops qualifying — a few points ABOVE the score your "
+                    + "real item gets, not level with it.",
+        };
+        tolBox.LostFocus += (_, _) =>
+        {
+            // int, invariant. double.TryParse honours the current culture, where '.' is a GROUP
+            // separator — someone typing 12.5 to tighten the threshold would have got 125, clamped
+            // to 60, the loosest possible value, silently inverting what they asked for. It also
+            // accepts "NaN", which makes every comparison false (nothing is ever found) and then
+            // throws inside the JSON writer, where Save swallows it and stops persisting anything.
+            script.IconTolerance =
+                int.TryParse(tolBox.Text.Trim(), System.Globalization.NumberStyles.Integer,
+                             System.Globalization.CultureInfo.InvariantCulture, out int tv)
+                    ? Math.Clamp(tv, 8, 60) : 35;
+            tolBox.Text = script.IconTolerance.ToString("0");
+            Persist();
+        };
+        OptPair(tolLbl, tolBox, new TextBlock
+        {
+            Text = "lower = stricter", Foreground = Hex("#5E7C9A"), FontSize = 10,
+            VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(8, 0, 14, 0),
         });
 
         var giveLbl = new TextBlock { Text = "give wait", Foreground = Hex("#9FB6CC"), FontSize = 11, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 6, 0) };
@@ -1301,7 +1331,10 @@ public partial class MainWindow
                     QuestFind.IconHit? hit = sliding
                         ? QuestFind.FindIconSliding(_grindTarget, script, st)
                         : QuestFind.FindIconCell(_grindTarget, script, st);
-                    double accept = sliding ? QuestFind.SlidingAcceptDistance : QuestFind.IconAcceptDistance;
+                    // The script's own tolerance, not the constant. A test that answers a different
+                    // question from the run proves nothing — and this is the screen people come to
+                    // when the run says it can't find things.
+                    double accept = sliding ? Math.Clamp(script.IconTolerance, 8, 60) : QuestFind.IconAcceptDistance;
                     if (hit is not null && hit.Dist <= accept)
                     {
                         p = new ScreenPoint { X = hit.X, Y = hit.Y };
@@ -1423,13 +1456,14 @@ public partial class MainWindow
     /// 0.10.9 has no box size and silently falls back to the loose grid scan: the run then reports
     /// "found ... in bag cell 2,1 (match 27)" and clicks an empty square with total confidence.
     /// </summary>
-    private void ShowStepShot(TurnInStep step)
+    private void ShowStepShot(TurnInStep step, double tolerance)
     {
         string note = !step.HasIcon
             ? "No icon signature on this step — she will click the fixed slot and hope. Re-pick it."
             : step.HasIconSize
                 ? "She slides a window of exactly this size across the bag area and clicks the closest match "
-                + "(needs a score of " + QuestFind.SlidingAcceptDistance.ToString("0") + " or better)."
+                + "(needs a score of " + Math.Clamp(tolerance, 8, 60).ToString("0") + " or better, "
+                + "which is the \"icon match\" setting on the card)."
                 : "⚠ This pick predates the precise search: with no box size stored she falls back to the OLD grid "
                 + "scan, which divides your bag area into cells and compares the middle of each one. That is how a "
                 + "totem got matched to gauntlets — and how an empty slot can score 27. Re-pick this item once.";

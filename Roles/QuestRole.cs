@@ -135,6 +135,29 @@ public sealed class QuestRole
     private volatile bool _sawAssignEver;
     /// <summary>Whether the log has shown ANY hand-over acknowledgement this run.</summary>
     private volatile bool _sawAnyOffer;
+    /// <summary>
+    /// The trade window has CLOSED — "You complete the trade with &lt;npc&gt;".
+    ///
+    /// This is the line that ends the guessing. It is printed whether or not the NPC kept anything,
+    /// so seen WITHOUT an offer line it means the item went in and came straight back out: the
+    /// trade is over, nothing was accepted, and there is nothing left to wait for. Every failed
+    /// hand-in in Hayden's logs sat out the full confirmation window after this line had already
+    /// gone past.
+    /// </summary>
+    private long _tradeClosedAt;
+    /// <summary>The NPC's own words when he hands something back — "I have no need for this,
+    /// Bryari. You can have it back." Worth quoting: it is the difference between "the click
+    /// missed" and "he doesn't want this right now", which no amount of clicking will fix.</summary>
+    private string _refusal = "";
+    /// <summary>The last attempt ended with the trade closing and nothing accepted.</summary>
+    private bool _handedBack;
+    /// <summary>Items already warned about for a borderline icon match. Once each, per run.</summary>
+    private readonly HashSet<string> _marginalSaid = new(StringComparer.OrdinalIgnoreCase);
+    /// <summary>The last scan's score, carried so a miss can QUOTE it. The "found …" line is hushed
+    /// after the first pass, so telling someone to "check the match score above" pointed at a line
+    /// that no longer existed — and the advice matters most when the score was unremarkable, which
+    /// is exactly when the once-per-run ⚠ never fired.</summary>
+    private string _lastMatch = "";
     /// <summary>How many times this run has said the trigger phrase and then waited for a journal
     /// line. Two passes with nothing is evidence about THIS GAME's logging; a busy zone's chatter
     /// is evidence about the zone.</summary>
@@ -254,6 +277,21 @@ public sealed class QuestRole
         string l = line.ToLowerInvariant();
         string item = step.Item.ToLowerInvariant();
         string quest = step.Quest.ToLowerInvariant();
+
+        // THE TRADE IS OVER. Recorded before anything else so it can't be missed, and timestamped
+        // rather than acted on immediately: within one poll the log's lines arrive back to back, so
+        // this line can be delivered a hair BEFORE the offer line it accompanies. The confirm loop
+        // gives it a short grace period rather than calling a miss on ordering.
+        if (l.Contains("you complete the trade with"))
+            Volatile.Write(ref _tradeClosedAt, DateTime.UtcNow.Ticks);
+        // The refusal itself. EQ Legends phrases it as the NPC talking, and the two halves are
+        // stable across NPCs even where the wording around them isn't.
+        // Scoped to NPC SPEECH. "you can have it back" on its own is a phrase a person can type in
+        // a tell, and a refusal recorded off group chat would suppress the wrong-item and
+        // wrong-creature reports below and assert that nothing was lost.
+        if (l.Contains(" says, '")
+            && (l.Contains("i have no need for this") || l.Contains("you can have it back")))
+            lock (_windowGate) _refusal = line.Trim();
 
         // Keep what the server said while we were waiting, so a miss can quote it. Bounded: a busy
         // zone can print faster than anyone can read, and this is evidence, not a transcript.
@@ -556,6 +594,10 @@ public sealed class QuestRole
         Stats.Attempts++;
         _assumedThisStep = false;
         _emptyBagMiss = false;
+        // THIS step's score, or nothing at all — never the last step's. A step with no icon
+        // signature, or one whose screen grab failed, skips the scan entirely, and a stale value
+        // here would be quoted back as though it described the item just handed over.
+        _lastMatch = "";
 
         // Where the item ACTUALLY is right now. The picked slot is only the fallback: totems
         // migrate through the bag as each one is consumed, and clicking yesterday's slot is how
@@ -570,7 +612,7 @@ public sealed class QuestRole
             QuestFind.IconHit? Scan() => sliding
                 ? QuestFind.FindIconSliding(_hwnd(), _script, step)
                 : QuestFind.FindIconCell(_hwnd(), _script, step);
-            double accept = sliding ? QuestFind.SlidingAcceptDistance : QuestFind.IconAcceptDistance;
+            double accept = sliding ? Math.Clamp(_script.IconTolerance, 8, 60) : QuestFind.IconAcceptDistance;
             QuestFind.IconHit? hit = Scan();
 
             // A closed bag and an empty bag look identical from here. Before believing the empty
@@ -593,9 +635,27 @@ public sealed class QuestRole
             else if (hit.Dist <= accept)
             {
                 slot = new ScreenPoint { X = hit.X, Y = hit.Y };
-                if (_narrate) Log?.Invoke(sliding
-                    ? $"· found {step.Item} at {hit.X * 100:0.0}%, {hit.Y * 100:0.0}% of the window (match {hit.Dist:0})"
-                    : $"· found {step.Item} in bag cell {hit.Row + 1},{hit.Col + 1} (match {hit.Dist:0})");
+                // A match within a few points of the limit is a guess, and a guess picks up the
+                // wrong item — Hayden's run offered a Bone-clasped Girdle that scored 35 against a
+                // ceiling of 35. Said out loud every time, not just while narrating, because the
+                // consequence (an item handed to an NPC) is not something to find out about later.
+                // ONCE per item per run, and amber. A margin can't tell a genuinely mediocre
+                // signature from a wrong item — Hayden's real Orders score 33 against a limit of
+                // 35, the Bone-clasped Girdle it grabbed scored 35 — so this can only ever say
+                // "look at this", not "this is wrong". Said every cycle it would be hundreds of
+                // identical blocking marshals; said once it is a fact worth having.
+                _lastMatch = $"{hit.Dist:0} of {accept:0} allowed";
+                bool marginal = sliding && hit.Dist > accept - 3 && _marginalSaid.Add(step.Item);
+                if (_narrate)
+                    Log?.Invoke(sliding
+                        ? $"· found {step.Item} at {hit.X * 100:0.0}%, {hit.Y * 100:0.0}% of the window "
+                          + $"(match {hit.Dist:0} of {accept:0} allowed)"
+                        : $"· found {step.Item} in bag cell {hit.Row + 1},{hit.Col + 1} (match {hit.Dist:0})");
+                if (marginal)
+                    Log?.Invoke($"⚠ {step.Item} only matched at {hit.Dist:0} against a limit of {accept:0} — that is "
+                              + "close enough to the edge to be a different item wearing a similar icon. If she starts "
+                              + "handing over the wrong thing, re-pick this item's slot with a tight box round the "
+                              + "icon. (Said once per item per run.)");
             }
             else
             {
@@ -669,8 +729,10 @@ public sealed class QuestRole
         // be satisfied by the tail of the PREVIOUS hand-in.
         _inFlight = step;
         _offered = _advanced = false;
+        _handedBack = false;
         _grabNext = false;              // never let a previous window's capture spill into this one
-        lock (_windowGate) { _windowLines.Clear(); _wrongOffer = ""; _wrongNpc = ""; _spilled = false; }
+        lock (_windowGate) { _windowLines.Clear(); _wrongOffer = ""; _wrongNpc = ""; _spilled = false; _refusal = ""; }
+        Volatile.Write(ref _tradeClosedAt, 0);
         Interlocked.Exchange(ref _offersThisWindow, 0);
         _listening = true;
 
@@ -705,10 +767,34 @@ public sealed class QuestRole
         Stats.State = "waiting for the server";
         DateTime deadline = DateTime.UtcNow.AddSeconds(Math.Clamp(_script.ConfirmSeconds, 2, 60));
         bool confirmed = false;
+        DateTime sawClosed = default;
         while (DateTime.UtcNow < deadline && !ct.IsCancellationRequested)
         {
             if (_offered || _advanced) { confirmed = true; break; }
-            await Task.Delay(250, ct);
+            // The trade window shut and nothing was acknowledged. Half a second of grace for an
+            // offer line delivered in the same batch a fraction later, then stop: there is nothing
+            // more coming, and waiting the rest of the window out is the single biggest waste in
+            // the whole cycle.
+            // Grace measured from when THIS LOOP first sees the closure, not from when the line was
+            // delivered. Delivery time is useless here: the GIVE click's own settle sleeps run to
+            // 800ms (1500 with a confirm pick), all of it before the first iteration, so a grace
+            // measured from delivery was routinely spent before anyone looked. And the case that
+            // actually needs grace is the acknowledgement arriving in the NEXT poll — the tailer
+            // polls every 500ms — not the same batch, which is drained synchronously and would win
+            // the `_offered` check above with no grace at all.
+            if (Volatile.Read(ref _tradeClosedAt) != 0)
+            {
+                if (sawClosed == default) sawClosed = DateTime.UtcNow;
+                else if ((DateTime.UtcNow - sawClosed).TotalMilliseconds > 700)
+                {
+                    _handedBack = true;
+                    // The best cursor evidence there is: the item went into a trade window and came
+                    // back out to the bag. Nothing else that clears this flag is as certain.
+                    _maybeHolding = false;
+                    break;
+                }
+            }
+            await Task.Delay(120, ct);
         }
         _listening = false;
         _inFlight = null;
@@ -853,6 +939,25 @@ public sealed class QuestRole
                       + "grabbed the wrong icon (re-pick that slot with a tighter box round it).");
             return;
         }
+        // Only now. "The trade closed and nothing was acknowledged" is an ABSENCE, and the two
+        // branches above are positive identifications — a named wrong recipient, a named wrong
+        // item. Printing this first suppressed both and told the user nothing was lost while the
+        // item was inside a patrolling tiger.
+        string refused;
+        lock (_windowGate) refused = _refusal;
+        if (refused.Length > 0 || _handedBack)
+        {
+            Log?.Invoke(refused.Length > 0
+                ? $"↩ he handed it straight back — \"{StripStamp(refused)}\". Nothing was lost. That is not a "
+                  + "missed click: either the task isn't assigned right now (the phrase may not re-assign it until "
+                  + "the journal's request timer is up, or he may need hailing first), or what was picked up wasn't "
+                  + $"what I meant to pick up (it scored {(_lastMatch.Length > 0 ? _lastMatch : "unknown")} — "
+                  + "anything near the limit is a guess)."
+                : "↩ the trade closed and he kept nothing. Nothing was lost, and there was nothing more to wait for "
+                  + "— either the task isn't assigned right now, or the item picked up wasn't the right one.");
+            return;
+        }
+
         if (seen.Count == 0)
         {
             Log?.Invoke("· the log said NOTHING at all during that wait — so as far as the server is "
@@ -1073,11 +1178,16 @@ public sealed class QuestRole
                 // True while every step that gave up did so because the SCAN found nothing — the
                 // ordinary "you're out of items" ending, where no click ever happened.
                 bool scanFoundNothing = true;
+                int refusedSteps = 0;
                 _assumedAnyThisPass = false;
                 List<TurnInStep> steps = _script.Steps.ToList();
                 for (int i = 0; i < steps.Count && !abort; i++)
                 {
                     TurnInStep step = steps[i];
+                    // Per STEP, not per miss: refusedSteps is compared against stepsSkipped, and
+                    // the two are only 1:1 while MaxStepMisses is 1. Counting at the give-up site
+                    // keeps them in step whatever that constant becomes.
+                    bool refusedThisStep = false;
                     while (true)
                     {
                         if (ct.IsCancellationRequested) { cycleComplete = false; abort = true; break; }
@@ -1201,10 +1311,26 @@ public sealed class QuestRole
                                      + "page (a new character or a re-login writes to a NEW file).");
                                 return;
                             }
-                            Log?.Invoke($"✖ {step.Item}: nothing came back from the server within "
-                                      + $"{_script.ConfirmSeconds}s. Moving on rather than trying again — if the item "
-                                      + "did go into a trade window that hasn't committed, offering another one just "
-                                      + "adds it to the pile and gives them all away at once.");
+                            // Same precedence ReportWindow uses. "He didn't take it / nothing was
+                            // lost" is an ABSENCE, and it must never outrank a named wrong item or
+                            // a named wrong recipient — fixing that in ReportWindow alone left the
+                            // identical false claim in the headline and, worse, in the Finish
+                            // string, which is the one that stays on the card after the console has
+                            // scrolled.
+                            bool refusedNow, positive;
+                            lock (_windowGate)
+                            {
+                                positive = _wrongOffer.Length > 0 || _wrongNpc.Length > 0;
+                                refusedNow = !positive && _refusal.Length > 0;
+                            }
+                            bool gaveBack = !positive && (_handedBack || refusedNow);
+                            Log?.Invoke(gaveBack
+                                ? $"✖ {step.Item}: he didn't take it."
+                                : $"✖ {step.Item}: nothing came back from the server within "
+                                  + $"{_script.ConfirmSeconds}s. Moving on rather than trying again — if the item "
+                                  + "did go into a trade window that hasn't committed, offering another one just "
+                                  + "adds it to the pile and gives them all away at once.");
+                            if (gaveBack) refusedThisStep = true;
                             ReportWindow(step);
                             NoteCursorRisk();
                         }
@@ -1219,6 +1345,7 @@ public sealed class QuestRole
                             // Orders it actually wanted were three inches away in the same bag, and
                             // called the whole thing "you're out of totems".
                             stepsSkipped++;
+                            if (refusedThisStep) refusedSteps++;
                             cycleComplete = false;
                             stepMisses[step] = 0;             // next pass gets its own attempts
                             Log?.Invoke(i + 1 < steps.Count
@@ -1255,7 +1382,18 @@ public sealed class QuestRole
                     // ever made — just as well as it covers a refused hand-in, and telling the
                     // first group to re-pick their NPC sends them to fix picks that were fine.
                     string why;
-                    if (scanFoundNothing)
+                    // EVERY give-up has to have been a refusal before saying "everything". A pass
+                    // where the totem was refused and the Orders had simply run out is not a quest
+                    // -state problem, and pointing at the journal's request timer would bury the
+                    // one answer that was true.
+                    if (refusedSteps > 0 && refusedSteps == stepsSkipped)
+                        why = "He handed everything back. Nothing was lost and no click went astray — this is the "
+                            + "quest's state, not the bot's aim: the task isn't assigned right now. The journal's "
+                            + "request timer may not be up yet, or this NPC may want hailing before the phrase will "
+                            + "re-assign it. If the journal DOES show the task, then what was picked up wasn't the "
+                            + $"right item — the last scan scored {(_lastMatch.Length > 0 ? _lastMatch : "unknown")}, "
+                            + "so lower \"icon match\" on the card until the wrong one stops qualifying.";
+                    else if (scanFoundNothing)
                         why = "Nothing was ever offered: the bag scan couldn't find these items to pick up. Either "
                             + "you're out of them, or the bags aren't open (set an open-bags key on this card), or "
                             + "the icon signatures need re-taking — re-pick each item's slot with a tight box.";

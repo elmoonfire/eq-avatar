@@ -159,6 +159,17 @@ public sealed class QuestScript
     /// runner stops waiting the moment it sees it.
     /// </summary>
     public List<string> SuccessLines { get; set; } = new();
+
+    /// <summary>
+    /// How close an icon has to look before the sweep believes it — lower is stricter.
+    ///
+    /// 35 was one number for every item, and Hayden's log shows why that can't hold: his real
+    /// totem scores 13–20, his Orders score 26–33, and a Bone-clasped Girdle sitting somewhere
+    /// else entirely scores 35. One threshold cannot be loose enough for the second item and tight
+    /// enough to reject the third. Per script, and on the card, so a run that starts grabbing the
+    /// wrong thing has a dial rather than a rebuild.
+    /// </summary>
+    public double IconTolerance { get; set; } = 35;
     /// <summary>How long to wait after the hail for the server to say the task has been assigned,
     /// before offering the first item. The hail is what re-assigns the task each cycle, and an
     /// offer that beats the assignment is refused — which cost one wasted offer and one full
@@ -287,6 +298,7 @@ public sealed class QuestScript
         // have silently undone that advice on the first launch after the upgrade.
         if (!ConfirmTrimmed) { ConfirmTrimmed = true; if (ConfirmSeconds == 12) ConfirmSeconds = 6; }
         SuccessLines ??= new List<string>();
+        if (!(IconTolerance >= 8 && IconTolerance <= 60)) IconTolerance = 35;
         OpenBagsKey = (OpenBagsKey ?? "").Trim();       // null from an older file, or a hand edit
         Shots ??= new Dictionary<string, PickShot>();
         if (BagCols <= 0) BagCols = 2;
