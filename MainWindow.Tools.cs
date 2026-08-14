@@ -466,7 +466,43 @@ public partial class MainWindow
     /// to +6. That is a hard thing to feel from a number and an easy thing to see from a bar, which
     /// is the entire reason this is drawn rather than printed.
     /// </summary>
+    /// <summary>
+    /// Draw the forecast, and never take the app down doing it.
+    ///
+    /// This panel is the one place on the page built out of data we did not write: stat names and
+    /// numbers scraped off a wiki, a cached icon sheet, an OCR reading. It is also redrawn from
+    /// every click handler on the page — so an exception in here does not produce a blank panel, it
+    /// unwinds through the click and kills the process. It did exactly that: one null FontFamily,
+    /// and setting the tier pick closed the app.
+    ///
+    /// The failure that matters is not the lost panel. It is that this can be redrawn WHILE A SWEEP
+    /// IS RUNNING, and a process that dies mid-sweep dies holding an item on the cursor, with no
+    /// put-back and nothing said. A forecast is worth exactly none of that.
+    /// </summary>
     private void RenderMergeForecast()
+    {
+        try { RenderMergeForecastCore(); }
+        catch (Exception ex)
+        {
+            Diag.BotLog.Log("merge", "forecast render failed: " + ex);
+            ActivityLog.Record(MergeSource, "⚠ couldn't draw the forecast (" + ex.Message
+                                          + ") — everything else on this page still works.");
+            try
+            {
+                MrgForecastHost.Children.Clear();
+                MrgForecastHost.Children.Add(new TextBlock
+                {
+                    Text = "⚠ Couldn't draw the forecast: " + ex.Message
+                         + "\nThe picks, the sweep and the console are unaffected.",
+                    FontSize = 11.5, TextWrapping = TextWrapping.Wrap, MaxWidth = 620,
+                    Foreground = Hex("#FFCB6B"), Margin = new Thickness(0, 2, 0, 0),
+                });
+            }
+            catch { /* if even the apology won't draw, the log has it */ }
+        }
+    }
+
+    private void RenderMergeForecastCore()
     {
         if (MrgForecastHost is null) return;
         MergePlan p = MergePlan.Current;
@@ -730,11 +766,17 @@ public partial class MainWindow
                     var tb = new TextBlock
                     {
                         Text = cells[c], FontSize = 11.5,
-                        FontFamily = c == 0 ? null : new FontFamily("Consolas"),
                         Foreground = c == 0 ? Hex("#9FB6CC")
                                    : c == 2 && projV > nowV ? Hex("#49F27E") : Hex("#C6D2DE"),
                         Margin = new Thickness(0, 0, 0, 1),
                     };
+                    // The numbers are monospaced so the columns line up; the stat NAME is prose and
+                    // wants the normal face. That was written as `FontFamily = c == 0 ? null : ...`,
+                    // which throws — WPF converts a null FontFamily to the empty string and rejects
+                    // it, and the throw lands inside a click handler and takes the app down. There
+                    // is no "unset this" value to assign: the way to keep the inherited font is not
+                    // to touch the property at all.
+                    if (c > 0) tb.FontFamily = new FontFamily("Consolas");
                     Grid.SetColumn(tb, c); Grid.SetRow(tb, row);
                     grid.Children.Add(tb);
                 }
