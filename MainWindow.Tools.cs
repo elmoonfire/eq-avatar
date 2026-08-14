@@ -89,11 +89,17 @@ public partial class MainWindow
             p.MergeButton.Set ? () => ShowMergeShot(p, "merge", "The Merge Item button",
                 "Pressed once per copy. If the item window has moved since, re-pick it.") : null));
         tiles.Children.Add(MakePickTile("ui-pick-slot.jpg", "the copy's icon",
-            p.HasIcon ? (p.HasIconSize ? "found by sight" : "⚠ re-pick me") : "she matches this", "",
+            p.HasIcon ? (!p.HasIconSize ? "⚠ re-pick me" : p.HasFineIcon ? "found by sight" : "⚠ colour only") : "she matches this", "",
             p.HasIcon,
             "Drag a TIGHT box around ONE of the copies in your bag. She learns its icon and then finds every other "
             + "copy by sight — so only squares that actually hold one get clicked. Click the READY badge to see "
-            + "exactly what she compares against.",
+            + "exactly what she compares against.\n\n"
+            + (p.HasIcon && !p.HasFineIcon
+                ? "⚠ This pick predates the close-up confirm, so right now only the COLOUR of the icon is being "
+                + "matched — which cannot separate two items drawn from the same palette. Re-pick it once to arm "
+                + "the confirm."
+                : "Two screens: the colours find the candidates, and a close-up of the same box decides which of "
+                + "them is really a copy."),
             () => { if (PickMergeRect(r => { }, "one copy of the item",
                         "Drag a TIGHT box around ONE copy in your bag — right up to the icon's edges — then press Enter.",
                         sh => Shot(p, "item", sh),
@@ -103,6 +109,13 @@ public partial class MainWindow
                             // the window edge samples past the frame). Overwriting a good pick with
                             // null while the status line says "Saved" in green is the worst of both.
                             double[]? sig = QuestFind.SigFromRegion(frame, box.X, box.Y, box.W, box.H);
+                            // The close-up is taken from the SAME box in the SAME frame — one drag,
+                            // two resolutions, so the two screens can never describe different
+                            // pixels. If the fine read fails while the coarse one worked, keep the
+                            // coarse pick and say the confirm isn't armed; a silent half-pick would
+                            // look exactly like a good one.
+                            double[]? fine = QuestFind.SigFromRegion(frame, box.X, box.Y, box.W, box.H,
+                                                                     QuestFind.SigGridFine);
                             if (sig is null)
                             {
                                 MrgStatus.Text = "That box didn't produce a signature — drag inside the game window, "
@@ -111,7 +124,18 @@ public partial class MainWindow
                                 return;
                             }
                             p.IconSig = sig;
+                            p.IconSigFine = fine;
                             p.IconW = box.W; p.IconH = box.H;
+                            // Everything she learned to avoid was learned by comparing against the
+                            // OLD picture. Against a new one those comparisons mean nothing, and a
+                            // stale reject is the one failure mode with no symptom: she would
+                            // quietly refuse to pick up a real copy and report an empty bag.
+                            int forgotten = p.RejectCount;
+                            p.ForgetAllRejects();
+                            ActivityLog.Record(MergeSource, forgotten > 0
+                                ? $"· re-picked the copy's icon — forgot {forgotten} learned non-copy icon(s), "
+                                + "they were measured against the old picture."
+                                : "· re-picked the copy's icon.");
                         })) { p.Save(); RenderMergeUi(); } },
             p.HasIcon ? () => ShowMergeShot(p, "item", "The copy's icon",
                 p.HasIconSize
@@ -143,6 +167,7 @@ public partial class MainWindow
                     + (p.TierSet ? 1 : 0) + (p.HasIcon ? 1 : 0);
         MrgPickHost.Children.Add(MakeFireBar(mrgHave / 5.0,
             mrgHave >= 5 ? "everything picked — ready to sweep" : $"{mrgHave} of 5 picks made"));
+        MrgPickHost.Children.Add(MakeRejectRow(p));
 
         bool running = _mergeRun is { Running: true };
         MrgRunBtn.Content = running ? "■  Stop" : "▶  Merge the bag";
@@ -173,6 +198,56 @@ public partial class MainWindow
 
         RenderMergeConsole(running);
         RenderMergeForecast();
+    }
+
+    /// <summary>
+    /// What she has learned to leave alone, and a way to take it back.
+    ///
+    /// Learning is only safe when it is reversible and visible. A sweep that quietly decided some
+    /// picture "isn't a copy" and was wrong about it would report an empty bag forever, with no
+    /// symptom and nothing on screen to disagree with — so the count is shown even at zero, and
+    /// forgetting is one click.
+    /// </summary>
+    private FrameworkElement MakeRejectRow(MergePlan p)
+    {
+        int n = p.RejectCount;
+        var row = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(1, 6, 0, 0) };
+        row.Children.Add(new TextBlock
+        {
+            Text = !p.HasIcon ? ""
+                 : !p.HasFineIcon
+                     ? "⚠ Colour-only matching. Two items in the same palette can look identical to her — "
+                     + "re-pick the copy's icon to arm the close-up confirm."
+                 : n == 0
+                     ? "Close-up confirm armed. Nothing learned as a look-alike yet."
+                     : $"Close-up confirm armed. Avoiding {n} icon(s) she has learned aren't copies.",
+            FontSize = 10.5, TextWrapping = TextWrapping.Wrap, MaxWidth = 620,
+            Foreground = p.HasIcon && !p.HasFineIcon ? Hex("#FFCB6B") : Hex("#5E7C9A"),
+            VerticalAlignment = VerticalAlignment.Center,
+        });
+        if (n > 0)
+        {
+            var forget = new TextBlock
+            {
+                Text = "   forget them", FontSize = 10.5, Foreground = Hex("#4FC3F7"),
+                VerticalAlignment = VerticalAlignment.Center, Cursor = Cursors.Hand,
+                ToolTip = "Clear the look-alikes she's learned to avoid. Do this if the bag has changed, or if "
+                        + "you think she has written off something that really was a copy.",
+            };
+            forget.MouseLeftButtonUp += (_, _) =>
+            {
+                // Not while she is using them: MergePlan.Current is the same object the sweep reads
+                // every pass, and emptying the list underneath it mid-look is a race for no benefit.
+                if (_mergeRun is { Running: true }) { ShowToast("Stop the sweep first"); return; }
+                p.ForgetAllRejects();
+                p.Save();
+                ActivityLog.Record(MergeSource, $"· forgot {n} learned non-copy icon(s) — she'll judge every "
+                                              + "square on the picks alone again.");
+                RenderMergeUi();
+            };
+            row.Children.Add(forget);
+        }
+        return row;
     }
 
     private bool PickMergePoint(ScreenPoint point, string what, string hint, Action<PickShot?>? shot = null)
@@ -234,128 +309,42 @@ public partial class MainWindow
 
     // ---------------------------------------------------------------- the console
 
-    /// <summary>Auto Merge's own narration, same shape as the Questing card: one oversized line for
-    /// what she is doing now, the steps behind it, and nothing from any other module.</summary>
+    /// <summary>
+    /// Auto Merge's own narration — the SAME console the Questing card carries, pointed at a
+    /// different source.
+    ///
+    /// Built once and kept. It used to be torn down and rebuilt from the log every time she spoke,
+    /// which meant the scrollbar snapped back to a fresh ScrollViewer's idea of "the bottom" on
+    /// every line: you could not read back through a failure while the thing that failed was still
+    /// running. Now the console owns its own scrollback and this method only tells it whether the
+    /// sweep is alive.
+    /// </summary>
+    private EQAvatar.Spike.Ui.ModuleConsole? _mrgConsole;
+
     private void RenderMergeConsole(bool running)
     {
-        // Try the cheap path first. This is called on EVERY line the sweep speaks, and a rebuild
-        // both throws away whatever the user had selected and cancels a resize drag in progress —
-        // which is the whole point of having made this console selectable and resizable.
-        if (MergeConsoleAppend(running)) return;
-
-        MrgConsoleHost.Children.Clear();
-        List<ActivityEntry> lines = ActivityLog.Snapshot(e => e.Source == MergeSource, 150);
-        ActivityEntry? now = lines.Count > 0 ? lines[^1] : null;
-
-        var nowBorder = new Border
+        if (MrgConsoleHost is null) return;
+        if (_mrgConsole is null)
         {
-            CornerRadius = new CornerRadius(8),
-            Background = running ? Hex("#10301F") : Hex("#0C1420"),
-            BorderBrush = running ? Hex("#3FCB74") : Hex("#26303F"),
-            BorderThickness = new Thickness(1), Padding = new Thickness(10, 7, 10, 8),
-        };
-        var nowStack = new StackPanel();
-        var nowLabel = new TextBlock
-        {
-            Text = running ? "NOW" : "LAST", FontSize = 8.5, FontWeight = FontWeights.Bold,
-            Foreground = running ? Hex("#49F27E") : Hex("#5E7C9A"),
-        };
-        nowStack.Children.Add(nowLabel);
-        var nowText = new TextBlock
-        {
-            Text = now?.Text ?? "nothing yet — press Merge the bag and she'll narrate every step here.",
-            FontSize = 14, FontWeight = FontWeights.SemiBold, TextWrapping = TextWrapping.Wrap,
-            Foreground = now is null ? Hex("#5E7C9A")
-                       : now.IsBad ? Hex("#FFCB6B") : now.IsGood ? Hex("#49F27E") : Hex("#DDE7F0"),
-        };
-        if (running && now is not null && !now.IsBad)
-            nowText.Effect = new DropShadowEffect
-            { Color = Color.FromRgb(0x49, 0xF2, 0x7E), BlurRadius = 12, ShadowDepth = 0, Opacity = 0.35 };
-        nowStack.Children.Add(nowText);
-        nowBorder.Child = nowStack;
-        MrgConsoleHost.Children.Add(nowBorder);
-
-        // Same selectable, resizable console as the Questing card — a sweep that goes wrong is
-        // just as much worth pasting to someone as a quest run that does.
-        List<ActivityEntry> history = lines.Count > 1
-            ? lines.GetRange(0, lines.Count - 1) : new List<ActivityEntry>();
-        var body = MakeConsoleBody(
-            history
-            .Select(e => ($"{e.When:HH:mm:ss}  {e.Text}",
-                          e.IsBad ? Color.FromRgb(0xFF, 0xCB, 0x6B)
-                        : e.IsGood ? Color.FromRgb(0x7C, 0xE3, 0x8B)
-                        : e.IsStep ? Color.FromRgb(0x8A, 0xA0, 0xB6)
-                                   : Color.FromRgb(0xC6, 0xD2, 0xDE))));
-        body.Loaded += (_, _) => body.ScrollToEnd();
-        FrameworkElement console = MakeResizableConsole(body, "merge");
-        console.Margin = new Thickness(0, 4, 0, 0);
-        MrgConsoleHost.Children.Add(console);
-
-        _mcBody = body;
-        _mcNowLabel = nowLabel;
-        _mcNowText = nowText;
-        _mcNowBorder = nowBorder;
-        _mcRunning = running;
-        _mcRendered = history;
-    }
-
-    // The live merge console's parts, so a narrated step can be appended in place. Same shape and
-    // the same reasons as the Questing card's — see QuestConsoleAppend for the full argument.
-    private System.Windows.Controls.RichTextBox? _mcBody;
-    private TextBlock? _mcNowText, _mcNowLabel;
-    private Border? _mcNowBorder;
-    private bool _mcRunning;
-    private List<ActivityEntry> _mcRendered = new();
-
-    /// <summary>Append the newest lines to the merge console already on screen, and refresh its NOW
-    /// panel. False when it can't prove the document still matches the log, so the caller rebuilds.</summary>
-    private bool MergeConsoleAppend(bool running)
-    {
-        if (_mcBody is null || _mcNowText is null || _mcNowLabel is null || _mcNowBorder is null) return false;
-        if (!_mcBody.IsLoaded) return false;
-        if (running != _mcRunning) return false;          // the glow and the label change — redraw it
-
-        List<ActivityEntry> lines = ActivityLog.Snapshot(e => e.Source == MergeSource, 150);
-        List<ActivityEntry> history = lines.Count > 1
-            ? lines.GetRange(0, lines.Count - 1) : new List<ActivityEntry>();
-
-        int drop = PrefixDrop(_mcRendered, history);
-        if (drop < 0) return false;
-
-        System.Windows.Documents.FlowDocument doc = _mcBody.Document;
-        for (int i = 0; i < drop && doc.Blocks.FirstBlock is not null; i++)
-            doc.Blocks.Remove(doc.Blocks.FirstBlock);
-        int added = 0;
-        for (int i = _mcRendered.Count - drop; i < history.Count; i++)
-        {
-            ActivityEntry e = history[i];
-            doc.Blocks.Add(new System.Windows.Documents.Paragraph(
-                new System.Windows.Documents.Run($"{e.When:HH:mm:ss}  {e.Text}"))
-            {
-                Margin = new Thickness(0),
-                Foreground = e.IsBad ? Hex("#FFCB6B") : e.IsGood ? Hex("#7CE38B")
-                           : e.IsStep ? Hex("#8AA0B6") : Hex("#C6D2DE"),
-            });
-            added++;
+            _mrgConsole = new EQAvatar.Spike.Ui.ModuleConsole(
+                MergeSource, "", null, "LIVE ACTIVITY",
+                "nothing yet — press Merge the bag and she'll narrate every step here.",
+                () => NavActivity.IsChecked = true, ShowToast,
+                MakeResizableConsole,
+                () => _settings.ConsoleDetail,
+                d => { _settings.ConsoleDetail = d; _settings.Save(); SyncConsoleChrome(); });
         }
-        _mcRendered = history;
-        if (added > 0) _mcBody.ScrollToEnd();
-
-        ActivityEntry? now = lines.Count > 0 ? lines[^1] : null;
-        _mcNowLabel.Text = running ? "NOW" : "LAST";
-        _mcNowLabel.Foreground = running ? Hex("#49F27E") : Hex("#5E7C9A");
-        _mcNowText.Text = now?.Text ?? "nothing yet — press Merge the bag and she'll narrate every step here.";
-        _mcNowText.Foreground = now is null ? Hex("#5E7C9A")
-                              : now.IsBad ? Hex("#FFCB6B") : now.IsGood ? Hex("#49F27E") : Hex("#DDE7F0");
-        _mcNowText.Effect = running && now is not null && !now.IsBad
-            ? new DropShadowEffect { Color = Color.FromRgb(0x49, 0xF2, 0x7E), BlurRadius = 12, ShadowDepth = 0, Opacity = 0.35 }
-            : null;
-        _mcNowBorder.Background = running ? Hex("#10301F") : Hex("#0C1420");
-        _mcNowBorder.BorderBrush = running ? Hex("#3FCB74") : Hex("#26303F");
-        return true;
+        // The host is cleared by nothing else, but a re-parent is cheap insurance: adding an element
+        // that still has a parent throws, and the throw would land inside a render pass.
+        if (!MrgConsoleHost.Children.Contains(_mrgConsole))
+        {
+            _mrgConsole.Detach();
+            MrgConsoleHost.Children.Add(_mrgConsole);
+        }
+        _mrgConsole.SetRunning(running);
     }
 
-    internal const string MergeSource = "Merge";
+    internal const string MergeSource = MergeRole.MergeSource;
 
     // ---------------------------------------------------------------- the forecast
 
@@ -896,22 +885,40 @@ public partial class MainWindow
         "Walks every slot in a bag area you've drawn a box around, and folds each copy it finds into the one item "
         + "you're keeping: click the copy, drop it in the Place Item box, press Merge Item. Then the next one.\n\n" +
         "WHY THE CLICKS ARE PICKED AND NOT FOUND\n" +
-        "EQ Legends has no addon API, and a bag slot's picture changes the instant the item leaves it — so "
-        + "recognising a slot by sight would work once and fail forever after. A POSITION doesn't change, so "
-        + "positions are what get stored, as fractions of the game window, which means moving or resizing the "
-        + "window doesn't break them.\n\n" +
-        "The bag is a grid rather than a list of picked slots for a plainer reason: a stack of twenty-seven "
-        + "duplicates covers most of a rucksack, and picking twenty-seven points by hand is worse than doing the "
-        + "merges by hand. One dragged box and two numbers say the same thing.\n\n" +
+        "EQ Legends has no addon API. The Place Item box and the Merge Item button don't move, so those are "
+        + "POSITIONS, stored as fractions of the game window — moving or resizing the window doesn't break them. "
+        + "The copies DO move, through the bags, as each one is consumed, so those are found by sight.\n\n" +
+        "HOW SHE TELLS A COPY FROM SOMETHING THAT LOOKS LIKE ONE\n" +
+        "Two screens over the same box. The first is the icon's COLOURS, coarse and fast, slid across the bag "
+        + "area to propose every square that could be a copy. The second is a CLOSE-UP of the same box — four "
+        + "times the detail — run only on the square she's about to click.\n\n" +
+        "The second screen exists because the first one cannot do this job alone. A Talisman of Kejaar Kerrath "
+        + "and a Desecrated Kejaar Totem are both brown, bone and gold in roughly the same places: averaged down "
+        + "to thirty-six colours they are the same picture, which is how a sweep that had merged its last real "
+        + "copy went looking for another and found a totem. A hundred and forty-four cells over the same pixels "
+        + "tell them apart.\n\n" +
+        "And when something does slip through — it looked right, she picked it up, the counter didn't move — she "
+        + "remembers THAT PICTURE, not just that square, and never picks it up again. A square is only good "
+        + "until the bags shuffle; the picture of a totem is good for the rest of the grind. The one thing she "
+        + "will not learn is a picture that matches the copy's own, because that is what the item you're merging "
+        + "INTO looks like, sitting in the same bag, unable to merge into itself. The page shows how many she's "
+        + "learned and lets you make her forget them.\n\n" +
         "HOW SHE KNOWS A MERGE HAPPENED\n" +
         "The game writes nothing to the log about merging. The only witness is the item's own tier counter — the "
         + "\"4 / 32\" on its window — so that is read before and after every single merge, and nothing counts that "
         + "the number didn't confirm. This matters more than it sounds: without it there is no difference between "
         + "merging a hundred items and clicking a hundred empty squares, and a run that can't tell those apart "
         + "will happily do the second one all night.\n\n" +
-        "An empty slot is EXPECTED — the sweep walks the whole grid — so one unmoved counter just means \"nothing "
-        + "there\" and she moves on. Three reads in a row that fail to parse at all is different: that means the "
-        + "item window has been closed or covered, and the run stops.\n\n" +
+        "Three reads in a row that fail to parse means the item window has been closed or covered, and the run "
+        + "stops. Five squares in a row that looked like copies and merged nothing means the picks have moved or "
+        + "the icon matches something else, and the run stops for that too.\n\n" +
+        "THE CONSOLE\n" +
+        "The same console the Questing card carries, showing only Auto Merge's lines. You can scroll back through "
+        + "it while she's running without being yanked to the bottom every time she speaks, copy it, or save it to "
+        + "a file. Turn DETAIL on and she narrates the numbers behind every decision instead of just the decision: "
+        + "what each candidate scored on both screens, the bar it had to beat, where every click went, and the raw "
+        + "text the OCR read before anything tried to parse it. It's verbose on purpose — turn it on when "
+        + "something has gone wrong, and read it back afterwards.\n\n" +
         "THE ARITHMETIC\n" +
         "A +0 is worth one base item, and every level costs as much again as everything beneath it: +1 is 2, +2 is "
         + "4, +5 is 32, +10 is 1,024. The panel does that sum for you against the level you're on and the one "

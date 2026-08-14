@@ -76,11 +76,18 @@ public sealed class AppSettings
     /// grabbed focus back would be fighting the user for the mouse.</summary>
     public bool FocusGameOnStart { get; set; } = true;
 
+    // --- The per-page consoles (Questing card, Auto Merge) ---
     /// <summary>Height, in pixels, of the in-page activity consoles (Questing, Auto Merge).
     /// Small by default because the card has other things to show — but when you are TRACKING
     /// something, five lines is not a console, it is a peephole. Dragged by the grip under the
     /// console and remembered here, so it doesn't collapse back on the next render.</summary>
     public double ConsoleHeight { get; set; } = 96;
+
+    /// <summary>Make the roles narrate the numbers behind their decisions — match distances, click
+    /// coordinates, the raw text an OCR read before anything parsed it. Off by default: these lines
+    /// are voluminous enough to push the real narration out of the buffer, and they are only worth
+    /// reading when something has already gone wrong.</summary>
+    public bool ConsoleDetail { get; set; } = false;
 
     public bool HubEnabled { get; set; } = true;
 

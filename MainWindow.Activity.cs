@@ -56,9 +56,26 @@ public partial class MainWindow
         RenderActivity();
     }
 
-    /// <summary>Called from the log's own event (any thread) — marshals and coalesces.</summary>
+    /// <summary>
+    /// Called from the log's own event (any thread) — marshals, then hands the line to whoever
+    /// wants it.
+    ///
+    /// The per-page consoles are fed from HERE rather than from each role's own Log event, which is
+    /// what lets a role narrate detail lines straight into ActivityLog without every page having to
+    /// know about them. One line in, one place it is dispatched from, and a page cannot be showing
+    /// something the Activity Console doesn't have.
+    ///
+    /// The Activity Console's own repaint is coalesced (it redraws a whole stream); the module
+    /// consoles are NOT, because each of them appends exactly one TextBlock and dropping a line
+    /// would leave a hole in the middle of the evidence.
+    /// </summary>
     private void OnActivityAdded(ActivityEntry e)
     {
+        Dispatcher.BeginInvoke(new Action(() =>
+        {
+            try { RouteToModuleConsoles(e); } catch { /* a console must never break a run */ }
+        }), System.Windows.Threading.DispatcherPriority.Background);
+
         if (_actDirty) return;
         _actDirty = true;
         Dispatcher.BeginInvoke(new Action(() =>
@@ -133,6 +150,14 @@ public partial class MainWindow
         + "shows you everything meanwhile. A filter that silently empties the console looks exactly "
         + "like a bot that did nothing, and that is the one mistake this page cannot afford to make.";
 
+    /// <summary>Hand one line to every per-page console that owns it. Each console filters again on
+    /// its own source and tag, so this is a fan-out and not a routing decision.</summary>
+    private void RouteToModuleConsoles(ActivityEntry e)
+    {
+        _mrgConsole?.Append(e);
+        foreach (EQAvatar.Spike.Ui.ModuleConsole c in _questConsoles.Values) c.Append(e);
+    }
+
     /// <summary>
     /// Put the visible stream on the clipboard.
     ///
@@ -179,6 +204,11 @@ public partial class MainWindow
     {
         ActivityLog.Clear();
         RenderActivity();
+        // The per-page consoles hold their own copy of the scrollback and are only ever APPENDED to,
+        // so clearing the shared log leaves them showing lines that no longer exist anywhere else —
+        // and their "copy" would then put a different set on the clipboard than the page displays.
+        _mrgConsole?.Rebuild();
+        foreach (EQAvatar.Spike.Ui.ModuleConsole c in _questConsoles.Values) c.Rebuild();
     }
 
     private void RenderActivity()
@@ -379,9 +409,10 @@ public partial class MainWindow
     /// </summary>
     private int ActPrefixDrop(List<ActivityEntry> tail) => PrefixDrop(_actRendered, tail);
 
-    /// <summary>Shared with the Questing card's console, which has the same job and the same
-    /// eviction problem — its log window slides too, once a long night pushes the ring past its
-    /// cap, and counting lines instead of identifying them loses one every time it does.</summary>
+    /// <summary>The per-page consoles solve the same problem differently — they append by entry id
+    /// rather than by diffing a window — so this is now the Activity Console's alone. Kept as it is:
+    /// this page really does re-derive its whole tail on every filter change, and identity is what
+    /// keeps the document in step with the list that describes it.</summary>
     internal static int PrefixDrop(List<ActivityEntry> rendered, List<ActivityEntry> tail)
     {
         if (rendered.Count == 0) return 0;

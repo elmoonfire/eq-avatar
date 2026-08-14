@@ -157,45 +157,6 @@ public partial class MainWindow
     }
 
     /// <summary>
-    /// A console body you can actually SELECT text in.
-    ///
-    /// TextBlocks cannot be selected with a mouse, so the one moment a user most wants these lines
-    /// — pasting a failure to someone who can read it — was the one moment they could not have
-    /// them. A read-only RichTextBox keeps the per-line colour AND gives selection, Ctrl+C and
-    /// drag-highlight for free, which a wall of TextBlocks never will.
-    /// </summary>
-    private static System.Windows.Controls.RichTextBox MakeConsoleBody(
-        IEnumerable<(string Text, System.Windows.Media.Color Tone)> lines)
-    {
-        var doc = new System.Windows.Documents.FlowDocument
-        {
-            PageWidth = 4000,                       // wide enough that nothing wraps mid-line
-            FontFamily = new FontFamily("Consolas"),
-            FontSize = 11,
-            PagePadding = new Thickness(2),
-        };
-        foreach ((string text, System.Windows.Media.Color tone) in lines)
-            doc.Blocks.Add(new System.Windows.Documents.Paragraph(new System.Windows.Documents.Run(text))
-            {
-                Margin = new Thickness(0),
-                Foreground = new SolidColorBrush(tone),
-            });
-
-        return new System.Windows.Controls.RichTextBox
-        {
-            Document = doc,
-            IsReadOnly = true,
-            IsDocumentEnabled = false,
-            Background = Hex("#0C0F13"),
-            BorderThickness = new Thickness(0),
-            Padding = new Thickness(8, 5, 8, 5),
-            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
-            HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
-            SelectionBrush = new SolidColorBrush(Color.FromRgb(0x1F, 0x4D, 0x6B)),
-        };
-    }
-
-    /// <summary>
     /// Wrap a console body in a bordered box with a DRAG GRIP under it.
     ///
     /// The consoles start small because the card around them has other things to show — but small

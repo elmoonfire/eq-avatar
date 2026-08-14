@@ -38,6 +38,20 @@ public static class QuestFind
     [DllImport("user32.dll")] private static extern bool GetWindowRect(IntPtr h, out RECT r);
 
     public const int SigGrid = 6;                 // 6×6 cells × 3 channels = 108 doubles
+    /// <summary>
+    /// The CONFIRM grid. 6×6 is a fast, forgiving screen: it slides cheaply and it tolerates the
+    /// half-pixel misalignment that comes of stepping a window across a bag. What it cannot do is
+    /// tell two icons apart that share a palette — thirty-six average colours of a brown, bone and
+    /// gold Talisman of Kejaar Kerrath and a brown, bone and gold Desecrated Kejaar Totem land
+    /// within a few points of each other, which is how a sweep that had just merged two real copies
+    /// went looking for a third and found a totem.
+    ///
+    /// So the coarse grid still FINDS, and this one CONFIRMS: four times the cells over the same
+    /// box, applied only to the single best candidate, where the cost is one region read instead of
+    /// several hundred. Two icons can share an average colour; they cannot share 144 of them.
+    /// </summary>
+    public const int SigGridFine = 12;            // 12×12 cells × 3 channels = 432 doubles
+    public const int SigLenFine = SigGridFine * SigGridFine * 3;
     /// <summary>Mean per-channel diff to accept an icon match. NOT "identical images ≈ 10": the
     /// learned sig comes from the user's tight drag and the runtime sig from a cell's inner 70%,
     /// so margins and centering differ and a TRUE match lands ~20–40. Empty dark slots against a
@@ -81,9 +95,21 @@ public static class QuestFind
 
     /// <summary>Distil a normalized region of a frame into a 6×6 grid of average colours.</summary>
     public static double[]? SigFromRegion(Bitmap frame, double nx, double ny, double nw, double nh)
+        => SigFromRegion(frame, nx, ny, nw, nh, SigGrid);
+
+    /// <summary>
+    /// The same, at whatever resolution the caller asks for. <paramref name="grid"/> = 6 is the
+    /// sliding search's fast screen; 12 is the confirm.
+    ///
+    /// Note the region is IDENTICAL either way — same box, same pixels — so a fine signature and a
+    /// coarse one describe the same thing at two zoom levels, and one can never be found where the
+    /// other wasn't.
+    /// </summary>
+    public static double[]? SigFromRegion(Bitmap frame, double nx, double ny, double nw, double nh, int grid)
     {
+        if (grid < 1) return null;
         int x0 = (int)(nx * frame.Width), y0 = (int)(ny * frame.Height);
-        int w = Math.Max(SigGrid, (int)(nw * frame.Width)), h = Math.Max(SigGrid, (int)(nh * frame.Height));
+        int w = Math.Max(grid, (int)(nw * frame.Width)), h = Math.Max(grid, (int)(nh * frame.Height));
         if (x0 < 0 || y0 < 0 || x0 + w > frame.Width || y0 + h > frame.Height) return null;
 
         var rect = new Rectangle(x0, y0, w, h);
@@ -97,15 +123,15 @@ public static class QuestFind
         }
         finally { frame.UnlockBits(data); }
 
-        var sig = new double[SigGrid * SigGrid * 3];
-        var counts = new int[SigGrid * SigGrid];
+        var sig = new double[grid * grid * 3];
+        var counts = new int[grid * grid];
         for (int y = 0; y < h; y++)
         {
             int row = y * stride;
-            int gy = Math.Min(SigGrid - 1, y * SigGrid / h);
+            int gy = Math.Min(grid - 1, y * grid / h);
             for (int x = 0; x < w; x++)
             {
-                int cell = gy * SigGrid + Math.Min(SigGrid - 1, x * SigGrid / w);
+                int cell = gy * grid + Math.Min(grid - 1, x * grid / w);
                 int i = row + x * 4;                                 // BGRA
                 sig[cell * 3 + 0] += buf[i + 2];
                 sig[cell * 3 + 1] += buf[i + 1];

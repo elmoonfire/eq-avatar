@@ -131,6 +131,11 @@ public partial class MainWindow : Window
         // (not just while its page is open) so it is already complete the first time you open it —
         // the run you want to inspect is always the one that already happened.
         ActivityLog.Added += OnActivityAdded;
+        // The detail switch lives on the consoles but is READ from role loops, so the shared flag
+        // has to carry the saved answer from the moment the app starts — not from the first time
+        // someone happens to open a page that draws the switch. A run started by Ctrl+Alt+M without
+        // the window ever being looked at must narrate exactly as much as one started from the page.
+        ActivityLog.DetailEnabled = _settings.ConsoleDetail;
         Loaded += (_, _) => StartRemoteControl();   // phone/web remote control + live status + session sync
     }
 
