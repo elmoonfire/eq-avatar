@@ -40,15 +40,22 @@ public partial class MainWindow
     {
         _combat.Tick();
 
-        // Follower success signal: one tick == one second, so a state of assisting/fighting is
-        // exactly one second of combat. Only counts while a Follower session is recording.
-        if (Recorder.Active && Recorder.ActiveRole == "Follower" && _follower is { Running: true })
+        // COMBAT TIME, FOR EVERY ROLE. This used to count only while the FOLLOWER was assisting,
+        // so a grind, a hunt or a quest run recorded zero seconds of combat and every DPS figure
+        // divided by nothing. Combat is now defined the way a damage meter defines it: a second
+        // in which damage landed, in either direction, plus a short tail so the gap between two
+        // swings does not read as peace.
+        bool inCombat = (DateTime.Now - _lastDamageAt).TotalSeconds <= CombatTailSeconds;
+
+        // The Follower can be usefully "in combat" while contributing no damage of its own, so
+        // its own state still counts — but only when the damage rule has not already said so.
+        if (!inCombat && Recorder.ActiveRole == "Follower" && _follower is { Running: true })
         {
             string st = _follower.Stats.State;
-            if (st.Contains("fight", StringComparison.OrdinalIgnoreCase)
-                || st.Contains("assist", StringComparison.OrdinalIgnoreCase))
-                Recorder.RecordCombatSecond();
+            inCombat = st.Contains("fight", StringComparison.OrdinalIgnoreCase)
+                    || st.Contains("assist", StringComparison.OrdinalIgnoreCase);
         }
+        if (Recorder.Active && inCombat) Recorder.RecordCombatSecond();
 
         Recorder.Flush();                                  // crash-proof the active session (1/min)
 
@@ -63,8 +70,21 @@ public partial class MainWindow
     private void FeedCombat(EqLog.LogEvent ev)
     {
         (int dealt, int taken) = _combat.FeedLine(ev.Stamp, ev.Text);
-        if (dealt != 0 || taken != 0) Recorder.RecordDamage(dealt, taken);
+        if (dealt == 0 && taken == 0) return;
+        Recorder.RecordDamage(dealt, taken);
+        // Wall clock, not the log stamp: CombatTick asks "was there damage in the last few
+        // seconds?", and a replayed backlog of old lines must not be read as a fight happening now.
+        _lastDamageAt = DateTime.Now;
     }
+
+    /// <summary>How long after the last damage a second still counts as combat. A melee round is
+    /// about three seconds and a caster's gaps are longer, so six keeps one fight as one fight
+    /// without swallowing the walk to the next camp.</summary>
+    private const double CombatTailSeconds = 6;
+
+    /// <summary>When damage last landed, in either direction. Starts at MinValue so an app that
+    /// has seen no combat records none.</summary>
+    private DateTime _lastDamageAt = DateTime.MinValue;
 
     private List<ChartSeries> WindowSeries(int minutes)
     {

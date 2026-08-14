@@ -28,12 +28,17 @@ public partial class MainWindow
 
     private void OpenArmory_Click(object sender, RoutedEventArgs e)
     {
-        string name = (_settings.HubUsername ?? "").Trim();
-        if (name.Length == 0) { ShowToast("Set your name first (Licensing page)"); return; }
+        // The hub stores characters by NAME. The username in settings is "Name/Server", so
+        // linking it whole asked the armory for a character called "Bryari/Rivervale" and got a
+        // page about nobody.
+        string name = CharacterName();
+        if (name.Length == 0) { ShowToast("Read your inventory once, or set your name on Licensing"); return; }
         string url = _settings.HubUrl;
         int i = url.IndexOf("api.php", StringComparison.OrdinalIgnoreCase);
         string baseUrl = i >= 0 ? url.Substring(0, i) : url;
-        try { Process.Start(new ProcessStartInfo(baseUrl + "profile.php?u=" + Uri.EscapeDataString(name)) { UseShellExecute = true }); }
+        // The hub moved to folder-shaped URLs; profile.php still 301s here, but there is no
+        // reason to make every click take the redirect.
+        try { Process.Start(new ProcessStartInfo(baseUrl + "account/armory/?u=" + Uri.EscapeDataString(name)) { UseShellExecute = true }); }
         catch (Exception ex) { GrindLogLine("Couldn't open browser: " + ex.Message); }
     }
 }

@@ -46,6 +46,9 @@ public sealed class InventorySnapshot
     public string? Name;
     public int? Level;
     public string? Classes;                                  // "PAL/MNK/ENC"
+    /// <summary>Race, when the window happens to print it near the header. The inventory does not
+    /// always show it; a null here means "not seen this read", never "no race".</summary>
+    public string? Race;
     public readonly Dictionary<string, List<double>> Fields = new();   // label -> numbers, raw
     public long? Plat, Gold, Silver, Copper;
     public DateTime CapturedAt = DateTime.Now;
@@ -499,6 +502,15 @@ public static class InventoryReader
         return added;
     }
 
+    /// <summary>EverQuest's sixteen playable races, longest first so "Half Elf" is not eaten by
+    /// a substring match on "Elf".</summary>
+    private static readonly string[] EqRaces =
+    {
+        "Half Elf", "Wood Elf", "High Elf", "Dark Elf", "Vah Shir", "Barbarian",
+        "Halfling", "Erudite", "Froglok", "Drakkin", "Human", "Dwarf", "Troll",
+        "Ogre", "Gnome", "Iksar",
+    };
+
     private static string Norm(string word) => word.ToLowerInvariant().Trim().Trim('.', ':', ',', '(', ')', ';');
 
     private static bool IsNumericish(string n) =>
@@ -548,6 +560,14 @@ public static class InventoryReader
             {
                 snap.Name = line.Text;
             }
+
+            // Race, if the skin prints it anywhere in the header band. Free to look for: it is a
+            // closed list of sixteen names, so a match is a match and a miss costs nothing. The
+            // inventory window does not reliably show it, which is why this is opportunistic
+            // rather than a field the read reports as missing.
+            if (snap.Race is null)
+                foreach (string r in EqRaces)
+                    if (line.Text.Contains(r, StringComparison.OrdinalIgnoreCase)) { snap.Race = r; break; }
 
             var pure = new List<long>();
             bool onlyNumbers = true;

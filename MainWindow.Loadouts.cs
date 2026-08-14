@@ -40,14 +40,71 @@ public partial class MainWindow
     {
         Loadout? c = _loadouts.Current;
         if (c is null) return null;
-        string race = string.IsNullOrWhiteSpace(c.Race) ? "" : c.Race + " ";
-        return $"{race}{c.Display} · Lv {Math.Max(1, c.Level)}";
+
+        // Everything here is what the GAME said, not what anyone typed into a settings box. That
+        // was the whole bug: the bio read _settings.HubClass / HubLevel / HubServer, which are
+        // legacy fields nothing has filled in since the app learned to read the screen.
+        var bits = new List<string>();
+        if (CharacterServer() is { Length: > 0 } srv) bits.Add(srv);
+        if (!string.IsNullOrWhiteSpace(c.Race)) bits.Add(c.Race!);
+        else if (!string.IsNullOrWhiteSpace(_loadouts.Race)) bits.Add(_loadouts.Race!);
+
+        // One, two or three classes — a new player has two until level 10, and the loadout is
+        // whatever it is. Nothing here assumes three.
+        bits.Add(c.Display);
+
+        int eff  = _loadouts.EffectiveLevel;
+        int best = _loadouts.BestLevel;
+        if (eff > 0) bits.Add("Lv " + eff);
+        if (best > eff) bits.Add("best " + best);
+
+        return string.Join(" \u00b7 ", bits);
+    }
+
+    /// <summary>
+    /// The character's name as the game printed it, falling back to the hub username.
+    ///
+    /// The hub username is stored as "Name/Server" in this build, which is why the armory link
+    /// used to ask the hub for a character called "Bryari/Rivervale" that does not exist. Split
+    /// it once, here, and both halves become usable.
+    /// </summary>
+    private string CharacterName()
+    {
+        if (!string.IsNullOrWhiteSpace(_loadouts.Name)) return _loadouts.Name!.Trim();
+        string u = (_settings.HubUsername ?? "").Trim();
+        int slash = u.IndexOf('/');
+        return slash > 0 ? u[..slash].Trim() : u;
+    }
+
+    /// <summary>The server, from the scan, from the "Name/Server" username, or from settings.</summary>
+    private string CharacterServer()
+    {
+        if (!string.IsNullOrWhiteSpace(_loadouts.Server)) return _loadouts.Server!.Trim();
+        string u = (_settings.HubUsername ?? "").Trim();
+        int slash = u.IndexOf('/');
+        if (slash > 0 && slash < u.Length - 1) return u[(slash + 1)..].Trim();
+        return (_settings.HubServer ?? "").Trim();
     }
 
     /// <summary>Take what the inventory read saw. Returns true if the loadout actually changed.</summary>
     private bool RecordLoadout(Ocr.InventorySnapshot snap)
     {
-        bool changed = _loadouts.Record(snap.Classes, snap.Level, _settings.HubRace);
+        // A scanned race beats the configured one; a scan that did not see a race leaves the
+        // stored one alone rather than blanking it.
+        bool changed = _loadouts.Record(snap.Classes, snap.Level, snap.Race ?? _settings.HubRace,
+                                        snap.Name, CharacterServer());
+
+        // Push what was read back into the settings the rest of the app and the hub still read,
+        // so `clients` stops reporting a level-1 Human Warrior for a level-50 loadout.
+        if (_loadouts.Current is { } cur)
+        {
+            if (cur.Classes.Count > 0) _settings.HubClass = cur.Display;
+            if (cur.Level > 0)         _settings.HubLevel = cur.Level;
+            if (_loadouts.BestLevel > _settings.HubMaxLevel) _settings.HubMaxLevel = _loadouts.BestLevel;
+        }
+        if (!string.IsNullOrWhiteSpace(_loadouts.Race))   _settings.HubRace   = _loadouts.Race!;
+        if (!string.IsNullOrWhiteSpace(_loadouts.Server)) _settings.HubServer = _loadouts.Server!;
+
         RefreshLoadoutUi();
         return changed;
     }
@@ -229,4 +286,33 @@ public partial class MainWindow
             VerticalAlignment = VerticalAlignment.Center,
         },
     };
+
+    // ---------------------------------------------------------------- the floating ghost
+
+    private Ui.GhostWindow? _ghost;
+
+    /// <summary>
+    /// Move the title-bar ghost out of the window so he can float over what is behind it.
+    ///
+    /// The in-window Image is hidden rather than deleted: MainWindow.xaml belongs to other
+    /// workstreams and still binds it, and if the free-floating window ever fails to come up the
+    /// original is one line from being visible again.
+    /// </summary>
+    private void StartFloatingGhost()
+    {
+        if (_ghost is not null) return;
+        try
+        {
+            _ghost = new Ui.GhostWindow(this);
+            _ghost.Bind("ghost-logo.png");
+            _ghost.Follow();
+            if (ArtGhostLogo is not null) ArtGhostLogo.Visibility = Visibility.Hidden;
+        }
+        catch (Exception ex)
+        {
+            _ghost = null;
+            if (ArtGhostLogo is not null) ArtGhostLogo.Visibility = Visibility.Visible;
+            Diag.BotLog.Log("ghost", "could not float: " + ex.Message);
+        }
+    }
 }

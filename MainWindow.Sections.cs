@@ -90,7 +90,11 @@ public partial class MainWindow
             (s, _) =>
             {
                 if (s is not MainWindow w) return;
-                w.Dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(w.BuildNavSections));
+                w.Dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(() =>
+                {
+                    w.BuildNavSections();
+                    w.StartFloatingGhost();
+                }));
             }));
     }
 

@@ -286,34 +286,38 @@ public partial class MainWindow : Window
 
     private void UpdateChip()
     {
-        string name = (_settings.HubUsername ?? "").Trim();
+        // EVERYTHING HERE COMES OFF THE SCAN. It used to be assembled from _settings.HubClass /
+        // HubLevel / HubServer -- fields left over from when you typed your character in by hand,
+        // which nothing has written since the app learned to read the inventory window. That is
+        // why the bio never matched the character: it was showing a form, not a character.
+        string name = CharacterName();
         ChipName.Text = name.Length == 0 ? "Not signed in" : name;
         ChipAvatar.Text = name.Length == 0 ? "?" : name.Substring(0, 1).ToUpperInvariant();
         bool running = _grind is { Running: true } && !_grind.Stats.Paused;
         ChipDot.Fill = running ? Hex("#7CE38B") : Hex("#5D6878");
-        // Best-ever level only climbs (class changes reset the CURRENT level to 10).
-        if (_settings.HubLevel > _settings.HubMaxLevel)
-        { _settings.HubMaxLevel = _settings.HubLevel; _settings.Save(); }
 
-        string cls = (_settings.HubClass ?? "").Trim();
-        string charLine = cls.Length > 0
-            ? $"{(_settings.HubServer ?? "Rivervale").Trim()} · {cls} · Lv {Math.Max(1, _settings.HubLevel)} · best {Math.Max(_settings.HubMaxLevel, Math.Max(1, _settings.HubLevel))}"
-            : "";
+        // Best level only ever climbs: taking a fresh class drops the CURRENT loadout to that
+        // class's level, but the loadout you levelled before still remembers its own.
+        if (_loadouts.BestLevel > _settings.HubMaxLevel)
+        { _settings.HubMaxLevel = _loadouts.BestLevel; _settings.Save(); }
+
+        string charLine = CurrentLoadoutLine() ?? "";
         string? tier = (_hub.Last is { Authorized: true } l) ? l.Tier : null;
         if (tier != null)
         {
             ChipTierBadge.Visibility = Visibility.Visible;
             StyleTierPill(tier);
             ChipTierText.Text = tier.ToUpperInvariant();
-            ChipSub.Text = charLine.Length > 0 ? charLine : (_settings.HubServer ?? "Rivervale");
+            ChipSub.Text = charLine.Length > 0 ? charLine : CharacterServer();
         }
         else
         {
             ChipTierBadge.Visibility = Visibility.Collapsed;
-            ChipSub.Text = name.Length == 0 ? "Profile → set your name" : (charLine.Length > 0 ? charLine : "not checked in");
+            ChipSub.Text = charLine.Length > 0 ? charLine
+                         : (name.Length == 0 ? "Read your inventory to fill this in" : "not checked in");
         }
         if (LicCharText != null)
-            LicCharText.Text = charLine.Length > 0 ? charLine : "— set up on the Profile page";
+            LicCharText.Text = charLine.Length > 0 ? charLine : "— read your inventory once";
         UpdateProfilePanel();
         RefreshLoadoutUi();               // loadout line + hover menu; no-op until one is recorded
     }
@@ -333,8 +337,23 @@ public partial class MainWindow : Window
     /// </summary>
     private void StyleTierPill(string tier)
     {
+        // Matched to the site's pill to the pixel: 2px/8px padding, 10px at weight 800, and the
+        // same letter spacing. The app had 10px/3px padding, which is what made it read as a fat
+        // oval next to the website's neat pill.
         ChipTierBadge.Padding = new Thickness(8, 2, 8, 2);
         ChipTierBadge.BorderThickness = new Thickness(1);
+        ChipTierText.FontSize = 10;
+        ChipTierText.FontWeight = FontWeights.ExtraBold;
+        ChipTierText.FontFamily = new FontFamily("Segoe UI");
+
+        Color c = TierColor(tier);
+
+        // The rim light: a 1px border at full strength plus a soft bloom in the SAME colour, so
+        // the pill says which tier you pay for from across the room rather than only up close.
+        ChipTierBadge.Effect = new System.Windows.Media.Effects.DropShadowEffect
+        {
+            Color = c, BlurRadius = 12, ShadowDepth = 0, Opacity = 0.75,
+        };
 
         if (string.Equals(tier, "Plaid", StringComparison.OrdinalIgnoreCase))
         {
@@ -344,9 +363,8 @@ public partial class MainWindow : Window
             return;
         }
 
-        Color c = TierColor(tier);
         ChipTierBadge.Background = new SolidColorBrush(Color.FromArgb(0x22, c.R, c.G, c.B));
-        ChipTierBadge.BorderBrush = new SolidColorBrush(Color.FromArgb(0x66, c.R, c.G, c.B));
+        ChipTierBadge.BorderBrush = new SolidColorBrush(c);          // full strength, not 0x66
         ChipTierText.Foreground = new SolidColorBrush(c);
     }
 
