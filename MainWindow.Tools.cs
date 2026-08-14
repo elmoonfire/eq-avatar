@@ -168,6 +168,7 @@ public partial class MainWindow
         MrgPickHost.Children.Add(MakeFireBar(mrgHave / 5.0,
             mrgHave >= 5 ? "everything picked — ready to sweep" : $"{mrgHave} of 5 picks made"));
         MrgPickHost.Children.Add(MakeRejectRow(p));
+        MrgPickHost.Children.Add(MakeNameGateRow(p));
 
         bool running = _mergeRun is { Running: true };
         MrgRunBtn.Content = running ? "■  Stop" : "▶  Merge the bag";
@@ -248,6 +249,154 @@ public partial class MainWindow
             row.Children.Add(forget);
         }
         return row;
+    }
+
+    /// <summary>
+    /// The name gate: on/off, what she'll be looking for, and a way to prove it works before three
+    /// thousand clicks depend on it.
+    ///
+    /// The test matters more than the switch. Everything else on this page can be checked by eye —
+    /// you can SEE whether the Place Item pick is on the box. Whether Windows' OCR can read a
+    /// tooltip over a dark game frame is not something anyone can know by looking, so it gets a
+    /// button that says exactly what was read.
+    /// </summary>
+    private FrameworkElement MakeNameGateRow(MergePlan p)
+    {
+        var row = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(1, 6, 0, 0) };
+        string[] words = MergeRole.NameTokens(p.ItemName);
+
+        var box = new CheckBox
+        {
+            Content = "Read the name before picking anything up",
+            IsChecked = p.ConfirmByName, FontSize = 11, Foreground = Hex("#C6D2DE"),
+            VerticalAlignment = VerticalAlignment.Center,
+            ToolTip = "Hover each candidate square and check the item's own tooltip before touching it. "
+                    + "This is the only check on this page that isn't a guess — an icon signature can't tell "
+                    + "a Desecrated Kejaar Totem from a Talisman of Kejaar Kerrath, and twice now it hasn't.",
+        };
+        box.Click += (_, _) =>
+        {
+            if (_mergeRun is { Running: true }) { ShowToast("Stop the sweep first"); box.IsChecked = p.ConfirmByName; return; }
+            p.ConfirmByName = box.IsChecked == true;
+            p.Save();
+            RenderMergeUi();
+        };
+        row.Children.Add(box);
+
+        row.Children.Add(new TextBlock
+        {
+            Text = words.Length == 0
+                ? "   ⚠ type the item's name above — without it there's nothing to match"
+                : "   looking for: " + string.Join(" + ", words),
+            FontSize = 10.5, Foreground = words.Length == 0 ? Hex("#FFCB6B") : Hex("#5E7C9A"),
+            VerticalAlignment = VerticalAlignment.Center,
+        });
+
+        var test = new TextBlock
+        {
+            Text = "   test the name read", FontSize = 10.5, Foreground = Hex("#4FC3F7"),
+            VerticalAlignment = VerticalAlignment.Center, Cursor = Cursors.Hand,
+            ToolTip = "Hover the best-matching square in the bag area and print exactly what she can read there. "
+                    + "Do this once before a real sweep.",
+        };
+        test.MouseLeftButtonUp += async (_, _) => await TestNameReadAsync();
+        row.Children.Add(test);
+        return row;
+    }
+
+    private bool _mrgNameBusy;
+
+    /// <summary>
+    /// Hover the square the icon scan likes best and report what the tooltip says there — using the
+    /// SAME read the sweep uses, so a passing test means the run will pass too.
+    /// </summary>
+    private async Task TestNameReadAsync()
+    {
+        if (_mrgNameBusy) return;
+        if (_mergeRun is { Running: true }) { ShowToast("Stop the sweep first"); return; }
+        MergePlan p = MergePlan.Current;
+        // Commit what's in the box FIRST. The name is only saved on the TextBox's LostFocus, and the
+        // test link is a TextBlock — not focusable — so clicking it never fires that. Type a
+        // corrected spelling, click test, get a green pass, and the run would still use the old
+        // name. A test that exercises different input than the run proves nothing.
+        string want = (MrgItemName.Text ?? "").Trim();
+        if (!string.Equals(p.ItemName, want, StringComparison.Ordinal)) { p.ItemName = want; p.Save(); }
+        if (want.Length == 0)
+        {
+            MrgStatus.Text = "Type the item's name above first — that's what she matches against.";
+            MrgStatus.Foreground = Hex("#FFCB6B");
+            return;
+        }
+        if (!p.ScanReady)
+        {
+            MrgStatus.Text = "Pick the bag area and the copy's icon first — the test hovers the square they point at.";
+            MrgStatus.Foreground = Hex("#FFCB6B");
+            return;
+        }
+        if (_grindTarget == IntPtr.Zero) AutoTargetEq();
+        if (_grindTarget == IntPtr.Zero) { ShowToast("EverQuest not found"); return; }
+
+        _mrgNameBusy = true;
+        try
+        {
+            MrgStatus.Text = "Bringing EverQuest forward and hovering the best match…";
+            MrgStatus.Foreground = Hex("#9FE0FF");
+
+            // Same rule as the copy count: a hover read taken while this window is over the game
+            // photographs the app, reads nothing, and blames the user's picks.
+            if (!GameFocus.IsFront(_grindTarget)
+                && !await GameFocus.BringAndSettleAsync(_grindTarget, settleMs: 500))
+            {
+                MrgStatus.Text = "Bring EverQuest to the front first — from behind this window she'd be reading "
+                               + "the app's own pixels.";
+                MrgStatus.Foreground = Hex("#FFCB6B");
+                return;
+            }
+
+            IntPtr h = _grindTarget;
+            System.Drawing.Bitmap? frame = await Task.Run(() => QuestFind.Capture(h));
+            QuestFind.IconHit? best = null;
+            if (frame is not null)
+                using (frame)
+                    best = QuestFind.FindIconInRect(frame, p.BagX, p.BagY, p.BagW, p.BagH,
+                                                    p.IconSig!, p.IconW, p.IconH);
+            if (best is null)
+            {
+                MrgStatus.Text = "Couldn't read the bag area at all — is the game on screen with the bags open?";
+                MrgStatus.Foreground = Hex("#FFCB6B");
+                return;
+            }
+
+            var probe = new MergeRole(p, new ForegroundSendInputSink(() => _grindTarget), () => _grindTarget);
+            MergeRole.NameLook look = await probe.ReadNameAtAsync(best.X, best.Y, want);
+
+            if (!look.Read)
+            {
+                MrgStatus.Text = "Couldn't look at all — " + look.Why + ". Nothing was read, so this says nothing "
+                               + "about the item.";
+                MrgStatus.Foreground = Hex("#FFCB6B");
+                ActivityLog.Record(MergeSource, "⚠ test name read couldn't look: " + look.Why);
+                return;
+            }
+            string head = look.Matched
+                ? $"✔ Read it. That square names itself \"{want}\" ({look.Hits} of {look.Tokens} words)."
+                : $"✖ That square did NOT read back as \"{want}\" ({look.Hits} of {look.Tokens} words).";
+            MrgStatus.Text = head + $"  Nearest text sat {look.Dist:0.00} away.\n\nWhat she can read there:\n"
+                           + look.Nearby;
+            MrgStatus.Foreground = look.Matched ? Hex("#7CE38B") : Hex("#FFCB6B");
+            ActivityLog.Record(MergeSource, (look.Matched ? "✔" : "✖")
+                + $" test name read at {best.X * 100:0.0}%, {best.Y * 100:0.0}% — {look.Hits}/{look.Tokens} words. "
+                + "Read: " + look.Nearby);
+        }
+        // Without this the dispatcher marks the exception handled and the status line sits on
+        // "Bringing EverQuest forward…" for ever, which reads as a hang rather than a failure.
+        catch (Exception ex)
+        {
+            MrgStatus.Text = "The name test failed: " + ex.Message;
+            MrgStatus.Foreground = Hex("#FFCB6B");
+            ActivityLog.Record(MergeSource, "⚠ the name test threw: " + ex.Message);
+        }
+        finally { _mrgNameBusy = false; }
     }
 
     private bool PickMergePoint(ScreenPoint point, string what, string hint, Action<PickShot?>? shot = null)
@@ -847,6 +996,10 @@ public partial class MainWindow
     private void ToggleMergeRun()
     {
         if (_mergeRun is { Running: true }) { _mergeRun.Stop(); return; }
+        // The name test owns the cursor while it hovers and reads. Starting a sweep on top of it —
+        // easy to do, since Ctrl+Alt+M works from inside the game — puts two things moving the mouse
+        // at once, and the sweep's click can land wherever the probe just parked it.
+        if (_mrgNameBusy) { ShowToast("The name test is still running"); return; }
 
         if (_grind is { Running: true } || _hunt is { Running: true }
             || _questRun is { Running: true } || _questStarting)
@@ -871,7 +1024,11 @@ public partial class MainWindow
         }
 
         var sink = new ForegroundSendInputSink(() => _grindTarget);
-        _mergeRun = new MergeRole(plan, sink, () => _grindTarget);
+        // Re-resolved at the START of every run, never cached across runs: EQ opens a NEW log file
+        // for a new character or a re-login, and a role holding yesterday's handle reads a file the
+        // server stopped writing to. That exact bug cost the Quest Runner a whole field test.
+        _currentLog = EQAvatar.Spike.Log.EqLogWatcher.FindNewestLog(LogFolderBox.Text.Trim()) ?? _currentLog;
+        _mergeRun = new MergeRole(plan, sink, () => _grindTarget, _currentLog);
         _mergeRun.Log += m => Dispatcher.Invoke(() =>
         {
             if (MrgStatus is not null)

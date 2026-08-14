@@ -11,6 +11,7 @@ using System.Threading.Tasks;
 using EQAvatar.Spike.Config;
 using EQAvatar.Spike.Data;
 using EQAvatar.Spike.Input;
+using EQAvatar.Spike.Log;
 using EQAvatar.Spike.Login;
 
 namespace EQAvatar.Spike.Roles;
@@ -76,8 +77,24 @@ public sealed class MergePlan
     /// <summary>Pictures of what each pick learned, keyed "place"/"merge"/"bag"/"tier"/"item".</summary>
     public Dictionary<string, PickShot> Shots { get; set; } = new();
     /// <summary>The item's name, used to look its real stats up so the forecast can show what the
-    /// projected tier is actually WORTH, not just which number it reaches.</summary>
+    /// projected tier is actually WORTH, not just which number it reaches — and, since the name
+    /// gate, to decide whether a square holds the thing at all.</summary>
     public string ItemName { get; set; } = "";
+
+    /// <summary>
+    /// READ THE NAME before picking anything up.
+    ///
+    /// Hovering a bag slot makes the game draw the item's own tooltip, with its name at the top.
+    /// That is the item telling us what it is, in words, and it is the only check on this page that
+    /// is not a guess: a colour signature says "something roughly this shape and palette", and two
+    /// field tests have now shown that a Desecrated Kejaar Totem answers to that description at
+    /// both 6×6 and 12×12. At bag scale an icon is about 26 px across — a 12×12 grid over it is two
+    /// pixels a cell — so there was never enough picture there to separate them, at any resolution.
+    ///
+    /// The icon scan still PROPOSES squares, because it is cheap and it narrows a five-rucksack
+    /// bag to a handful of candidates. The name DECIDES.
+    /// </summary>
+    public bool ConfirmByName { get; set; } = true;
 
     [JsonIgnore] public bool HasIcon => IconSig is { Length: 108 };
     [JsonIgnore] public bool HasIconSize => IconW > 0.002 && IconH > 0.002;
@@ -314,11 +331,47 @@ public sealed class MergeRole
     /// sweep on top of the one still clicking.</summary>
     private int _alive;
 
-    public MergeRole(MergePlan plan, IInputSink sink, Func<IntPtr> gameWindow)
+    /// <summary>
+    /// The game DOES say when a merge worked.
+    ///
+    /// "The game writes nothing to the log about merging" has been in this file since 0.10.4, and a
+    /// screenshot of the chat window on 2026-08-14 shows otherwise:
+    ///
+    ///   You have successfully merged two items together to create a new item: Talisman of Kejaar Kerrath +5
+    ///
+    /// That is the server talking, it names the result, and it cannot be misread the way a three-
+    /// digit OCR of a progress counter can. The tier counter stays — it is what the forecast is
+    /// drawn from, and it still catches the case where logging is off — but the log line is now the
+    /// first witness asked.
+    /// </summary>
+    private static readonly Regex MergedRx = new(
+        @"successfully merged two items together to create a new item:\s*(?<item>.+?)\.?\s*$",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    private readonly EqLogWatcher? _watcher;
+    private readonly string _watcherPath = "";
+    private volatile bool _watcherLive;
+    private volatile string _watcherStartError = "";
+    /// <summary>Bumped by the log watcher on its own thread every time the server confirms a merge,
+    /// and the name it confirmed. Read by the sweep around each attempt.</summary>
+    private int _mergedSeen;
+    private string _mergedName = "";
+
+    public MergeRole(MergePlan plan, IInputSink sink, Func<IntPtr> gameWindow, string? logPath = null)
     {
         _plan = plan;
         _sink = sink;
         _hwnd = gameWindow;
+        _watcherPath = logPath ?? "";
+        if (!string.IsNullOrEmpty(logPath)) _watcher = new EqLogWatcher(logPath!);
+    }
+
+    private void OnLogLine(string line)
+    {
+        Match m = MergedRx.Match(line ?? "");
+        if (!m.Success) return;
+        _mergedName = m.Groups["item"].Value.Trim();
+        Interlocked.Increment(ref _mergedSeen);
     }
 
     public void Start()
@@ -326,6 +379,19 @@ public sealed class MergeRole
         if (Running || Volatile.Read(ref _finished) != 0) return;
         _cts = new CancellationTokenSource();
         Volatile.Write(ref _alive, 1);
+        if (_watcher is not null)
+        {
+            // fromStart: false — only what the server says from here on. Replaying the file would
+            // count last night's merges as this run's.
+            _watcher.LineRead += OnLogLine;
+            // File.Exists first: EqLogWatcher.Start swallows its own failures, so "it didn't throw"
+            // is not evidence that anything is being read. Announcing a witness that isn't there is
+            // worse than announcing none.
+            try { _watcher.Start(fromStart: false); _watcherLive = System.IO.File.Exists(_watcherPath); }
+            // Swallowing this silently meant the run announced it was watching the log while the
+            // only witness left was the OCR it was supposed to back up.
+            catch (Exception ex) { _watcherStartError = ex.Message; }
+        }
         _ = Task.Run(() => LoopAsync(_cts.Token));
     }
 
@@ -338,6 +404,11 @@ public sealed class MergeRole
     {
         if (Interlocked.Exchange(ref _finished, 1) != 0) return;
         Volatile.Write(ref _alive, 0);
+        if (_watcher is not null)
+        {
+            _watcher.LineRead -= OnLogLine;
+            try { _watcher.Dispose(); } catch { }
+        }
         Stats.State = "stopped";
         try { _cts?.Cancel(); } catch { }
         try { Log?.Invoke(why); } catch { }
@@ -511,6 +582,230 @@ public sealed class MergeRole
         QuestFind.IconHit? closest = QuestFind.FindIconInRect(frame, _plan.BagX, _plan.BagY, _plan.BagW, _plan.BagH,
                                                               _plan.IconSig!, _plan.IconW, _plan.IconH);
         return new Look(true, null, all.Count, knownWrong, belowBar, closest?.Dist ?? 999);
+    }
+
+    // ---------------------------------------------------------------- reading the name
+
+    /// <summary>How far (normalized) a name may sit from the square being hovered and still be
+    /// THAT square's tooltip. The chat log echoes "Talisman of Kejaar Kerrath +5" every time a
+    /// merge succeeds, so a name found anywhere on screen is not evidence — a name found beside the
+    /// cursor is. Same argument as the NPC nameplate's drift limit.</summary>
+    /// A RADIUS, not a rectangle, and tighter than the nameplate's 0.22 — the tooltip is drawn
+    /// touching the square, so anything further away is something else on screen.
+    private const double NameMaxDist = 0.22;
+
+    /// <summary>
+    /// How far around the target item's own window to ignore text.
+    ///
+    /// That window has to stay open for the whole run — the tier counter is read off it and the
+    /// Place/Merge picks are on it — and it prints "Talisman of Kejaar Kerrath +5", which strips to
+    /// exactly the same words as a copy's tooltip. Without this the gate would pass over ANY square
+    /// whose neighbourhood happened to include it, which is the opposite of a check.
+    /// </summary>
+    private const double TargetWindowPad = 0.10;
+
+    /// <summary>Squares in a row that named themselves something else before the run gives up.
+    /// Generous, because a bag really can hold twenty-five look-alikes — but not unbounded, because
+    /// the same number is what a broken gate produces.</summary>
+    private const int NameMissLimit = 25;
+
+    private const string StaleTier = " (last read)";
+
+    /// <summary>Milliseconds to let the tooltip appear after the cursor lands.</summary>
+    private const int HoverSettleMs = 360;
+
+    /// <summary>What one hover saw: whether it matched, how far the nearest text sat, and
+    /// everything readable nearby — the last of which is the whole point when it goes wrong.</summary>
+    /// <param name="Read">FALSE means the look never happened — no window, the capture threw,
+    /// the game wasn't in front. That is NOT the same as "this isn't the item", and the caller must
+    /// not ban a square for it: a frame where the tooltip didn't render is not the item telling you
+    /// anything.</param>
+    public sealed record NameLook(bool Read, bool Matched, string Blob, double Dist, string Nearby,
+                                  int Tokens, int Hits, string Why = "");
+
+    /// <summary>
+    /// Hover a square and read the tooltip the game draws for it.
+    ///
+    /// This is the check the icon signature could never be. A colour signature says "something
+    /// roughly this shape and palette", and two field tests have shown a Desecrated Kejaar Totem
+    /// answers to that at 6×6 AND at 12×12 — at bag scale an icon is about 26 px across, so a 12×12
+    /// grid over it is two pixels a cell and there was never enough picture there to separate them.
+    /// The tooltip is the item saying what it is, in words.
+    ///
+    /// The page's "Test the name read" button calls THIS, not a lookalike: a test that exercises
+    /// different code than the run proves nothing.
+    /// </summary>
+    /// <param name="hover">False = read the same neighbourhood WITHOUT moving the cursor onto it.
+    /// That is how the run tells a tooltip from furniture: whatever is still readable when the
+    /// cursor is elsewhere was never the item talking.</param>
+    public async Task<NameLook> ReadNameAtAsync(double nx, double ny, string want,
+                                                CancellationToken ct = default, bool hover = true)
+    {
+        if (Screen(nx, ny) is not (int sx, int sy))
+            return new NameLook(false, false, "", 999, "", 0, 0, "no game window");
+        string[] tokens = NameTokens(want);
+        if (tokens.Length == 0)
+            return new NameLook(false, false, "", 999, "", 0, 0, "no item name to look for");
+        // The same rule the copy count and the test button follow: a screen read taken while this
+        // app is over the game photographs the app, finds nothing, and blames the user's picks.
+        if (!_sink.Ready)
+            return new NameLook(false, false, "", 999, "", tokens.Length, 0, "EverQuest wasn't the front window");
+
+        // TWO hops, not one. A cursor that teleports onto a slot may never generate the movement the
+        // game watches for, and a tooltip that never appears is indistinguishable from an item that
+        // isn't there — which would make this gate reject the whole bag. Landing nearby and then
+        // stepping on is what a hand does.
+        try
+        {
+            if (hover)
+            {
+                HumanizedMouse.MoveInstant(sx + 14, sy + 10);
+                await Task.Delay(70, ct);
+                HumanizedMouse.MoveInstant(sx, sy);
+            }
+            await Task.Delay(HoverSettleMs, ct);
+        }
+        catch { return new NameLook(false, false, "", 999, "", tokens.Length, 0, "cancelled"); }
+
+        List<FoundText> found;
+        try { found = await ScreenText.ReadAsync(_hwnd()); }
+        catch (Exception ex) { return new NameLook(false, false, "", 999, "", tokens.Length, 0, "the screen read threw: " + ex.Message); }
+        if (QuestFind.WindowRect(_hwnd()) is not (double wx, double wy, double ww, double wh))
+            return new NameLook(false, false, "", 999, "", tokens.Length, 0, "no game window");
+
+        // Everything close enough to be this square's tooltip, joined into one string. Whole-window
+        // OCR returns fragments and a name can be split across two of them, so the words are matched
+        // against the joined neighbourhood rather than against each fragment on its own.
+        var near = new List<(double D, string T)>();
+        foreach (FoundText f in found)
+        {
+            double fx = (f.X - wx) / ww, fy = (f.Y - wy) / wh;
+            double dx = fx - nx, dy = fy - ny;
+            double d = Math.Sqrt(dx * dx + dy * dy);
+            if (d > NameMaxDist) continue;
+            if (InTargetWindow(fx, fy)) continue;      // the item we're merging INTO prints the same words
+            near.Add((d, f.Text));
+        }
+        near.Sort((a, b) => a.D.CompareTo(b.D));
+        string blob = string.Join(" ", near.Select(n => n.T));
+        return new NameLook(true, MatchesName(blob, want), blob.Length > 200 ? blob[..200] : blob,
+                            near.Count > 0 ? near[0].D : 999,
+                            near.Count == 0 ? "(nothing readable beside that square)"
+                                            : string.Join(" | ", near.Take(14).Select(n => n.T)),
+                            tokens.Length, CountTokenHits(blob, tokens));
+    }
+
+    /// <summary>Is this point inside (or just outside) the target item's own window? Derived from
+    /// the picks that are already on it, so it needs nothing new from the user.</summary>
+    private bool InTargetWindow(double fx, double fy)
+    {
+        var xs = new List<double>();
+        var ys = new List<double>();
+        if (_plan.PlaceBox.Set) { xs.Add(_plan.PlaceBox.X); ys.Add(_plan.PlaceBox.Y); }
+        if (_plan.MergeButton.Set) { xs.Add(_plan.MergeButton.X); ys.Add(_plan.MergeButton.Y); }
+        if (_plan.TierSet) { xs.Add(_plan.TierX); xs.Add(_plan.TierX + _plan.TierW); ys.Add(_plan.TierY); ys.Add(_plan.TierY + _plan.TierH); }
+        if (xs.Count == 0) return false;
+        return fx >= xs.Min() - TargetWindowPad && fx <= xs.Max() + TargetWindowPad
+            && fy >= ys.Min() - TargetWindowPad && fy <= ys.Max() + TargetWindowPad;
+    }
+
+    /// <summary>
+    /// The words worth matching in an item name: four letters or more, and never the upgrade
+    /// suffix. A bag copy is "Talisman of Kejaar Kerrath"; the one you are merging INTO is
+    /// "Talisman of Kejaar Kerrath +5". Matching on the "+5" would reject every copy in the bag.
+    /// </summary>
+    public static string[] NameTokens(string name)
+    {
+        var outp = new List<string>();
+        foreach (string raw in (name ?? "").Split(' ', '`', '\'', '-', '.', ',', '(', ')'))
+        {
+            string t = new(raw.Where(char.IsLetter).ToArray());
+            if (t.Length >= 4) outp.Add(t.ToLowerInvariant());
+        }
+        return outp.ToArray();
+    }
+
+    /// <summary>
+    /// Does this blob of OCR name the item?
+    ///
+    /// Every long word has to be there, near enough. NOT "contains the name" — at this size OCR
+    /// turns "Kerrath" into "Kerralh" often enough that an exact test would refuse real copies all
+    /// night. And NOT "contains any word", because "Desecrated Kejaar Totem" and "Talisman of
+    /// Kejaar Kerrath" share "Kejaar", and matching on one shared word is exactly the mistake the
+    /// colour signature was already making, spelled differently.
+    /// </summary>
+    public static bool MatchesName(string ocr, string want)
+    {
+        string[] tokens = NameTokens(want);
+        if (tokens.Length == 0) return false;
+        // A clear majority of the words, and nothing required outright.
+        //
+        // Requiring the LONGEST word was the obvious rule and the wrong one: the longest word has
+        // the most characters and therefore the most exposure to OCR damage, so it made the single
+        // most fragile token into a veto over the whole run. A majority is what actually separates
+        // the two items here — "Desecrated Kejaar Totem" shares exactly one word with "Talisman of
+        // Kejaar Kerrath", which is 1 of 3 and nowhere near two thirds.
+        // Two thirds is safe when there is a LONG word carrying the identity, and dangerous when
+        // there isn't. "Fire Opal Ring" is three four-letter words, each with an edit budget of its
+        // own, and two of them are common enough that an unrelated "Rune of Fire Ring" clears the
+        // bar. So: with a distinctive word present, a majority (and that word has to be one of the
+        // hits); without one, every word has to be there.
+        string[] longOnes = tokens.Where(t => t.Length >= 6).ToArray();
+        string hay = Flatten(ocr);
+        int hits = tokens.Count(t => TokenPresent(hay, t));
+        if (longOnes.Length == 0) return hits == tokens.Length;
+        if (!longOnes.Any(t => TokenPresent(hay, t))) return false;
+        return hits >= (tokens.Length * 2 + 2) / 3;             // ceil(2/3)
+    }
+
+    private static int CountTokenHits(string ocr, string[] tokens)
+    {
+        string hay = Flatten(ocr);
+        return tokens.Count(t => TokenPresent(hay, t));
+    }
+
+    private static string Trim(string s, int n) => (s ?? "").Length <= n ? (s ?? "") : s[..n] + "…";
+
+    /// <summary>
+    /// Letters only, lower case, spaces removed.
+    ///
+    /// The spaces have to go. Whole-window OCR returns fragments and a name can be split across
+    /// two of them, so "Talisman" comes back as "Talis" + "man" — joined with a space that is
+    /// "talis man", which is two edits from "talisman" before OCR has made a single mistake of its
+    /// own. Flattened it is exact.
+    /// </summary>
+    private static string Flatten(string s)
+        => new((s ?? "").ToLowerInvariant().Where(char.IsLetter).ToArray());
+
+    /// <summary>
+    /// Is this word somewhere in that text, allowing for OCR damage?
+    ///
+    /// Approximate substring match by edit distance, so a DROPPED or ADDED character costs one, the
+    /// same as a wrong one. The previous version compared fixed-width windows character by
+    /// character, which meant "Kerrath" read as "Kerath" — one missing letter — scored a mismatch
+    /// at every position after it and failed outright. Insertions and deletions are the OCR errors
+    /// that actually happen at this size.
+    /// </summary>
+    private static bool TokenPresent(string hay, string token)
+    {
+        if (token.Length == 0 || hay.Length == 0) return false;
+        if (hay.Contains(token)) return true;
+        int budget = token.Length >= 7 ? 2 : 1;
+
+        // Standard approximate-substring DP: row 0 is all zeros, so the pattern may begin anywhere
+        // in the text for free, and the answer is the smallest value in the final row.
+        var prev = new int[hay.Length + 1];
+        var cur = new int[hay.Length + 1];
+        for (int i = 1; i <= token.Length; i++)
+        {
+            cur[0] = i;
+            for (int j = 1; j <= hay.Length; j++)
+                cur[j] = Math.Min(Math.Min(prev[j] + 1, cur[j - 1] + 1),
+                                  prev[j - 1] + (token[i - 1] == hay[j - 1] ? 0 : 1));
+            (prev, cur) = (cur, prev);
+        }
+        for (int j = 0; j <= hay.Length; j++) if (prev[j] <= budget) return true;
+        return false;
     }
 
     /// <summary>Persist what the sweep just learned, immediately rather than at the end. Every
@@ -700,6 +995,51 @@ public sealed class MergeRole
             // What is ARMED, said out loud before anything is clicked — the same rule the Quest
             // Runner follows. A confirm step that is quietly not running is worse than none: you
             // would believe the look-alike problem was fixed while she went on picking up totems.
+            // The name gate, said out loud. It is the difference between "she checks what she picks
+            // up" and "she doesn't", and a run that quietly wasn't checking is how both field tests
+            // ended.
+            string wantName = (_plan.ItemName ?? "").Trim();
+            if (_plan.ConfirmByName && wantName.Length > 0 && NameTokens(wantName).Length == 0)
+            {
+                Finish($"Can't start — \"{wantName}\" has no word of four letters or more to match on, so the name "
+                     + "gate has nothing to look for. Type the item's full name as the game spells it, or turn the "
+                     + "name check off (and know that the icon alone has twice picked up the wrong item).");
+                return;
+            }
+            if (_plan.ConfirmByName && (_plan.ItemName ?? "").Trim().Length > 0)
+                Log?.Invoke($"· name gate ARMED — every square gets hovered and has to read back as "
+                          + $"\"{_plan.ItemName.Trim()}\" before anything is picked up. "
+                          + "Words: " + string.Join(", ", NameTokens(_plan.ItemName)) + ".");
+            else
+                Log?.Invoke(_plan.ConfirmByName
+                    ? "⚠ name gate OFF — no item name is set, so she is going on the icon alone. Type the item's "
+                      + "name on this page: it is the only check here that isn't a guess."
+                    : "⚠ name gate turned off — she is going on the icon alone, which has twice now been fooled "
+                      + "by a Desecrated Kejaar Totem.");
+
+            if (_watcherLive)
+                Log?.Invoke("· watching the log for the server's own \"successfully merged\" line — that, not the "
+                          + "counter, is the first thing asked after each attempt, and the name in it has to match.");
+            else if (!string.IsNullOrEmpty(_watcherPath))
+                Log?.Invoke($"⚠ the log file it was told to watch isn't there ({_watcherPath}) — a merge can only "
+                          + "be confirmed by OCR of the tier counter this run.");
+            else if (_watcherStartError.Length > 0)
+                Log?.Invoke($"⚠ couldn't start watching the log ({_watcherStartError}) — a merge can only be "
+                          + "confirmed by OCR of the tier counter this run.");
+            else
+                Log?.Invoke("⚠ no log file to watch, so a merge can only be confirmed by OCR of the tier counter. "
+                          + "Set the log folder on Tab 1 and press Ensure Log=1.");
+
+            // If the item window sits on top of the bags, the exclusion that keeps its label out of
+            // the gate also throws away the tooltips the gate depends on. That produces a run that
+            // refuses every square and blames the spelling, so it gets said out loud.
+            if (_plan.ConfirmByName && wantName.Length > 0 && _plan.BagSet
+                && (InTargetWindow(_plan.BagX + _plan.BagW / 2, _plan.BagY + _plan.BagH / 2)
+                    || InTargetWindow(_plan.BagX, _plan.BagY)))
+                Log?.Invoke("⚠ the target item's window overlaps the bag area. Text there is ignored so the item's "
+                          + "own \"+5\" label can't pass the name check for it — which means tooltips over that "
+                          + "part of the bag are ignored too. Drag the item window clear of the bags.");
+
             if (_plan.ScanReady)
             {
                 int rejects = _plan.Rejects.Count();
@@ -759,8 +1099,12 @@ public sealed class MergeRole
             // The worst close-up score a CONFIRMED merge has produced this run — the honest bar for
             // everything after it, measured on this screen at this resolution rather than guessed.
             double confirmedFine = -1;
-            int learned = 0, vetoedTotal = 0;
+            int learned = 0, vetoedTotal = 0, nameMisses = 0, readFails = 0;
+            bool blankRetried = false, gateRefused = false;
             bool guardTripped = false;
+            // Squares the item's own tooltip said were something else. Permanent for the run: a name
+            // is not a threshold that can widen later, it is the item telling you what it is.
+            var namedOut = new List<(double X, double Y)>();
             while (true)
             {
                 if (ct.IsCancellationRequested) { cancelled = true; break; }
@@ -770,12 +1114,14 @@ public sealed class MergeRole
 
                 double sx, sy;
                 string where;
+                bool nameConfirmed = false;
                 if (grid is null)
                 {
                     skip.Clear();
                     skip.AddRange(tried);
                     skip.AddRange(knownWrong);
                     skip.AddRange(belowBar);
+                    skip.AddRange(namedOut);
                     Look look = LookForCopy(skip, confirmedFine);
                     knownWrong.AddRange(look.KnownWrong);
                     belowBar.AddRange(look.BelowBar);
@@ -825,6 +1171,15 @@ public sealed class MergeRole
                         // look-alikes could be reported as eighty — and that number is precisely the
                         // one that tells you your icon pick wants another go.
                         int vetoed = knownWrong.Count + belowBar.Count;
+                        if (namedOut.Count > 0)
+                        {
+                            Log?.Invoke($"No more copies in the bag area. {namedOut.Count} square(s) looked right "
+                                      + $"but named themselves something other than {wantName} — left alone, "
+                                      + "never picked up.");
+                            vetoedTotal = vetoed;
+                            gateRefused = Stats.Merged == 0;
+                            break;
+                        }
                         Log?.Invoke(look.Seen == 0
                             ? "No copies in the bag area — nothing in it matched the copy's colours at all."
                             : vetoed > 0
@@ -855,6 +1210,121 @@ public sealed class MergeRole
                     where = $"slot {r + 1},{c + 1}";
                 }
 
+                // ---- THE NAME GATE. Nothing is picked up until the item has said what it is.
+                //
+                // Before this, a square that looked right was clicked, placed, merge-pressed, and
+                // only THEN judged — by a counter that hadn't moved. That is a wrong item picked up,
+                // carried across the screen, and put back, five times over, before the run gave up.
+                // Reading the tooltip costs one hover and one screen read, and it happens while the
+                // item is still sitting in its own square where it belongs.
+                if (grid is null && _plan.ConfirmByName && wantName.Length > 0)
+                {
+                    Stats.State = "reading the name at " + $"{sx * 100:0.0}%, {sy * 100:0.0}%";
+                    NameLook look2 = await ReadNameAtAsync(sx, sy, wantName, ct);
+                    if (ct.IsCancellationRequested) { cancelled = true; break; }
+                    ActivityLog.Detail(MergeSource,
+                        $"hover {sx * 100:0.0}%,{sy * 100:0.0}% → {look2.Hits}/{look2.Tokens} words, "
+                        + $"nearest text {look2.Dist:0.00} away · {look2.Nearby}");
+
+                    // A LOOK THAT DIDN'T HAPPEN IS NOT A VERDICT. The capture threw, the game slipped
+                    // behind us, the window went away — none of that is the item saying what it is,
+                    // and banning a square for it would quietly lose a real copy for the whole run.
+                    if (!look2.Read)
+                    {
+                        readFails++;
+                        Log?.Invoke($"⚠ couldn't read the name at {sx * 100:0.0}%, {sy * 100:0.0}% "
+                                  + $"({readFails} of 3) — {look2.Why}.");
+                        if (readFails >= 3)
+                        {
+                            HumanizedMouse.MoveInstant(home.x, home.y);
+                            Finish($"⚠ Stopped after {Stats.Merged} merge(s): couldn't read any item name three "
+                                 + $"times running ({look2.Why}). Nothing was picked up. Keep EverQuest in front "
+                                 + "with the bags open, then press \"test the name read\" to see what she can see.");
+                            return;
+                        }
+                        await Task.Delay(500, ct);
+                        continue;
+                    }
+                    readFails = 0;
+
+                    // NOTHING readable beside the square is not the same as "this is something
+                    // else". The tooltip may simply not have drawn inside the settle time, and
+                    // banning the square for that would quietly lose a real copy for the whole run.
+                    // One more look, slower, before it is believed — the same three-strikes courtesy
+                    // every other read on this page gets.
+                    if (look2.Blob.Length == 0 && !blankRetried)
+                    {
+                        blankRetried = true;
+                        ActivityLog.Detail(MergeSource,
+                            $"no tooltip at {sx * 100:0.0}%,{sy * 100:0.0}% — hovering again, slower");
+                        await Task.Delay(500, ct);
+                        continue;
+                    }
+                    blankRetried = false;
+
+                    if (!look2.Matched)
+                    {
+                        nameMisses++;
+                        namedOut.Add((sx, sy));
+                        Log?.Invoke(look2.Blob.Length == 0
+                            ? $"· nothing readable beside {sx * 100:0.0}%, {sy * 100:0.0}% — no tooltip appeared "
+                              + "there. Leaving it alone."
+                            : $"· {sx * 100:0.0}%, {sy * 100:0.0}% isn't a {wantName} — the tooltip there reads "
+                              + $"\"{Trim(look2.Blob, 80)}\". Not touching it.");
+                        // Enough squares in a row naming themselves something else means the gate
+                        // isn't working — the name is spelled differently in game, the bags are
+                        // covered, the tooltip isn't appearing. That is a reason to stop and say so,
+                        // not to hover an entire rucksack. NOT gated on having merged nothing: the
+                        // gate can start failing after the first merge just as easily as before it,
+                        // and that version of the guard would have been switched off for the rest of
+                        // the night by a single success.
+                        if (nameMisses >= NameMissLimit)
+                        {
+                            HumanizedMouse.MoveInstant(home.x, home.y);
+                            Finish($"⚠ Stopped after {Stats.Merged} merge(s): {NameMissLimit} squares in a row "
+                                 + $"didn't name themselves \"{wantName}\". Nothing wrong was picked up. Either the "
+                                 + "name is spelled differently in game, the bags are covered, or the tooltip isn't "
+                                 + "appearing — press \"test the name read\" to see exactly what she can read.");
+                            return;
+                        }
+                        // Park the cursor away from the bags. Leaving it on the rejected square
+                        // leaves that square's tooltip drawn over its neighbours, and the next scan
+                        // then photographs a bag with a large opaque panel across it — which reads
+                        // as "no more copies" while the copies are still sitting under it.
+                        HumanizedMouse.MoveInstant(home.x, home.y);
+                        await Task.Delay(180, ct);
+                        continue;
+                    }
+                    // ---- AND IS IT ACTUALLY THE TOOLTIP?
+                    //
+                    // A name found beside a square is only evidence if it APPEARED because we
+                    // hovered there. The chat window prints "…create a new item: Talisman of Kejaar
+                    // Kerrath +5" after every success and never moves; so does the target item's own
+                    // window. Either can sit inside the radius of a bag square, and from the first
+                    // merge onward that would turn this gate into a rubber stamp — the worst
+                    // possible outcome, because the run would report every square as confirmed.
+                    //
+                    // So: move away and look again. Text still there with the cursor elsewhere is
+                    // furniture, not the item. Only paid on the squares we are about to act on.
+                    HumanizedMouse.MoveInstant(home.x, home.y);
+                    await Task.Delay(260, ct);
+                    NameLook away = await ReadNameAtAsync(sx, sy, wantName, ct, hover: false);
+                    if (away.Read && away.Matched)
+                    {
+                        namedOut.Add((sx, sy));
+                        nameMisses++;
+                        Log?.Invoke($"· ignoring {sx * 100:0.0}%, {sy * 100:0.0}% — that name is on screen whether "
+                                  + "or not she hovers it, so it's the chat log or the item window, not a tooltip.");
+                        ActivityLog.Detail(MergeSource, "static text near that square: " + away.Nearby);
+                        continue;
+                    }
+
+                    nameMisses = 0;
+                    nameConfirmed = true;
+                    Log?.Invoke($"· {sx * 100:0.0}%, {sy * 100:0.0}% names itself {wantName} "
+                              + $"({look2.Hits} of {look2.Tokens} words) — taking it.");
+                }
+
                 Stats.Attempts++;
                 Stats.State = where;
 
@@ -875,6 +1345,11 @@ public sealed class MergeRole
                     if (Finished) { HumanizedMouse.MoveInstant(home.x, home.y); return; }
                     await Task.Delay(400, ct); continue;
                 }
+                // Snapshotted immediately before the commit, not before the pick-up. The gap between
+                // them is a hover, a screen read and two clicks — seconds — and a confirmation that
+                // arrived late from the PREVIOUS attempt would otherwise be credited to this one.
+                int mergedBefore = Volatile.Read(ref _mergedSeen);
+
                 if (!ClickAt(_plan.MergeButton, 420, ct))
                 {
                     await ReturnHeldAsync(sx, sy, ct);
@@ -883,9 +1358,31 @@ public sealed class MergeRole
                 }
 
                 await Task.Delay(320, ct);
+                // THE SERVER FIRST. A chat line saying the merge succeeded is testimony; a counter
+                // read off the screen is an inference from three OCR'd digits. Where they disagree,
+                // the words win — and where the counter can't be read at all, the words are still
+                // there, which is the difference between a run that stops after three bad reads and
+                // a run that keeps working.
+                bool loggedMerge = Volatile.Read(ref _mergedSeen) != mergedBefore;
+                if (loggedMerge)
+                {
+                    // The line NAMES the result, so check it. A merge the player did by hand in
+                    // another window, or a merge of some other item, would otherwise confirm
+                    // whatever attempt happened to be in flight — with all the consequences of a
+                    // false confirmation, which are the worst ones on this page.
+                    string got = _mergedName;
+                    if (wantName.Length > 0 && !MatchesName(got, wantName))
+                    {
+                        loggedMerge = false;
+                        Log?.Invoke($"· the server confirmed a merge of \"{got}\", which isn't a {wantName} — "
+                                  + "not counting it as ours. Falling back to the tier counter.");
+                    }
+                    else ActivityLog.Detail(MergeSource, $"server confirmed the merge: \"{got}\"");
+                }
+
                 (int Have, int Need)? now = await ReadTierAsync();
 
-                if (now is null)
+                if (now is null && !loggedMerge)
                 {
                     blindMisses++;
                     Log?.Invoke($"⚠ {where}: couldn't read the tier counter ({blindMisses} of 3).");
@@ -902,18 +1399,37 @@ public sealed class MergeRole
                 }
 
                 blindMisses = 0;
-                Stats.Tier = $"{now.Value.Have}/{now.Value.Need}";
+                if (now is { } t) Stats.Tier = $"{t.Have}/{t.Need}";
+                else if (Stats.Tier.Length > 0 && !Stats.Tier.EndsWith(StaleTier)) Stats.Tier += StaleTier;
 
                 // The score is the honest witness. The displayed numerator FALLS on a level-up
                 // (518 shows as 6/512 the moment it passes 512), so "did the numerator change"
                 // needed two special cases and still couldn't tell a rise from a fall. A score can
                 // only go up, and by exactly what was fed in — which is also worth printing, since
                 // a jump of 32 says you just merged a +5 rather than a fresh drop.
-                long nowScore = UpgradeScore.ScoreFrom(now.Value.Have, now.Value.Need) ?? -1;
-                bool levelledUp = now.Value.Need != lastNeed;
-                bool moved = nowScore >= 0 && lastScore >= 0
-                    ? nowScore > lastScore
-                    : levelledUp || now.Value.Have != lastHave;      // unreadable score: the old test
+                //
+                // `now` can be NULL here now, and only in one situation: the server said the merge
+                // happened and the counter didn't read. That is a merge with no number attached —
+                // counted, narrated, and left out of the arithmetic rather than guessed at.
+                long nowScore = now is { } n1 ? UpgradeScore.ScoreFrom(n1.Have, n1.Need) ?? -1 : -1;
+                // `lastNeed >= 0` matters as much as the guard on lastHave below it. A real
+                // denominator is always a ladder step — 1, 2, 4 … 1024 — so `!= -1` is true for
+                // EVERY read, and without this test the invalidated baseline makes "levelled up"
+                // fire on the next attempt whatever it did. That put the whole phantom-merge chain
+                // back: a look-alike counted as a merge, deadEnds reset, a correct reject un-learned,
+                // and its picture saved to disk as the reference copy.
+                bool levelledUp = lastNeed >= 0 && now is { } n2 && n2.Need != lastNeed;
+                bool moved = loggedMerge                            // the server said so — nothing to weigh
+                    || (nowScore >= 0 && lastScore >= 0
+                        ? nowScore > lastScore
+                        // The numerator fallback needs a BASELINE, and `lastHave < 0` means there
+                        // isn't one — the previous attempt merged on the server's word while the
+                        // counter was unreadable, so the number on screen has moved for a reason
+                        // already accounted for. Without this guard the next attempt reads the
+                        // PREVIOUS merge's result, calls itself a merge, resets deadEnds, un-learns
+                        // a correct reject, and can write a totem's picture to disk as the
+                        // reference copy. Not knowing is the honest answer here.
+                        : levelledUp || (lastHave >= 0 && now is { } n3 && n3.Have != lastHave));
                 long gained = nowScore >= 0 && lastScore >= 0 ? nowScore - lastScore : 0;
                 // UNCONDITIONAL, including the -1. Keeping the last good score across an
                 // undecodable read meant the NEXT reading — a true one, one point higher after the
@@ -921,17 +1437,25 @@ public sealed class MergeRole
                 // phantom that also reset deadEnds, the only guard against the scan picking the
                 // target item up and putting it back forever.
                 lastScore = nowScore;
-                lastHave = now.Value.Have;
-                lastNeed = now.Value.Need;
+                // Invalidated together, always. Keeping a stale numerator while the score went to
+                // -1 is what makes the phantom above possible.
+                if (now is { } n4) { lastHave = n4.Have; lastNeed = n4.Need; }
+                else { lastHave = -1; lastNeed = -1; }
 
                 if (moved)
                 {
                     deadEnds = 0;
                     Stats.Merged++;
                     string worth = gained > 1 ? $" (+{gained} points — that copy was a +{UpgradeScore.TierFor(gained)})" : "";
-                    Log?.Invoke(levelledUp && nowScore >= 0
-                        ? $"✔ merged — LEVELLED UP to +{UpgradeScore.TierFor(nowScore)}, now {Stats.Tier}{worth}"
-                        : $"✔ merged — now {Stats.Tier}{worth}");
+                    Log?.Invoke(now is null
+                        // Confirmed by the server, not by the counter. Printing the last number we
+                        // happened to read as though it were current would be a lie about the one
+                        // figure the user reads to decide whether to run again.
+                        ? "✔ merged — the server confirmed it, but the tier counter didn't read this time, so the "
+                          + "number above is from before this merge."
+                        : levelledUp && nowScore >= 0
+                            ? $"✔ merged — LEVELLED UP to +{UpgradeScore.TierFor(nowScore)}, now {Stats.Tier}{worth}"
+                            : $"✔ merged — now {Stats.Tier}{worth}");
 
                     // The counter moved, so THAT was a real copy — which makes its close-up picture
                     // ground truth rather than a guess. Two uses:
@@ -1041,7 +1565,14 @@ public sealed class MergeRole
                     {
                         double d = QuestFind.SigDistance(pendingFine, _plan.IconSigFine!);
                         double bar = Math.Max(RejectMinDistance, confirmedFine + RejectSafety);
-                        if (confirmedFine < 0)
+                        // The item said its own name. Whatever went wrong here, it was not identity —
+                        // the merge window was covered, the click missed, the counter lagged — and
+                        // blacklisting the picture of a confirmed copy is the one mistake with no
+                        // symptom, so the name overrules every signature argument below it.
+                        if (nameConfirmed)
+                            Log?.Invoke("· not learning that picture — the tooltip named it correctly, so this is a "
+                                      + "click or a window problem, not the wrong item.");
+                        else if (confirmedFine < 0)
                             Log?.Invoke($"· not learning that picture yet (close-up {d:0.0}) — nothing has merged this "
                                       + "run, so there's no proof of what a real copy scores to measure it against.");
                         else if (d < bar)
@@ -1091,12 +1622,22 @@ public sealed class MergeRole
                 ? $" She left {vetoedTotal} look-alike(s) alone"
                   + (learned > 0 ? $" and learned {learned} new one(s) to avoid from here on." : ".")
                 : learned > 0 ? $" She learned {learned} icon(s) that aren't copies." : "";
-            Finish((guardTripped
-                ? $"⚠ Stopped after {Stats.Merged} merge(s){skipped}: 4,000 passes is not a bag, it is a loop. "
-                  + $"Target is at {Stats.Tier}. Check the picks before running again."
-                : cancelled
-                    ? $"Stopped part-way — {Stats.Merged} merged{skipped}. Target is at {Stats.Tier}."
-                    : $"Done — {Stats.Merged} merged{skipped}. Target is at {Stats.Tier}.") + avoided);
+            // The gate gets its own sentence. "Done — 1 merged" and "Done — 1 merged, and I hovered
+            // forty squares that turned out to be something else" describe the same bag, and only
+            // the second one tells you the icon pick wants another look.
+            if (namedOut.Count > 0)
+                avoided += $" {namedOut.Count} square(s) named themselves something else and were never touched.";
+            Finish((gateRefused
+                ? $"⚠ Nothing merged. {namedOut.Count} square(s) looked like the item but named themselves "
+                  + $"something other than {wantName}, so none of them were touched. If those really are copies, "
+                  + "check the spelling against the tooltip in game — press \"test the name read\" to see what "
+                  + "she can read."
+                : guardTripped
+                    ? $"⚠ Stopped after {Stats.Merged} merge(s){skipped}: 4,000 passes is not a bag, it is a loop. "
+                      + $"Target is at {Stats.Tier}. Check the picks before running again."
+                    : cancelled
+                        ? $"Stopped part-way — {Stats.Merged} merged{skipped}. Target is at {Stats.Tier}."
+                        : $"Done — {Stats.Merged} merged{skipped}. Target is at {Stats.Tier}.") + avoided);
         }
         catch (OperationCanceledException)
         {
