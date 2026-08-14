@@ -199,7 +199,7 @@ public sealed class QuestScript
     public void Migrate()
     {
         Quest ??= "";
-        Npc ??= "";
+        Npc = (Npc ?? "").Trim();      // hand-edited files carry stray spaces; the offer matcher compares on it
         SayPhrases ??= new List<string>();
         Layout ??= new TurnInLayout();
         Layout.Npc ??= new ScreenPoint();

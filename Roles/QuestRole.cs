@@ -36,8 +36,8 @@ public sealed class QuestStats
 /// and about what is on screen, but it is NOT silent about a completed hand-in: the server prints
 /// "You offered 1 &lt;item&gt; to &lt;npc&gt;", then some of "has been updated", "You have been
 /// given:", "has been assigned the task". Every hand-in waits for one of those before counting.
-/// A step that clicks perfectly and confirms nothing is a FAILED step. Three failures in a row
-/// and the runner moves ON TO THE NEXT ITEM rather than stopping: this NPC only accepts what his
+/// A step that clicks perfectly and confirms nothing is a FAILED step, and the runner moves
+/// straight ON TO THE NEXT ITEM rather than trying again: this NPC only accepts what his
 /// current quest stage asks for, so a step that can't be satisfied usually means the stage it
 /// belongs to is already done — and the item he actually wants is the next one in the list. The
 /// run stops only when a whole pass gets nothing through, or when three passes in a row stick on
@@ -98,6 +98,12 @@ public sealed class QuestRole
     /// </summary>
     private readonly List<string> _windowLines = new();
     private string _wrongOffer = "";
+    /// <summary>An offer of the RIGHT item to the WRONG creature. Not a hand-in; a donation.</summary>
+    private string _wrongNpc = "";
+    /// <summary>Offer lines that matched the in-flight item inside ONE confirmation window. More
+    /// than one means the trade window had been accumulating and committed a pile at once — which
+    /// is several items gone for a single counted hand-in, and the reason retries were removed.</summary>
+    private int _offersThisWindow;
     private readonly object _windowGate = new();
     /// <summary>Whether the log has EVER produced an assignment line this run. EQ Legends may
     /// simply not print one — the quest appears in the journal either way — and waiting every
@@ -109,12 +115,26 @@ public sealed class QuestRole
     /// line. Two passes with nothing is evidence about THIS GAME's logging; a busy zone's chatter
     /// is evidence about the zone.</summary>
     private int _phrasePasses;
-    /// <summary>Attempts a single step gets before the runner moves on to the next item. Three,
-    /// not two: since nothing is clicked after a miss (see NoteCursorRisk), an item left on the
-    /// cursor costs the NEXT attempt — its first click puts the item down instead of picking one
-    /// up. Two attempts left no room for that, so a step could be skipped on one real refusal plus
-    /// one that was just the clean-up.</summary>
-    private const int MaxStepMisses = 3;
+    /// <summary>
+    /// ONE attempt per item per pass. Retrying is not free here — it is the most expensive thing
+    /// the runner can do.
+    ///
+    /// Hayden's game chat settles it. Three consecutive "You offered 1 Desecrated Kejaar Totem to
+    /// The Kerran Sha`rr." lines, in a burst, at the moment a LATER hand-in went through — while
+    /// the runner's own log for those same three attempts shows nothing but buff ticks. The offers
+    /// were real; they just did not commit when they were made. Each attempt had dropped its item
+    /// into the trade window and pressed a GIVE that did not land, so the window accumulated, and
+    /// one GIVE that finally landed committed the lot.
+    ///
+    /// Which means every retry HANDS OVER ANOTHER ITEM. Three attempts at a totem is three totems
+    /// gone for one quest step — on a 1,024-totem grind. And it explains the whole shape of the
+    /// last four field logs: attempts that "failed" while items steadily left the bag.
+    ///
+    /// So: one attempt. Hayden's read from watching it — "the first attempt when an item is
+    /// actually picked up and handed to the npc does work" — matches every confirmed hand-in in
+    /// every log. If it doesn't confirm, the answer is the NEXT ITEM, not the same one again.
+    /// </summary>
+    private const int MaxStepMisses = 1;
     private int _finished;
 
     public QuestRole(QuestScript script, IInputSink sink, AppSettings settings,
@@ -223,6 +243,30 @@ public sealed class QuestRole
         {
             if (item.Length == 0 || l.Contains(item))
             {
+                // WHO took it matters as much as what. The fixed NPC pick is a point on the
+                // screen, so anything that wanders through that point gets the click — Hayden's
+                // chat log has "You offered 1 Heretic Insurrection Orders to a patrolling tiger"
+                // sitting between two hand-ins the runner counted as successes.
+                //
+                // But this test FAILS OPEN, and that is the whole design. The quest NPC's name is
+                // scraped off a wiki infobox: it can carry a curly apostrophe where the server
+                // writes a backtick, or be a piped display name ("the Sha`rr"). A test that
+                // required a positive match on that string would reject REAL hand-ins for a
+                // punctuation mismatch, and then accuse the user of feeding items to wildlife
+                // while quoting a line naming the right NPC. So the only thing that counts as a
+                // donation is a POSITIVE identification of something else: EQ names creatures
+                // "a patrolling tiger", "an angry bear" — lowercase, with an article. Real NPC
+                // names never look like that.
+                if (LooksLikeACreature(line))
+                {
+                    lock (_windowGate) _wrongNpc = line.Trim();
+                    return;
+                }
+                // Offer lines only. The confirmation matcher deliberately accepts either wording,
+                // because nobody has established which this server prints — but if ONE hand-in
+                // printed both, counting both would tell the user two items had vanished and send
+                // them off to re-pick a GIVE button that was working perfectly.
+                if (l.Contains("you offered")) Interlocked.Increment(ref _offersThisWindow);
                 _offered = true;
                 Stats.LastLine = line.Trim();
                 return;
@@ -249,6 +293,32 @@ public sealed class QuestRole
             _advanced = true;
             Stats.LastLine = line.Trim();
         }
+    }
+
+    /// <summary>
+    /// Does this offer line say the item went to a generic creature rather than to a named NPC?
+    ///
+    /// EQ's naming convention does the work: mobs are "a patrolling tiger", "an angry bear" —
+    /// lowercase, indefinite article — while quest NPCs are proper names, "The Kerran Sha`rr".
+    /// Testing for the mob shape rather than for the NPC's exact spelling means a wiki-scraped
+    /// name that differs by one apostrophe costs nothing, where the reverse test would have
+    /// refused every real hand-in on this quest.
+    /// </summary>
+    private bool LooksLikeACreature(string line)
+    {
+        int to = line.LastIndexOf(" to ", StringComparison.OrdinalIgnoreCase);
+        if (to < 0) return false;
+        string tail = line[(to + 4)..].TrimEnd('.', ' ', '\r', '\n');
+        // If the tail IS the NPC we came for, it is a hand-in whatever it looks like. EverQuest
+        // does name interactable NPCs "a shady vendor", and without this line such a quest would
+        // have every real hand-in rejected as a donation — the exact failure this test was
+        // rewritten to avoid, coming back through the other door. Suppressing a rejection can only
+        // ever be safe; that asymmetry is the whole design.
+        string npc = _script.Npc.Trim();
+        if (npc.Length > 0 && tail.StartsWith(npc, StringComparison.OrdinalIgnoreCase))
+            return false;
+        return tail.StartsWith("a ", StringComparison.Ordinal)
+            || tail.StartsWith("an ", StringComparison.Ordinal);
     }
 
     // ---------------------------------------------------------------- screen
@@ -473,7 +543,8 @@ public sealed class QuestRole
         // be satisfied by the tail of the PREVIOUS hand-in.
         _inFlight = step;
         _offered = _advanced = false;
-        lock (_windowGate) { _windowLines.Clear(); _wrongOffer = ""; }
+        lock (_windowGate) { _windowLines.Clear(); _wrongOffer = ""; _wrongNpc = ""; }
+        Interlocked.Exchange(ref _offersThisWindow, 0);
         _listening = true;
 
         if (!ClickAt(_script.Layout.GiveButton, 500, "the GIVE button")) { _listening = false; _inFlight = null; return Drop(null); }
@@ -519,9 +590,9 @@ public sealed class QuestRole
     ///     as normal.
     ///
     /// Doing nothing is the only option that cannot make things worse, and it is honest about what
-    /// it costs: if the item really is on the cursor, the next attempt may spend itself putting it
-    /// back down (which is why a step gets three attempts), and if it was the LAST copy the scan
-    /// cannot see it at all — see WarnPossiblyHeld, which says so out loud rather than guessing.
+    /// it costs: if the item really is on the cursor, the NEXT PASS's attempt at that step spends
+    /// itself putting it back down, and if it was the LAST copy the scan cannot see it at all —
+    /// see WarnPossiblyHeld, which says so out loud rather than guessing.
     /// </summary>
     private void NoteCursorRisk()
     {
@@ -590,9 +661,21 @@ public sealed class QuestRole
     /// </summary>
     private void ReportWindow(TurnInStep step)
     {
-        string wrong;
+        string wrong, badNpc;
         List<string> seen;
-        lock (_windowGate) { wrong = _wrongOffer; seen = new List<string>(_windowLines); }
+        lock (_windowGate) { wrong = _wrongOffer; badNpc = _wrongNpc; seen = new List<string>(_windowLines); }
+
+        if (badNpc.Length > 0)
+        {
+            Log?.Invoke($"✖ THAT WENT TO THE WRONG CREATURE — \"{badNpc}\". The NPC pick is a fixed point on the "
+                      + $"screen, so anything that walks through it gets the click, and {step.Item} has just been "
+                      + "given away. Not counted as a hand-in. The click goes to a fixed point unless smart "
+                      + "find can see his nameplate, so: stand where nothing patrols between you and him, and "
+                      + $"re-pick the NPC while {_script.Npc} is TARGETED — that learns the nameplate anchor — "
+                      + "and turn ON \"target by name\" as well. BOTH are needed: the anchor is what she reads, "
+                      + "and that switch is what makes her read it. With either one off the click stays on a spot.");
+            return;
+        }
 
         if (wrong.Length > 0)
         {
@@ -684,15 +767,19 @@ public sealed class QuestRole
             // certainty — and if no key is bound, the run simply proceeds as before.
             if (await WaitFocus(ct)) OpenBags("starting the run");
 
-            // PER STEP, not one counter for the run. A cycle restarts from the top after any
-            // failure, so a shared counter is reset by step 1 succeeding on the very next pass and
-            // can never reach 2 — which is exactly the "you have run out of the second item" case
-            // the stop exists for. Keyed by the step object; the list is only edited from the UI
-            // while the run is stopped.
+            // Per step, and with MaxStepMisses at 1 it never exceeds 1 — kept because the count is
+            // what the skip decision reads, so raising MaxStepMisses is a one-line change if a
+            // reason to retry ever turns up. Keyed by the step object; the list is only edited from
+            // the UI while the run is stopped.
             var stepMisses = new Dictionary<TurnInStep, int>();
             int gestureFails = 0;
             // Consecutive passes that got part way and then stuck. Reset by a complete cycle.
             int partialRun = 0;
+            // Consecutive passes where NOTHING was confirmed. One attempt per item means a single
+            // pass is thin evidence — the old three-attempts-per-item stop needed six unanswered
+            // offers to conclude "nothing gets through" and this would have needed two, which is
+            // ~24 seconds. Two fruitless passes is the same standard of proof at the new cadence.
+            int fruitlessPasses = 0;
             // Items offered toward a step's Qty since its last recorded completion.
             var offersToward = new Dictionary<TurnInStep, int>();
 
@@ -853,17 +940,35 @@ public sealed class QuestRole
                             // A confirmed offer is ONE ITEM. For a quest that wants four of a
                             // thing, four offers = one completion — stamping the history on the
                             // first partial offer would mark quests "completed" that never were.
-                            int toward = offersToward.TryGetValue(step, out int t) ? t + 1 : 1;
-                            if (toward >= Math.Max(1, step.Qty))
+                            // Read the burst FIRST. When the trade window commits a pile, that many
+                            // items really did go, and a quest wanting four of something is
+                            // four-fifths done, not one-quarter — counting one would stamp the
+                            // completion late by exactly the number of items already lost.
+                            int burst = Interlocked.Exchange(ref _offersThisWindow, 0);
+                            // CLAMPED before it touches the durable history. The burst is counted
+                            // over a 12-second window of live zone log, and questcompletions.json is
+                            // permanent with no UI to correct it — one stray line must not be able
+                            // to overstate progress on a 1,024-item grind. The ⚠ below still reports
+                            // the raw number, because that is a diagnosis, not a tally.
+                            int credit = Math.Clamp(burst, 1, 4);
+                            int toward = (offersToward.TryGetValue(step, out int t) ? t : 0) + credit;
+                            int need = Math.Max(1, step.Qty);
+                            while (toward >= need)
                             {
                                 QuestCompletions.Record(step.Quest);
-                                toward = 0;
+                                toward -= need;           // carry the remainder, don't discard it
                             }
                             offersToward[step] = toward;
                             Log?.Invoke($"✔ {step.Item} accepted — {Stats.LastLine}");
+                            if (burst > 1)
+                                Log?.Invoke($"⚠ the server took {burst} × {(step.Item.Length > 0 ? step.Item : "that item")} in that one moment, not one. "
+                                          + "Earlier offers had gone into a trade window that hadn't committed yet, "
+                                          + "and this GIVE committed the lot. Counting it as ONE hand-in, but "
+                                          + $"{burst} left your bag. If this keeps happening, re-pick the GIVE "
+                                          + "button — a GIVE press that doesn't land is what leaves items waiting.");
                             _maybeHolding = false;        // it went to the NPC; nothing is held
                             stepsDone++;
-                            await Task.Delay(1100 + _rng.Next(500), ct);
+                            await Task.Delay(700 + _rng.Next(250), ct);   // ~1s, Hayden's measure
                             break;                            // next step
                         }
 
@@ -873,7 +978,7 @@ public sealed class QuestRole
                         if (!_emptyBagMiss) scanFoundNothing = false;
                         if (_emptyBagMiss)
                         {
-                            Log?.Invoke($"✖ {step.Item}: bag scan found none (miss {misses} of {MaxStepMisses} for this item).");
+                            Log?.Invoke($"✖ {step.Item}: bag scan found none.");
                             // "None in the bag" does not mean "none anywhere" while an item may be
                             // on the cursor — it is drawn under the mouse, which is parked over the
                             // GIVE button, not the bags. So this is not the ordinary "you're out of
@@ -901,7 +1006,9 @@ public sealed class QuestRole
                                 return;
                             }
                             Log?.Invoke($"✖ {step.Item}: nothing came back from the server within "
-                                      + $"{_script.ConfirmSeconds}s (miss {misses} of {MaxStepMisses} for this item).");
+                                      + $"{_script.ConfirmSeconds}s. Moving on rather than trying again — if the item "
+                                      + "did go into a trade window that hasn't committed, offering another one just "
+                                      + "adds it to the pile and gives them all away at once.");
                             ReportWindow(step);
                             NoteCursorRisk();
                         }
@@ -922,17 +1029,29 @@ public sealed class QuestRole
                                 ? $"↷ giving up on {step.Item} for now and trying {steps[i + 1].Item} — the NPC "
                                   + "only takes the item his current quest stage asks for, so if this stage is "
                                   + "already done, the next item is the one he wants."
-                                : $"↷ {step.Item} went unanswered {MaxStepMisses} times and it's the last item "
-                                  + "in the cycle.");
+                                : $"↷ {step.Item} went unanswered and it's the last item in the cycle.");
                             break;                            // next STEP, not the end of the run
                         }
                         await Task.Delay(1500, ct);           // retry THIS step
                     }
                 }
 
+                // Hushed HERE, above the stop blocks: the retry branch below ends in a `continue`
+                // that jumped straight over this, so a fruitless first pass replayed the whole
+                // opening narration — and every one of those lines is a blocking hop to the UI
+                // thread, at the moment the runner is about to start clicking again.
+                _narrate = false;                         // the first pass told the story; hush now
+
                 // Nothing at all got through this pass. Now — and only now — is stopping right:
                 // every item in the cycle has been offered and refused, so retrying the same list
                 // forever would be a loop, not persistence.
+                if (!abort && stepsDone == 0 && stepsSkipped > 0 && ++fruitlessPasses < 2)
+                {
+                    Log?.Invoke("↷ nothing got through that pass. Trying the whole cycle once more before giving up "
+                              + "— one attempt per item is deliberate, so a single unlucky pass is not evidence.");
+                    await Task.Delay(1200, ct);
+                    continue;
+                }
                 if (!abort && stepsDone == 0 && stepsSkipped > 0)
                 {
                     // The advice is only worth printing if the branch matches what actually
@@ -975,7 +1094,7 @@ public sealed class QuestRole
                 // server's wording) would hand item one over forever, never counting a cycle, so
                 // "3 cycles" never ended, the pacing delay never ran, and the first-cycle narration
                 // never hushed — a run that quietly became infinite and chatty.
-                _narrate = false;                         // the first pass told the story; hush now
+                if (stepsDone > 0) fruitlessPasses = 0;
                 if (cycleComplete)
                 {
                     partialRun = 0;
