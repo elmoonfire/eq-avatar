@@ -933,7 +933,11 @@ public sealed class MergeRole
         }
         foreach (QuestFind.IconHit h in all)
         {
-            (double best, _, _) = QuestFind.BestNcc(frame, h.X, h.Y, plan.IconPixels!);
+            // The SAME arguments the sweep uses, resize included. A count that skipped the rescale
+            // would disagree with the run the moment the window changed size — and the count is what
+            // the forecast, and the user's decision to press Run, are both built on.
+            (double best, _, _) = QuestFind.BestNcc(frame, h.X, h.Y, plan.IconPixels!,
+                (int)Math.Round(plan.IconW * frame.Width), (int)Math.Round(plan.IconH * frame.Height));
             if (best >= NccAccept) outp.Add((h.X, h.Y, best));
         }
         outp.Sort((a, b) => b.Item3.CompareTo(a.Item3));
@@ -1142,9 +1146,24 @@ public sealed class MergeRole
                           + "own \"+5\" label can't pass the name check for it — which means tooltips over that "
                           + "part of the bag are ignored too. Drag the item window clear of the bags.");
 
+            // Measured against the CURRENT window, not the one the pick was made in. Reporting the
+            // learned size's radius while the sweep uses the live size's would be the run describing
+            // a search it isn't performing.
+            int liveW = _plan.HasPixels ? (int)Math.Round(_plan.IconW * (QuestFind.WindowRect(_hwnd())?.W ?? 0)) : 0;
+            int liveH = _plan.HasPixels ? (int)Math.Round(_plan.IconH * (QuestFind.WindowRect(_hwnd())?.H ?? 0)) : 0;
+            if (liveW < 4 || liveH < 4) { liveW = _plan.IconPixels?.W ?? 0; liveH = _plan.IconPixels?.H ?? 0; }
+
+            if (_plan.HasPixels && QuestFind.SearchPadWanted(Math.Max(liveW, liveH)) > QuestFind.SearchPadCap)
+                Log?.Invoke($"⚠ that icon is {liveW}×{liveH} px on screen, which needs a wider alignment search than "
+                          + $"the {QuestFind.SearchPadCap} px cap allows — some copies may never get lined up and "
+                          + "will read as \"not a copy\". Re-pick the icon with a TIGHTER box.");
+
             if (_plan.HasPixels)
-                Log?.Invoke($"· matching the copy's ACTUAL PIXELS ({_plan.IconPixels!.W}×{_plan.IconPixels.H}), "
-                          + $"nudged ±{QuestFind.NccSearchPx} px to find the best fit. A square has to match over "
+                Log?.Invoke($"· matching the copy's ACTUAL PIXELS ({_plan.IconPixels!.W}×{_plan.IconPixels.H} as "
+                          + $"learned, {liveW}×{liveH} on screen now), nudged ±{QuestFind.SearchPadFor(liveW)},"
+                          + $"±{QuestFind.SearchPadFor(liveH)} px to find the best fit — wide enough to cover the "
+                          + "gap between the squares the colour pass proposes, which is what decides whether a copy "
+                          + "ever gets lined up at all. A square has to match over "
                           + $"{NccAccept * 100:0}% to be touched; a different icon in the same colours scores "
                           + "around 45%.");
             else if (_plan.ScanReady)

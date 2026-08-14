@@ -382,8 +382,33 @@ public static class QuestFind
         { W = w, H = h, FrameW = frame.Width, FrameH = frame.Height, Data = Convert.ToBase64String(px) };
     }
 
-    /// <summary>How far, in pixels, to hunt for the best alignment around a proposed centre.</summary>
-    public const int NccSearchPx = 4;
+    /// <summary>
+    /// How far, in pixels, to hunt for the best alignment around a proposed centre — DERIVED from
+    /// how far apart the proposals are, never a constant.
+    ///
+    /// This is the whole game. `FindAllIcons` steps in thirds of an icon, so the nearest proposal to
+    /// a real icon's centre can be half a step away in each axis. If the search is narrower than
+    /// that, icons are missed not because they look wrong but because nothing ever lined the
+    /// template up with them — and they are missed at a rate you can predict:
+    ///
+    ///     found ≈ (2·pad / stepX) × (2·pad / stepY)
+    ///
+    /// A field run with a 39×42 px reference and a fixed ±4 px search found 5 of 14 copies. The
+    /// formula says (8/13)×(8/14) = 35%, and 14 × 0.35 = 4.9. It was not a matching problem; every
+    /// copy it did align with scored 99.6% or better and every non-copy scored under 51%.
+    ///
+    /// So the radius covers half a step plus a margin, and the miss rate goes to zero.
+    /// </summary>
+    public static int SearchPadFor(int iconPx) => Math.Clamp(SearchPadWanted(iconPx), 4, SearchPadCap);
+
+    /// <summary>What the geometry asks for, before the cost cap. Exposed so the caller can SAY when
+    /// the cap has bitten — a cap that silently narrows the search is the original bug wearing a
+    /// different hat, and it would present identically: real copies reported as "not a copy".</summary>
+    public static int SearchPadWanted(int iconPx) => (int)Math.Ceiling(iconPx / 6.0) + 2;
+
+    /// <summary>Cost ceiling. The search is (2p+1)² correlations, so this is quadratic — 40 covers
+    /// every icon up to 228 px, which is past any sane inventory slot on any display.</summary>
+    public const int SearchPadCap = 40;
 
     /// <summary>
     /// The best correlation obtainable near a point, and where it was found.
@@ -426,6 +451,7 @@ public static class QuestFind
     public static (double Best, int Dx, int Dy) BestNcc(Bitmap frame, double cx, double cy, IconPatch reference,
                                                         int wantW = 0, int wantH = 0)
     {
+
         if (!reference.Ok) return (-1, 0, 0);
         byte[] want = reference.Pixels;
         int w = reference.W, h = reference.H;
@@ -437,29 +463,58 @@ public static class QuestFind
 
         int px = (int)Math.Round(cx * frame.Width) - w / 2;
         int py = (int)Math.Round(cy * frame.Height) - h / 2;
-        int pad = NccSearchPx;
+        // Sized to the step the proposals actually came in on, per axis.
+        int padX = SearchPadFor(w), padY = SearchPadFor(h);
 
-        // ONE lock over the whole search area instead of one per offset. Eighty-one LockBits calls
-        // per candidate, each copying its own buffer, is most of the cost of this method.
-        int rw = w + pad * 2, rh = h + pad * 2;
-        byte[]? region = RawRgb(frame, px - pad, py - pad, rw, rh);
-        if (region is null)
-        {
-            // Against the window edge the padded region doesn't fit. Fall back to the unpadded
-            // compare rather than reporting "no match" for every square along the edge of the bag.
-            byte[]? only = RawRgb(frame, px, py, w, h);
-            return only is null ? (-1, 0, 0) : (Ncc(want, only), 0, 0);
-        }
+        // CLAMPED to the frame rather than abandoned at it. Returning "no match" for anything near
+        // the window edge would blind the sweep to whole rows of the bag — the bottom row of an
+        // inventory sits within a few pixels of the bottom of the screen.
+        int x0 = Math.Max(0, px - padX), y0 = Math.Max(0, py - padY);
+        int x1 = Math.Min(frame.Width, px + w + padX), y1 = Math.Min(frame.Height, py + h + padY);
+        int rw = x1 - x0, rh = y1 - y0;
+        // rw < w only when the icon itself doesn't fit on the frame, so there is nothing to compare
+        // against and no fallback that would mean anything. The caller narrates this as "too close
+        // to the edge of the window to compare", which is exactly what it is.
+        if (rw < w || rh < h) return (-1, 0, 0);
 
-        var probe = new byte[w * h * 3];
+        // ONE lock over the whole search area instead of one per offset. Hundreds of LockBits calls
+        // per candidate, each copying its own buffer, would be most of the cost of this method.
+        byte[]? region = RawRgb(frame, x0, y0, rw, rh);
+        if (region is null) return (-1, 0, 0);
+
+        // The reference's mean and spread are the same for every offset, so they are computed once
+        // instead of up to two thousand times — and the probe is correlated straight out of the
+        // region, so nothing is copied per offset either. Between them that is most of the work.
+        int n = w * h * 3;
+        double sw = 0;
+        for (int i = 0; i < want.Length; i++) sw += want[i];
+        double mw = sw / n;
+        double dw = 0;
+        for (int i = 0; i < want.Length; i++) { double d = want[i] - mw; dw += d * d; }
+        if (dw <= 1e-9) return (0, 0, 0);            // a flat reference correlates with nothing
+
         double best = -1; int bx = 0, by = 0;
-        for (int dy = 0; dy < pad * 2 + 1; dy++)
-            for (int dx = 0; dx < pad * 2 + 1; dx++)
+        for (int dy = 0; dy + h <= rh; dy++)
+            for (int dx = 0; dx + w <= rw; dx++)
             {
+                double sb = 0, sbb = 0, sab = 0;
                 for (int y = 0; y < h; y++)
-                    Array.Copy(region, ((y + dy) * rw + dx) * 3, probe, y * w * 3, w * 3);
-                double v = Ncc(want, probe);
-                if (v > best) { best = v; bx = dx - pad; by = dy - pad; }
+                {
+                    int ri = ((y + dy) * rw + dx) * 3;
+                    int wi = y * w * 3;
+                    for (int k = 0; k < w * 3; k++)
+                    {
+                        double b = region[ri + k];
+                        sb += b; sbb += b * b; sab += want[wi + k] * b;
+                    }
+                }
+                // Same quantity as Ncc, rearranged so one pass over the probe does it:
+                //   Σ(a-ā)(b-b̄) = Σab − n·ā·b̄      Σ(b-b̄)² = Σb² − n·b̄²
+                double mb = sb / n;
+                double db = sbb - n * mb * mb;
+                if (db <= 1e-9) continue;
+                double v = (sab - n * mw * mb) / Math.Sqrt(dw * db);
+                if (v > best) { best = v; bx = x0 + dx - px; by = y0 + dy - py; }
             }
         return (best, bx, by);
     }
