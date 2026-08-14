@@ -63,6 +63,22 @@ public sealed class MergePlan
     public double[]? IconSigFine { get; set; }
 
     /// <summary>
+    /// The copy's icon as its ACTUAL PIXELS, at the size the game draws them.
+    ///
+    /// Everything above this is a summary, and summaries were the whole problem. Measured on
+    /// same-palette icons the 12×12 signature scores a DIFFERENT icon at 26 and the RIGHT icon,
+    /// three pixels out of alignment, at 37 — the wrong item looks more like the reference than the
+    /// right one does, so no threshold exists that keeps one and drops the other. That is not a
+    /// number that needed tuning; it is a measure that cannot answer the question.
+    ///
+    /// Matched by normalized cross-correlation over a ±4 px alignment search, the same pair scores
+    /// 0.98 for the real icon and 0.44 for the wrong one. Hayden asked for the squares to be
+    /// compared with the pixels that are actually there. This is that.
+    /// </summary>
+    public QuestFind.IconPatch? IconPixels { get; set; }
+    [JsonIgnore] public bool HasPixels => IconPixels is { Ok: true };
+
+    /// <summary>
     /// Icons that looked like a copy and merged nothing. Fine-grid signatures, learned in the field
     /// and kept: the totem she picked up last night is the totem still in the bag tonight.
     ///
@@ -94,7 +110,10 @@ public sealed class MergePlan
     /// The icon scan still PROPOSES squares, because it is cheap and it narrows a five-rucksack
     /// bag to a handful of candidates. The name DECIDES.
     /// </summary>
-    public bool ConfirmByName { get; set; } = true;
+    /// Default OFF now that the pixels decide. It hovers and OCRs one square at a time — about a
+    /// second each — which is fine as a last check on the two squares a precise scan proposes and
+    /// hopeless as a way to search a bag with hundreds of slots in it.
+    public bool ConfirmByName { get; set; }
 
     [JsonIgnore] public bool HasIcon => IconSig is { Length: 108 };
     [JsonIgnore] public bool HasIconSize => IconW > 0.002 && IconH > 0.002;
@@ -436,6 +455,20 @@ public sealed class MergeRole
     /// as a different item. Generous on purpose: the confirm exists to catch a DIFFERENT icon (a
     /// totem lands far past this), not to police the few points a real copy drifts by when the
     /// sliding window lands half a pixel off.</summary>
+    /// <summary>
+    /// How alike the pixels have to be. 1.0 is identical.
+    ///
+    /// Measured on same-palette icons: a real copy three pixels out of alignment and 20% brighter
+    /// still scores 0.979, and the closest different icon scores 0.437. The bar sits in the middle
+    /// of a gap half the scale wide, which is what a threshold is supposed to look like — every
+    /// number this file had before was chosen inside the noise.
+    /// </summary>
+    private const double NccAccept = 0.85;
+
+    /// <summary>What the colour pass hands to the pixel test. Deliberately loose: a false candidate
+    /// costs a fraction of a millisecond to reject and a missed one costs a copy.</summary>
+    private const double CoarsePropose = 60;
+
     private const double FineLimit = 45;
     /// <summary>
     /// Once a merge has been confirmed by the counter, the run knows what a real copy of THIS item
@@ -471,7 +504,8 @@ public sealed class MergeRole
     private const double RejectSafety = 12;
 
     /// <summary>A candidate, with everything that was known about it before anything was clicked.</summary>
-    private sealed record Candidate(QuestFind.IconHit Hit, double[]? Fine, double FineDist, double RejectDist);
+    private sealed record Candidate(QuestFind.IconHit Hit, double[]? Fine, double FineDist, double RejectDist,
+                                   double Ncc = -1);
 
     /// <summary>What one look at the bag produced.</summary>
     /// <param name="Read">False = the screen could not be read at all. The caller must NOT confuse
@@ -485,7 +519,8 @@ public sealed class MergeRole
     private sealed record Look(bool Read, Candidate? Pick, int Seen,
                                List<(double X, double Y)> KnownWrong,
                                List<(double X, double Y)> BelowBar,
-                               double ClosestDist);
+                               double ClosestDist,
+                               int Accepted = 0);
 
     /// <summary>
     /// Look at the bag and choose the next copy — or decide there isn't one.
@@ -497,6 +532,10 @@ public sealed class MergeRole
     /// last real copy would find a totem, pick it up, fail to merge it, put it back, and go find
     /// the next totem. Five of those and it stopped — but it should never have touched the first.
     /// </summary>
+    /// <summary>Positions already narrated as "not a copy", so re-judging them on every pass — which
+    /// is what keeps one bad frame from being a life sentence — doesn't re-narrate them every pass.</summary>
+    private readonly HashSet<(int, int)> _saidBelow = new();
+
     private Look LookForCopy(IReadOnlyCollection<(double X, double Y)> skip, double confirmedFine)
     {
         var knownWrong = new List<(double X, double Y)>();
@@ -505,8 +544,14 @@ public sealed class MergeRole
         using System.Drawing.Bitmap? frame = QuestFind.Capture(_hwnd());
         if (frame is null) return new Look(false, null, 0, knownWrong, belowBar, 999);
 
+        // A PROPOSER, not a judge. With the pixels deciding, the colour pass should hand over
+        // everything that could plausibly be the item and let the real test throw them out — the
+        // field log showed real copies scoring 25–29 against a bar of 35, which is close enough to
+        // the edge that a slightly different slot background would have silently dropped them
+        // before anything ever looked at them properly.
+        double proposeAt = _plan.HasPixels ? CoarsePropose : QuestFind.SlidingAcceptDistance;
         List<QuestFind.IconHit> all = QuestFind.FindAllIcons(frame, _plan.BagX, _plan.BagY, _plan.BagW, _plan.BagH,
-            _plan.IconSig!, _plan.IconW, _plan.IconH, QuestFind.SlidingAcceptDistance);
+            _plan.IconSig!, _plan.IconW, _plan.IconH, proposeAt);
         double limit = _plan.HasFineIcon && confirmedFine >= 0
             ? Math.Clamp(confirmedFine + FineDrift, FineFloor, FineLimit)
             : FineLimit;
@@ -520,10 +565,44 @@ public sealed class MergeRole
         // Materialised ONCE. `Rejects` is a LINQ filter over the stored list, and re-running it
         // inside the candidate loop re-filters for every square in the bag.
         List<double[]> rejects = _plan.RejectSnapshot();
+        int accepted = 0;
         foreach (QuestFind.IconHit h in all)
         {
             if (skip.Any(k => Math.Abs(k.X - h.X) < _plan.IconW * 0.5 && Math.Abs(k.Y - h.Y) < _plan.IconH * 0.5))
                 continue;
+
+            // THE PIXELS DECIDE. When the plan has them, the signature machinery below is skipped
+            // entirely — it exists to answer a question this answers better.
+            if (_plan.HasPixels)
+            {
+                (double best, int ddx, int ddy) = QuestFind.BestNcc(frame, h.X, h.Y, _plan.IconPixels!,
+                    (int)Math.Round(_plan.IconW * frame.Width), (int)Math.Round(_plan.IconH * frame.Height));
+                ActivityLog.Detail(MergeSource,
+                    $"pixels at {h.X * 100:0.0}%,{h.Y * 100:0.0}% → {best:0.000} (coarse {h.Dist:0.0}, "
+                    + $"aligned {ddx:+#;-#;0},{ddy:+#;-#;0})");
+                if (best < NccAccept)
+                {
+                    // NOT remembered. A correlation is a judgement about ONE FRAME, and it is far
+                    // more fragile than a colour average: a tooltip edge, the cursor, a highlight
+                    // border or a merge animation across the slot all destroy it while leaving the
+                    // coarse distance well inside the loose proposal bar. Writing the square off for
+                    // the whole run on that basis would lose real copies to a moment of bad luck, so
+                    // each pass judges afresh and the only cost of being wrong is a millisecond.
+                    ActivityLog.Detail(MergeSource,
+                        $"below the bar at {h.X * 100:0.0}%,{h.Y * 100:0.0}%: {best:0.000}");
+                    if (_saidBelow.Add(((int)(h.X * 1000), (int)(h.Y * 1000))))
+                        Log?.Invoke(best < 0
+                            ? $"· couldn't read the pixels at {h.X * 100:0.0}%, {h.Y * 100:0.0}% — too close to the "
+                              + "edge of the window to compare."
+                            : $"· not a copy at {h.X * 100:0.0}%, {h.Y * 100:0.0}% — the pixels match "
+                              + $"{best * 100:0.0}%, and a real one matches over {NccAccept * 100:0}%.");
+                    continue;
+                }
+                accepted++;
+                Log?.Invoke($"· {h.X * 100:0.0}%, {h.Y * 100:0.0}% matches the copy's pixels {best * 100:0.0}%.");
+                return new Look(true, new Candidate(h, null, -1, double.MaxValue, best), all.Count,
+                                knownWrong, belowBar, h.Dist, accepted);
+            }
 
             double[]? fine = QuestFind.SigFromRegion(frame, h.X - _plan.IconW / 2, h.Y - _plan.IconH / 2,
                                                      _plan.IconW, _plan.IconH, QuestFind.SigGridFine);
@@ -764,7 +843,7 @@ public sealed class MergeRole
         return tokens.Count(t => TokenPresent(hay, t));
     }
 
-    private static string Trim(string s, int n) => (s ?? "").Length <= n ? (s ?? "") : s[..n] + "…";
+    private static string Trim(string? s, int n) => (s ?? "").Length <= n ? (s ?? "") : s![..n] + "…";
 
     /// <summary>
     /// Letters only, lower case, spaces removed.
@@ -828,14 +907,37 @@ public sealed class MergeRole
     /// page can ask it without starting a run: "how far does what I already have get me?" is a
     /// question you want answered BEFORE three thousand clicks, not after.
     /// </summary>
-    public static int CountCopies(IntPtr hwnd, MergePlan plan)
+    public static int CountCopies(IntPtr hwnd, MergePlan plan) => ScanCopies(hwnd, plan)?.Count ?? -1;
+
+    /// <summary>
+    /// Every copy in the bag area with the score that says so — the same two passes the sweep uses,
+    /// so the number on the page and the number the sweep acts on can never disagree.
+    /// </summary>
+    /// <returns>NULL when the screen could not be read at all — which the caller must NOT render as
+    /// "0 copies" in green. An empty bag and a bag nobody could see are different answers, and the
+    /// count button's whole job is to tell you which one you have.</returns>
+    public static List<(double X, double Y, double Score)>? ScanCopies(IntPtr hwnd, MergePlan plan)
     {
-        if (!plan.ScanReady) return -1;
+        var outp = new List<(double, double, double)>();
+        if (!plan.ScanReady) return null;
         using System.Drawing.Bitmap? frame = QuestFind.Capture(hwnd);
-        if (frame is null) return -1;
-        return QuestFind.FindAllIcons(frame, plan.BagX, plan.BagY, plan.BagW, plan.BagH,
-                                      plan.IconSig!, plan.IconW, plan.IconH,
-                                      QuestFind.SlidingAcceptDistance).Count;
+        if (frame is null) return null;
+
+        double at = plan.HasPixels ? CoarsePropose : QuestFind.SlidingAcceptDistance;
+        List<QuestFind.IconHit> all = QuestFind.FindAllIcons(frame, plan.BagX, plan.BagY, plan.BagW, plan.BagH,
+                                                             plan.IconSig!, plan.IconW, plan.IconH, at);
+        if (!plan.HasPixels)
+        {
+            foreach (QuestFind.IconHit h in all) outp.Add((h.X, h.Y, h.Dist));
+            return outp;
+        }
+        foreach (QuestFind.IconHit h in all)
+        {
+            (double best, _, _) = QuestFind.BestNcc(frame, h.X, h.Y, plan.IconPixels!);
+            if (best >= NccAccept) outp.Add((h.X, h.Y, best));
+        }
+        outp.Sort((a, b) => b.Item3.CompareTo(a.Item3));
+        return outp;
     }
 
     private bool ClickAt(double nx, double ny, int settleMs, CancellationToken ct = default)
@@ -1006,10 +1108,10 @@ public sealed class MergeRole
                      + "name check off (and know that the icon alone has twice picked up the wrong item).");
                 return;
             }
-            if (_plan.ConfirmByName && (_plan.ItemName ?? "").Trim().Length > 0)
-                Log?.Invoke($"· name gate ARMED — every square gets hovered and has to read back as "
-                          + $"\"{_plan.ItemName.Trim()}\" before anything is picked up. "
-                          + "Words: " + string.Join(", ", NameTokens(_plan.ItemName)) + ".");
+            if (_plan.ConfirmByName && wantName.Length > 0)
+                Log?.Invoke($"· name gate ARMED — every square that passes the pixel test gets hovered and has to "
+                          + $"read back as \"{wantName}\" before anything is picked up. "
+                          + "Words: " + string.Join(", ", NameTokens(wantName)) + ".");
             else
                 Log?.Invoke(_plan.ConfirmByName
                     ? "⚠ name gate OFF — no item name is set, so she is going on the icon alone. Type the item's "
@@ -1040,7 +1142,17 @@ public sealed class MergeRole
                           + "own \"+5\" label can't pass the name check for it — which means tooltips over that "
                           + "part of the bag are ignored too. Drag the item window clear of the bags.");
 
-            if (_plan.ScanReady)
+            if (_plan.HasPixels)
+                Log?.Invoke($"· matching the copy's ACTUAL PIXELS ({_plan.IconPixels!.W}×{_plan.IconPixels.H}), "
+                          + $"nudged ±{QuestFind.NccSearchPx} px to find the best fit. A square has to match over "
+                          + $"{NccAccept * 100:0}% to be touched; a different icon in the same colours scores "
+                          + "around 45%.");
+            else if (_plan.ScanReady)
+                Log?.Invoke("⚠ this plan has no pixel copy of the icon, so she is falling back to the colour "
+                          + "signatures — which cannot separate two icons drawn from one palette, and twice "
+                          + "haven't. Re-pick the copy's icon once to fix that.");
+
+            if (_plan.ScanReady && !_plan.HasPixels)
             {
                 int rejects = _plan.Rejects.Count();
                 Log?.Invoke(_plan.HasFineIcon
@@ -1150,7 +1262,12 @@ public sealed class MergeRole
                                  + "looks running. Is the game on screen and the bag still open?");
                             return;
                         }
-                        if (look.Seen == 0)
+                        // Coarse hits are PROPOSALS, and the proposal bar is deliberately loose, so
+                        // an almost-empty bag still produces plenty of them. What actually means
+                        // "nothing here" is that nothing PASSED — and that is the count that deserves
+                        // a second and third look before the run believes the bag is empty.
+                        int nothingHere = _plan.HasPixels ? look.Accepted : look.Seen;
+                        if (nothingHere == 0)
                         {
                             // Nothing at all under the coarse bar. That is as easily a bag that got
                             // covered as a bag that got empty, so look again before believing it.
@@ -1188,8 +1305,11 @@ public sealed class MergeRole
                                 : tried.Count > 0
                                     ? $"No more copies in the bag area — the {tried.Count} square(s) still matching "
                                       + "are ones she already tried without the counter moving."
-                                    : $"No more copies in the bag area — closest match was {look.ClosestDist:0}, "
-                                      + $"and a real one scores under {QuestFind.SlidingAcceptDistance:0}.");
+                                    : _plan.HasPixels
+                                        ? "No more copies in the bag area — nothing in it matched the copy's "
+                                          + $"pixels closely enough (the bar is {NccAccept * 100:0}%)."
+                                        : $"No more copies in the bag area — closest match was {look.ClosestDist:0}"
+                                          + $", and a real one scores under {QuestFind.SlidingAcceptDistance:0}.");
                         vetoedTotal = vetoed;
                         break;
                     }
@@ -1198,7 +1318,9 @@ public sealed class MergeRole
                     QuestFind.IconHit copy = look.Pick.Hit;
                     pendingFine = look.Pick.Fine;
                     sx = copy.X; sy = copy.Y;
-                    where = $"copy at {copy.X * 100:0.0}%, {copy.Y * 100:0.0}% (match {copy.Dist:0}"
+                    where = look.Pick.Ncc >= 0
+                        ? $"copy at {copy.X * 100:0.0}%, {copy.Y * 100:0.0}% (pixels {look.Pick.Ncc * 100:0.0}%)"
+                        : $"copy at {copy.X * 100:0.0}%, {copy.Y * 100:0.0}% (match {copy.Dist:0}"
                           + (look.Pick.FineDist >= 0 ? $", close-up {look.Pick.FineDist:0}" : "") + ")";
                 }
                 else
@@ -1219,6 +1341,10 @@ public sealed class MergeRole
                 // item is still sitting in its own square where it belongs.
                 if (grid is null && _plan.ConfirmByName && wantName.Length > 0)
                 {
+                    // Reached only for squares that already passed the pixel test, so this is a last
+                    // word on one or two squares rather than a walk through the bag. As a SEARCH it
+                    // was hopeless: a second a square, twenty-five squares, and hundreds to go.
+
                     Stats.State = "reading the name at " + $"{sx * 100:0.0}%, {sy * 100:0.0}%";
                     NameLook look2 = await ReadNameAtAsync(sx, sy, wantName, ct);
                     if (ct.IsCancellationRequested) { cancelled = true; break; }
@@ -1561,7 +1687,10 @@ public sealed class MergeRole
                     //    explanation that has nothing to do with the item: the merge worked and the
                     //    window had not repainted when it was read. Anything scoring inside the band
                     //    a confirmed copy scored is treated as that, not as a look-alike.
-                    if (grid is null && pendingFine is not null && _plan.HasFineIcon)
+                    // Only in signature mode. A learned reject exists because the signatures could not
+                    // tell two icons apart; the pixels can, so there is nothing for it to add and a
+                    // persisted blacklist is the one mistake here with no symptom.
+                    if (grid is null && pendingFine is not null && _plan.HasFineIcon && !_plan.HasPixels)
                     {
                         double d = QuestFind.SigDistance(pendingFine, _plan.IconSigFine!);
                         double bar = Math.Max(RejectMinDistance, confirmedFine + RejectSafety);

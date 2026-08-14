@@ -89,17 +89,18 @@ public partial class MainWindow
             p.MergeButton.Set ? () => ShowMergeShot(p, "merge", "The Merge Item button",
                 "Pressed once per copy. If the item window has moved since, re-pick it.") : null));
         tiles.Children.Add(MakePickTile("ui-pick-slot.jpg", "the copy's icon",
-            p.HasIcon ? (!p.HasIconSize ? "⚠ re-pick me" : p.HasFineIcon ? "found by sight" : "⚠ colour only") : "she matches this", "",
+            p.HasIcon ? (!p.HasIconSize ? "⚠ re-pick me" : p.HasPixels ? "pixel-exact" : "⚠ colour only") : "she matches this", "",
             p.HasIcon,
             "Drag a TIGHT box around ONE of the copies in your bag. She learns its icon and then finds every other "
             + "copy by sight — so only squares that actually hold one get clicked. Click the READY badge to see "
             + "exactly what she compares against.\n\n"
-            + (p.HasIcon && !p.HasFineIcon
-                ? "⚠ This pick predates the close-up confirm, so right now only the COLOUR of the icon is being "
-                + "matched — which cannot separate two items drawn from the same palette. Re-pick it once to arm "
-                + "the confirm."
-                : "Two screens: the colours find the candidates, and a close-up of the same box decides which of "
-                + "them is really a copy."),
+            + (p.HasIcon && !p.HasPixels
+                ? "⚠ This pick predates pixel matching, so only the COLOURS of the icon are being compared — which "
+                + "cannot separate two items drawn from the same palette, and twice hasn't. Re-pick it once and she "
+                + "keeps the icon's actual pixels instead."
+                : "The colours find the candidates fast; the icon's ACTUAL PIXELS decide which of them is really a "
+                + "copy, nudged a few pixels either way to find the best fit. A real copy matches over 85% even "
+                + "misaligned and dimmed; a different icon in the same colours scores around 45%."),
             () => { if (PickMergeRect(r => { }, "one copy of the item",
                         "Drag a TIGHT box around ONE copy in your bag — right up to the icon's edges — then press Enter.",
                         sh => Shot(p, "item", sh),
@@ -125,6 +126,10 @@ public partial class MainWindow
                             }
                             p.IconSig = sig;
                             p.IconSigFine = fine;
+                            // The pixels themselves, from the same drag on the same frame. This is
+                            // what actually decides now; the two signatures above are the fast
+                            // screen in front of it and the fallback behind it.
+                            p.IconPixels = QuestFind.PatchFromRegion(frame, box.X, box.Y, box.W, box.H);
                             p.IconW = box.W; p.IconH = box.H;
                             // Everything she learned to avoid was learned by comparing against the
                             // OLD picture. Against a new one those comparisons mean nothing, and a
@@ -544,7 +549,19 @@ public partial class MainWindow
             }
 
             IntPtr h = _grindTarget;
-            int copies = await Task.Run(() => MergeRole.CountCopies(h, MergePlan.Current));
+            List<(double X, double Y, double Score)>? found =
+                await Task.Run(() => MergeRole.ScanCopies(h, MergePlan.Current));
+            // null means the screen couldn't be read. -1 is the sentinel every branch below and the
+            // forecast already understand; reporting it as 0 would print "Found 0 copy(s)" in green
+            // over a bag nobody could see.
+            int copies = found?.Count ?? -1;
+            // The SPREAD, not just the count. Whether the threshold is in the right place is a
+            // question about the gap between the copies and everything else, and that gap is only
+            // visible if the numbers are printed.
+            if (MergePlan.Current.HasPixels && found is { Count: > 0 })
+                ActivityLog.Record(MergeSource, $"· pixel match on the {found.Count} copy(s) found: "
+                    + string.Join(", ", found.Take(12).Select(f => $"{f.Score * 100:0.0}%"))
+                    + (found.Count > 12 ? " …" : ""));
             if (p.TierSet)
             {
                 string txt = await ScreenText.ReadRectAsync(h, p.TierX, p.TierY, p.TierW, p.TierH);

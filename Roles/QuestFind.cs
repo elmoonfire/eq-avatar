@@ -267,6 +267,203 @@ public static class QuestFind
         return best;
     }
 
+    // ---------------------------------------------------------------- matching the actual pixels
+
+    /// <summary>
+    /// An icon's REAL pixels, at the size the game draws them.
+    ///
+    /// Every signature above this line throws information away: a 6×6 or even a 12×12 grid of
+    /// average colours over a 26-pixel icon is a summary, and summaries of two brown-and-gold
+    /// necklace icons look alike no matter how many cells you use. There are 26×26×3 ≈ 2,000
+    /// numbers actually on the screen. This keeps all of them.
+    /// </summary>
+    public sealed class IconPatch
+    {
+        public int W { get; set; }
+        public int H { get; set; }
+        /// <summary>Row-major RGB, 3 bytes a pixel. Base64 in the plan file — about 2.7 KB.</summary>
+        public string Data { get; set; } = "";
+
+        /// <summary>The window width this was learned at. Without it the patch is a pixel count with
+        /// no idea what it was a pixel count OF, and a resized game window turns every real copy
+        /// into a miss with nothing on screen to say why.</summary>
+        public int FrameW { get; set; }
+        public int FrameH { get; set; }
+
+        [System.Text.Json.Serialization.JsonIgnore] private byte[]? _px;
+        [System.Text.Json.Serialization.JsonIgnore]
+        public byte[] Pixels
+        {
+            get
+            {
+                // Decoding happens behind a property that `HasPixels` reads during a render pass.
+                // A hand-edited or truncated file would otherwise throw a FormatException out of a
+                // getter, unwind through a click handler, and close the app — so a broken patch
+                // degrades to "no pixels" and the page says colour-only instead.
+                if (_px is not null) return _px;
+                try { _px = Data.Length > 0 ? Convert.FromBase64String(Data) : Array.Empty<byte>(); }
+                catch { _px = Array.Empty<byte>(); }
+                return _px;
+            }
+        }
+        [System.Text.Json.Serialization.JsonIgnore]
+        public bool Ok => W > 3 && H > 3 && Pixels.Length == W * H * 3;
+    }
+
+    /// <summary>
+    /// How alike two patches are, as normalized cross-correlation: 1.0 identical, 0 unrelated.
+    ///
+    /// NOT the mean absolute difference the signatures used. That measure moves when the picture
+    /// gets brighter, when the slot behind it is highlighted, and when the window lands a pixel
+    /// off — so a real copy scored 45–53 against a bar of 45 and the bar had to sit exactly on top
+    /// of the noise. Cross-correlation subtracts each patch's own mean and divides by its own
+    /// spread, so a uniform brightness or contrast shift cancels out entirely and what is left is
+    /// whether the two pictures have the same SHAPE. Real copies land near 0.95; a different icon
+    /// with the same palette lands near 0.5. That gap is what makes a threshold meaningful.
+    /// </summary>
+    public static double Ncc(byte[] a, byte[] b)
+    {
+        int n = Math.Min(a.Length, b.Length);
+        if (n == 0) return -1;
+        double sa = 0, sb = 0;
+        for (int i = 0; i < n; i++) { sa += a[i]; sb += b[i]; }
+        double ma = sa / n, mb = sb / n;
+        double num = 0, da = 0, db = 0;
+        for (int i = 0; i < n; i++)
+        {
+            double x = a[i] - ma, y = b[i] - mb;
+            num += x * y; da += x * x; db += y * y;
+        }
+        // A patch with no variation at all (a flat empty slot) correlates with nothing. Saying "no
+        // match" is right; saying "divide by zero" is not.
+        if (da <= 1e-9 || db <= 1e-9) return 0;
+        return num / Math.Sqrt(da * db);
+    }
+
+    /// <summary>Lift a rectangle of a frame out as raw RGB at its real size.</summary>
+    public static byte[]? RawRgb(Bitmap frame, int x0, int y0, int w, int h)
+    {
+        if (w <= 0 || h <= 0 || x0 < 0 || y0 < 0 || x0 + w > frame.Width || y0 + h > frame.Height) return null;
+        BitmapData data = frame.LockBits(new Rectangle(x0, y0, w, h), ImageLockMode.ReadOnly,
+                                         PixelFormat.Format32bppArgb);
+        try
+        {
+            // ROW BY ROW. A sub-rect lock hands back the PARENT bitmap's stride, so `new byte[stride*h]`
+            // is a full-window-width strip — 200 KB for a 26 px icon, which is over the large-object
+            // threshold, allocated once per correlation offset. It also reads past the end of the
+            // pixel buffer on the last row whenever x0 > 0, which the bag's bottom row can reach.
+            int stride = data.Stride;
+            var row = new byte[w * 4];
+            var outp = new byte[w * h * 3];
+            for (int y = 0; y < h; y++)
+            {
+                Marshal.Copy(IntPtr.Add(data.Scan0, y * stride), row, 0, row.Length);
+                for (int x = 0; x < w; x++)
+                {
+                    int i = x * 4;                          // BGRA
+                    int o = (y * w + x) * 3;
+                    outp[o] = row[i + 2]; outp[o + 1] = row[i + 1]; outp[o + 2] = row[i];
+                }
+            }
+            return outp;
+        }
+        finally { frame.UnlockBits(data); }
+    }
+
+    /// <summary>Learn an icon's pixels from the frame the user drew on.</summary>
+    public static IconPatch? PatchFromRegion(Bitmap frame, double nx, double ny, double nw, double nh)
+    {
+        int x0 = (int)Math.Round(nx * frame.Width), y0 = (int)Math.Round(ny * frame.Height);
+        int w = (int)Math.Round(nw * frame.Width), h = (int)Math.Round(nh * frame.Height);
+        if (w < 4 || h < 4) return null;
+        byte[]? px = RawRgb(frame, x0, y0, w, h);
+        if (px is null) return null;
+        return new IconPatch
+        { W = w, H = h, FrameW = frame.Width, FrameH = frame.Height, Data = Convert.ToBase64String(px) };
+    }
+
+    /// <summary>How far, in pixels, to hunt for the best alignment around a proposed centre.</summary>
+    public const int NccSearchPx = 4;
+
+    /// <summary>
+    /// The best correlation obtainable near a point, and where it was found.
+    ///
+    /// The search window is the whole point. The coarse scan steps in thirds of an icon, so its idea
+    /// of "here" is several pixels out — and at native resolution being three pixels out turns an
+    /// identical picture into a poor score. Nudging within ±4 px and keeping the best is what makes
+    /// the number mean "is this the same icon" instead of "did the slider happen to land square".
+    /// </summary>
+    /// <summary>Nearest-neighbour resample of a raw RGB patch. Only ever used to follow a window
+    /// resize, where the alternative is every real copy quietly failing to match.</summary>
+    public static byte[] Resample(byte[] src, int sw, int sh, int dw, int dh)
+    {
+        var dst = new byte[dw * dh * 3];
+        for (int y = 0; y < dh; y++)
+        {
+            int sy = Math.Min(sh - 1, y * sh / dh);
+            for (int x = 0; x < dw; x++)
+            {
+                int sx = Math.Min(sw - 1, x * sw / dw);
+                int so = (sy * sw + sx) * 3, dof = (y * dw + x) * 3;
+                dst[dof] = src[so]; dst[dof + 1] = src[so + 1]; dst[dof + 2] = src[so + 2];
+            }
+        }
+        return dst;
+    }
+
+    /// <summary>
+    /// The best correlation obtainable near a point, and where it was found.
+    ///
+    /// The search window is the whole point. The coarse scan steps in thirds of an icon, so its idea
+    /// of "here" is several pixels out — and at native resolution being three pixels out turns an
+    /// identical picture into a poor score. Nudging within ±4 px and keeping the best is what makes
+    /// the number mean "is this the same icon" instead of "did the slider happen to land square".
+    /// </summary>
+    /// <param name="wantW">The icon's size in the CURRENT window, if it differs from the size the
+    /// patch was learned at. The patch is stored in pixels but located by fractions, so a resized
+    /// window would otherwise compare a 26 px reference against a 21 px icon plus five pixels of a
+    /// neighbouring slot — every real copy failing, and nothing on screen to say why.</param>
+    public static (double Best, int Dx, int Dy) BestNcc(Bitmap frame, double cx, double cy, IconPatch reference,
+                                                        int wantW = 0, int wantH = 0)
+    {
+        if (!reference.Ok) return (-1, 0, 0);
+        byte[] want = reference.Pixels;
+        int w = reference.W, h = reference.H;
+        if (wantW > 3 && wantH > 3 && (wantW != w || wantH != h))
+        {
+            want = Resample(want, w, h, wantW, wantH);
+            w = wantW; h = wantH;
+        }
+
+        int px = (int)Math.Round(cx * frame.Width) - w / 2;
+        int py = (int)Math.Round(cy * frame.Height) - h / 2;
+        int pad = NccSearchPx;
+
+        // ONE lock over the whole search area instead of one per offset. Eighty-one LockBits calls
+        // per candidate, each copying its own buffer, is most of the cost of this method.
+        int rw = w + pad * 2, rh = h + pad * 2;
+        byte[]? region = RawRgb(frame, px - pad, py - pad, rw, rh);
+        if (region is null)
+        {
+            // Against the window edge the padded region doesn't fit. Fall back to the unpadded
+            // compare rather than reporting "no match" for every square along the edge of the bag.
+            byte[]? only = RawRgb(frame, px, py, w, h);
+            return only is null ? (-1, 0, 0) : (Ncc(want, only), 0, 0);
+        }
+
+        var probe = new byte[w * h * 3];
+        double best = -1; int bx = 0, by = 0;
+        for (int dy = 0; dy < pad * 2 + 1; dy++)
+            for (int dx = 0; dx < pad * 2 + 1; dx++)
+            {
+                for (int y = 0; y < h; y++)
+                    Array.Copy(region, ((y + dy) * rw + dx) * 3, probe, y * w * 3, w * 3);
+                double v = Ncc(want, probe);
+                if (v > best) { best = v; bx = dx - pad; by = dy - pad; }
+            }
+        return (best, bx, by);
+    }
+
     // ---------------------------------------------------------------- the NPC by nameplate
 
     /// <summary>The most OCR-able token of an NPC's name — longest run of letters, 4+ chars
