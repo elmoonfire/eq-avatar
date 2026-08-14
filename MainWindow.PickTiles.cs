@@ -196,6 +196,108 @@ public partial class MainWindow
     }
 
     /// <summary>
+    /// Wrap a console body in a bordered box with a DRAG GRIP under it.
+    ///
+    /// The consoles start small because the card around them has other things to show — but small
+    /// is the wrong size the moment you are actually tracking something, and five lines is not a
+    /// console, it is a peephole. Drag the grip to any height between 64 and 900; double-click it
+    /// to go back to the default. The height is remembered in settings, so it survives the next
+    /// render (these consoles rebuild constantly) and the next launch.
+    /// </summary>
+    private FrameworkElement MakeResizableConsole(FrameworkElement body, string what)
+    {
+        double h = _settings.ConsoleHeight;
+        body.Height = double.IsFinite(h) ? Math.Clamp(h, MinConsoleHeight, MaxConsoleHeight) : DefaultConsoleHeight;
+
+        var box = new Border
+        {
+            CornerRadius = new CornerRadius(8, 8, 0, 0), BorderBrush = Hex("#26303F"),
+            BorderThickness = new Thickness(1, 1, 1, 0), ClipToBounds = true, Child = body,
+        };
+
+        var bars = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Center };
+        for (int i = 0; i < 3; i++)
+            bars.Children.Add(new Border
+            {
+                Width = 14, Height = 2, CornerRadius = new CornerRadius(1),
+                Background = Hex("#3A4A5E"), Margin = new Thickness(2, 0, 2, 0),
+                VerticalAlignment = VerticalAlignment.Center,
+            });
+
+        var grip = new Border
+        {
+            Height = 11, Background = Hex("#101826"), BorderBrush = Hex("#26303F"),
+            BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(0, 0, 8, 8),
+            Cursor = Cursors.SizeNS, Child = bars,
+            ToolTip = $"Drag to resize the {what} console · double-click to reset",
+        };
+        grip.MouseEnter += (_, _) => grip.Background = Hex("#16202E");
+        grip.MouseLeave += (_, _) => grip.Background = Hex("#101826");
+
+        // A press ARMS a drag; it does not start one. Starting on the press meant the first click
+        // of a double-click ran a whole drag — jitter moved the console, the release wrote the
+        // settings file, and then the second click reset it and wrote the file again. Worse, WPF
+        // only reports ClickCount == 2 when the second press lands within the system double-click
+        // DISTANCE, and this is a resize handle, so the hand is already moving: a slipped reset
+        // silently became a tiny drag with no feedback at all. Three pixels of travel is the
+        // difference between "I meant to grab this" and "I clicked it".
+        bool pressed = false, dragging = false;
+        double startY = 0, startH = 0;
+
+        grip.MouseLeftButtonDown += (_, e) =>
+        {
+            if (e.ClickCount == 2)
+            {
+                pressed = dragging = false;
+                if (grip.IsMouseCaptured) grip.ReleaseMouseCapture();
+                body.Height = DefaultConsoleHeight;
+                _settings.ConsoleHeight = DefaultConsoleHeight;
+                try { _settings.Save(); } catch { /* a remembered height is not worth an exception */ }
+                e.Handled = true;
+                return;
+            }
+            pressed = true;
+            dragging = false;
+            startY = e.GetPosition(this).Y;
+            startH = body.Height;
+            grip.CaptureMouse();
+            e.Handled = true;
+        };
+        grip.MouseMove += (_, e) =>
+        {
+            if (!pressed) return;
+            double dy = e.GetPosition(this).Y - startY;
+            if (!dragging && Math.Abs(dy) < 3) return;
+            dragging = true;
+            double next = Math.Clamp(startH + dy, MinConsoleHeight, MaxConsoleHeight);
+            body.Height = next;
+            // Written straight through WITHOUT saving: these cards rebuild on almost every log
+            // line, and a rebuild mid-drag must come back at the height the user has dragged to,
+            // not snap to the last one written to disk.
+            _settings.ConsoleHeight = next;
+        };
+        void End()
+        {
+            if (!pressed) return;
+            pressed = false;
+            bool moved = dragging;
+            dragging = false;
+            if (grip.IsMouseCaptured) grip.ReleaseMouseCapture();   // re-enters here; the guard holds
+            if (moved) { try { _settings.Save(); } catch { /* as above */ } }
+        }
+        grip.MouseLeftButtonUp += (_, _) => End();
+        // A rebuild under the cursor takes the capture away with it; without this the next click
+        // anywhere would resume a drag the user finished minutes ago.
+        grip.LostMouseCapture += (_, _) => End();
+
+        return new StackPanel { Children = { box, grip } };
+    }
+
+    private const double DefaultConsoleHeight = 96;
+    private const double MinConsoleHeight = 64;
+    private const double MaxConsoleHeight = 900;
+
+    /// <summary>
     /// The fire bar: a progress track whose fill glows orange, pulses a highlight slowly to the
     /// right, and flickers like firelight.
     ///

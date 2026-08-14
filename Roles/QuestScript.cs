@@ -137,9 +137,24 @@ public sealed class QuestScript
     /// offer that beats the assignment is refused — which cost one wasted offer and one full
     /// confirm timeout per cycle until this existed.</summary>
     public int AssignWaitSeconds { get; set; } = 3;
+
+    /// <summary>
+    /// Milliseconds to wait after dropping the item on the NPC, before pressing GIVE.
+    ///
+    /// This is the gap the give window has to appear in. It used to be a hard-coded 620 ms, and
+    /// every field log shows the same shape: the FIRST offer of an item goes unanswered and the
+    /// retry works — at identical, or even faster, click speed. The one thing that differs between
+    /// them is that by the retry the trade window is already open, so GIVE lands on a real button
+    /// instead of on nothing. Slower is nearly free (a second per hand-in) and a missed hand-in
+    /// costs twelve, so the default errs long. Tune it on the card if your machine is quicker.
+    /// </summary>
+    public int GiveSettleMs { get; set; } = 1100;
     /// <summary>Set once the script has been moved to the say-only flow, so a user who turns the
     /// hail back on deliberately is never overruled by the migration a second time.</summary>
     public bool FastFlowApplied { get; set; }
+    /// <summary>Whether the one-time drop of the old 8-second assignment wait has been applied to
+    /// this script. Remembered so a deliberately longer wait is never overruled twice.</summary>
+    public bool AssignWaitTrimmed { get; set; }
 
     // ---- smart find (0.10.8): the picks that MOVE get found, not remembered ----
     /// <summary>Find items by icon and the NPC by nameplate, falling back to the fixed picks.</summary>
@@ -221,7 +236,19 @@ public sealed class QuestScript
             HailFirst = false;
             TargetByName = false;
         }
-        if (AssignWaitSeconds <= 0 || AssignWaitSeconds > 8) AssignWaitSeconds = 3;
+        // ONE-TIME drop of the old 8-second default. 8 was what every existing script stored, and
+        // the first attempt at this clamped only values ABOVE 8 — so the stored 8 survived and the
+        // log went on saying "within 8s" after the fix had supposedly shipped. Widening it to >= 8
+        // fixed that and broke something else: this runs on EVERY load, so it would also have
+        // silently overruled anyone who set a longer wait on purpose, every launch, forever. Hence
+        // a remembered one-shot, the same shape as the fast-flow migration above.
+        if (!AssignWaitTrimmed)
+        {
+            AssignWaitTrimmed = true;
+            if (AssignWaitSeconds >= 8) AssignWaitSeconds = 3;
+        }
+        if (AssignWaitSeconds <= 0 || AssignWaitSeconds > 30) AssignWaitSeconds = 3;
+        if (GiveSettleMs < 200 || GiveSettleMs > 4000) GiveSettleMs = 1100;
         OpenBagsKey = (OpenBagsKey ?? "").Trim();       // null from an older file, or a hand edit
         Shots ??= new Dictionary<string, PickShot>();
         if (BagCols <= 0) BagCols = 2;
@@ -234,6 +261,11 @@ public sealed class QuestScript
         {
             Quest = q.Name,
             Npc = string.IsNullOrWhiteSpace(q.TurnIns.FirstOrDefault()?.Npc) ? q.EndNpc : q.TurnIns[0].Npc,
+            // Born on the new defaults, so the one-shot migrations have nothing to correct. Marking
+            // them applied here stops a hand-edit made before the first reload from being eaten by
+            // a migration that was only ever meant for scripts written by an older build.
+            FastFlowApplied = true,
+            AssignWaitTrimmed = true,
         };
         foreach (QuestTurnIn t in q.TurnIns)
             script.Steps.Add(new TurnInStep { Item = t.Item, Qty = Math.Max(1, t.Qty), Quest = q.Name });

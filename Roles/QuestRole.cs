@@ -83,6 +83,24 @@ public sealed class QuestRole
     /// where NOTHING was clicked and nothing is on the cursor, so the recovery click that shakes a
     /// stuck item back into its slot must NOT run: over a bag it would pick an item UP.</summary>
     private volatile bool _emptyBagMiss;
+    /// <summary>
+    /// Every line the log produced while the confirmation window was open, and any "You offered"
+    /// line in it that named the WRONG item.
+    ///
+    /// A miss used to report one fact — "nothing came back" — and that one fact covers three
+    /// completely different failures: the click never picked anything up, the click picked up the
+    /// wrong thing and gave it away, or the hand-over worked and the confirmation matcher is too
+    /// narrow. The log distinguishes them for free and we were throwing it away. Now a miss shows
+    /// what the server actually said, and silence is reported AS silence.
+    /// </summary>
+    private readonly List<string> _windowLines = new();
+    private string _wrongOffer = "";
+    private readonly object _windowGate = new();
+    /// <summary>The bag point the item was actually taken from this attempt — which is the found
+    /// one, not the picked one, whenever smart find is doing its job. The recovery click has to go
+    /// HERE: sending it to the fixed pick shuffles the bag between attempts, and then the run's own
+    /// "found it somewhere else" lines look like evidence that an item was consumed.</summary>
+    private ScreenPoint _lastSlot = new();
     private int _finished;
 
     public QuestRole(QuestScript script, IInputSink sink, AppSettings settings,
@@ -163,13 +181,33 @@ public sealed class QuestRole
         string item = step.Item.ToLowerInvariant();
         string quest = step.Quest.ToLowerInvariant();
 
+        // Keep what the server said while we were waiting, so a miss can quote it. Bounded: a busy
+        // zone can print faster than anyone can read, and this is evidence, not a transcript.
+        // A RING, not a prefix. Keeping the first twelve meant that handing an item in beside a
+        // fight filled the buffer with combat spam in the first second and threw away every line
+        // that came after — including the refusal, the late offer, and the task update, which are
+        // the only lines anyone wants.
+        lock (_windowGate)
+        {
+            _windowLines.Add(line.Trim());
+            if (_windowLines.Count > 16) _windowLines.RemoveAt(0);
+        }
+
         // The only line that names THIS hand-in. When the item is known, nothing else counts —
         // see the note below.
-        if ((l.Contains("you offered") || l.Contains("you have given"))
-            && (item.Length == 0 || l.Contains(item)))
+        if (l.Contains("you offered") || l.Contains("you have given"))
         {
-            _offered = true;
-            Stats.LastLine = line.Trim();
+            if (item.Length == 0 || l.Contains(item))
+            {
+                _offered = true;
+                Stats.LastLine = line.Trim();
+                return;
+            }
+            // SOMETHING was handed over and it was not the item we meant. That single line splits
+            // the failure space in half: the gesture worked and the bag search picked the wrong
+            // icon. Without it, giving away the wrong item and clicking an empty square produce
+            // word-for-word the same report.
+            lock (_windowGate) _wrongOffer = line.Trim();
             return;
         }
 
@@ -349,6 +387,7 @@ public sealed class QuestRole
             }
         }
 
+        _lastSlot = slot;                       // the recovery click must come back HERE, not to the pick
         if (!ClickAt(slot, 260, $"the bag slot for {step.Item}")) return null;   // pick the item up
 
         // From here the item is ON THE CURSOR. Every early exit has to put it back in ITS OWN slot
@@ -377,13 +416,17 @@ public sealed class QuestRole
             }
         }
 
-        if (!ClickAt(npc, 620, "the NPC")) return Drop(null);   // drop it on the NPC → give window
+        // The trade window has to be UP before GIVE is pressed, and nothing on screen or in the log
+        // says when it is. So this is a wait, tuned on the card, not a guess baked into the code.
+        int settle = Math.Clamp(_script.GiveSettleMs, 200, 4000);
+        if (!ClickAt(npc, settle, "the NPC")) return Drop(null);   // drop it on the NPC → give window
 
         // Arm the listener HERE, immediately before the button that commits the trade — not at the
         // top of the cycle. Everything above takes seconds, and a confirmation armed that early can
         // be satisfied by the tail of the PREVIOUS hand-in.
         _inFlight = step;
         _offered = _advanced = false;
+        lock (_windowGate) { _windowLines.Clear(); _wrongOffer = ""; }
         _listening = true;
 
         if (!ClickAt(_script.Layout.GiveButton, 500, "the GIVE button")) { _listening = false; _inFlight = null; return Drop(null); }
@@ -403,6 +446,53 @@ public sealed class QuestRole
         return confirmed;
     }
 
+
+    /// <summary>
+    /// Say what the server actually said while we were waiting.
+    ///
+    /// Three failures wear the same face — nothing was picked up, the wrong thing was picked up
+    /// and given away, or the hand-over worked and the matcher missed it. The log already knows
+    /// which; it was simply never asked. Silence is reported AS silence, because "the log said
+    /// nothing for twelve seconds" is itself the loudest possible clue.
+    /// </summary>
+    private void ReportWindow(TurnInStep step)
+    {
+        string wrong;
+        List<string> seen;
+        lock (_windowGate) { wrong = _wrongOffer; seen = new List<string>(_windowLines); }
+
+        if (wrong.Length > 0)
+        {
+            // TWO things produce this line and they have opposite fixes, so it must not pick one.
+            // Either the bag search grabbed the wrong icon, or the hand-in WORKED and the name we
+            // are matching on — scraped off the wiki — isn't spelled the way the server spells it
+            // (a plural, an apostrophe, a qualifier). Asserting the first would send someone to
+            // re-pick a slot that was right, while the run counted a successful hand-in as a miss
+            // and eventually told them they were out of an item they still had a bag full of.
+            // So: show both names and let the person who can SEE the game decide.
+            // ONE line, not four. Every Log?.Invoke marshals to the UI thread, lands in the card's
+            // single-line status field and colours it by its OWN first character — so a four-part
+            // message ends with the status reading a fragment, in the green that means "that went
+            // fine", while the ⚠ headline is overwritten twice on the way there. It also costs the
+            // runner four synchronous round-trips at the exact moment it is about to click.
+            Log?.Invoke($"⚠ the server took something, but not under the name I'm watching for. "
+                      + $"I'm matching on \"{step.Item}\" · the log said \"{wrong}\" · "
+                      + "if those are the SAME item then the hand-in WORKED and my name for it is wrong "
+                      + "(fix the item's name on the card); if they're different items the bag search "
+                      + "grabbed the wrong icon (re-pick that slot with a tighter box round it).");
+            return;
+        }
+        if (seen.Count == 0)
+        {
+            Log?.Invoke("· the log said NOTHING at all during that wait — so as far as the server is "
+                      + "concerned nothing was handed over. The clicks landed somewhere that didn't "
+                      + "open a trade: check the NPC and GIVE picks, and that he's in reach.");
+            return;
+        }
+        List<string> tail = seen.Count > 4 ? seen.GetRange(seen.Count - 4, 4) : seen;
+        Log?.Invoke("· what the log said while waiting (most recent last): " + string.Join("  |  ", tail)
+                  + (seen.Count > tail.Count ? $"  (+{seen.Count - tail.Count} earlier)" : ""));
+    }
 
     // ---------------------------------------------------------------- the loop
 
@@ -635,8 +725,13 @@ public sealed class QuestRole
                             }
                             Log?.Invoke($"✖ {step.Item}: nothing came back from the server within "
                                       + $"{_script.ConfirmSeconds}s (miss {misses} of 2 for this item).");
-                            // Drop whatever might still be stuck to the cursor before trying again.
-                            ClickAt(step.Slot, 300);
+                            ReportWindow(step);
+                            // Drop whatever might still be stuck to the cursor before trying again —
+                            // back where it CAME FROM. Sending it to the fixed pick moved items
+                            // around between attempts, and the "found it somewhere else" lines that
+                            // produced were then read (by me, out loud, twice) as proof the item had
+                            // been consumed. It was proof of this click.
+                            ClickAt(_lastSlot.Set ? _lastSlot : step.Slot, 300, "the bag slot (putting it back)");
                         }
                         if (misses >= 2)
                         {

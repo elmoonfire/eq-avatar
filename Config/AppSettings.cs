@@ -76,6 +76,12 @@ public sealed class AppSettings
     /// grabbed focus back would be fighting the user for the mouse.</summary>
     public bool FocusGameOnStart { get; set; } = true;
 
+    /// <summary>Height, in pixels, of the in-page activity consoles (Questing, Auto Merge).
+    /// Small by default because the card has other things to show — but when you are TRACKING
+    /// something, five lines is not a console, it is a peephole. Dragged by the grip under the
+    /// console and remembered here, so it doesn't collapse back on the next render.</summary>
+    public double ConsoleHeight { get; set; } = 96;
+
     public bool HubEnabled { get; set; } = true;
 
     /// <summary>Phone/web remote control: poll the hub for commands, post live status, and sync

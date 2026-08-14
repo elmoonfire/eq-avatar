@@ -238,6 +238,11 @@ public partial class MainWindow
     /// what she is doing now, the steps behind it, and nothing from any other module.</summary>
     private void RenderMergeConsole(bool running)
     {
+        // Try the cheap path first. This is called on EVERY line the sweep speaks, and a rebuild
+        // both throws away whatever the user had selected and cancels a resize drag in progress —
+        // which is the whole point of having made this console selectable and resizable.
+        if (MergeConsoleAppend(running)) return;
+
         MrgConsoleHost.Children.Clear();
         List<ActivityEntry> lines = ActivityLog.Snapshot(e => e.Source == MergeSource, 150);
         ActivityEntry? now = lines.Count > 0 ? lines[^1] : null;
@@ -250,11 +255,12 @@ public partial class MainWindow
             BorderThickness = new Thickness(1), Padding = new Thickness(10, 7, 10, 8),
         };
         var nowStack = new StackPanel();
-        nowStack.Children.Add(new TextBlock
+        var nowLabel = new TextBlock
         {
             Text = running ? "NOW" : "LAST", FontSize = 8.5, FontWeight = FontWeights.Bold,
             Foreground = running ? Hex("#49F27E") : Hex("#5E7C9A"),
-        });
+        };
+        nowStack.Children.Add(nowLabel);
         var nowText = new TextBlock
         {
             Text = now?.Text ?? "nothing yet — press Merge the bag and she'll narrate every step here.",
@@ -269,28 +275,84 @@ public partial class MainWindow
         nowBorder.Child = nowStack;
         MrgConsoleHost.Children.Add(nowBorder);
 
-        var lineStack = new StackPanel();
-        foreach (ActivityEntry e in lines.Count > 1 ? lines.GetRange(0, lines.Count - 1) : new List<ActivityEntry>())
-            lineStack.Children.Add(new TextBlock
+        // Same selectable, resizable console as the Questing card — a sweep that goes wrong is
+        // just as much worth pasting to someone as a quest run that does.
+        List<ActivityEntry> history = lines.Count > 1
+            ? lines.GetRange(0, lines.Count - 1) : new List<ActivityEntry>();
+        var body = MakeConsoleBody(
+            history
+            .Select(e => ($"{e.When:HH:mm:ss}  {e.Text}",
+                          e.IsBad ? Color.FromRgb(0xFF, 0xCB, 0x6B)
+                        : e.IsGood ? Color.FromRgb(0x7C, 0xE3, 0x8B)
+                        : e.IsStep ? Color.FromRgb(0x8A, 0xA0, 0xB6)
+                                   : Color.FromRgb(0xC6, 0xD2, 0xDE))));
+        body.Loaded += (_, _) => body.ScrollToEnd();
+        FrameworkElement console = MakeResizableConsole(body, "merge");
+        console.Margin = new Thickness(0, 4, 0, 0);
+        MrgConsoleHost.Children.Add(console);
+
+        _mcBody = body;
+        _mcNowLabel = nowLabel;
+        _mcNowText = nowText;
+        _mcNowBorder = nowBorder;
+        _mcRunning = running;
+        _mcRendered = history;
+    }
+
+    // The live merge console's parts, so a narrated step can be appended in place. Same shape and
+    // the same reasons as the Questing card's — see QuestConsoleAppend for the full argument.
+    private System.Windows.Controls.RichTextBox? _mcBody;
+    private TextBlock? _mcNowText, _mcNowLabel;
+    private Border? _mcNowBorder;
+    private bool _mcRunning;
+    private List<ActivityEntry> _mcRendered = new();
+
+    /// <summary>Append the newest lines to the merge console already on screen, and refresh its NOW
+    /// panel. False when it can't prove the document still matches the log, so the caller rebuilds.</summary>
+    private bool MergeConsoleAppend(bool running)
+    {
+        if (_mcBody is null || _mcNowText is null || _mcNowLabel is null || _mcNowBorder is null) return false;
+        if (!_mcBody.IsLoaded) return false;
+        if (running != _mcRunning) return false;          // the glow and the label change — redraw it
+
+        List<ActivityEntry> lines = ActivityLog.Snapshot(e => e.Source == MergeSource, 150);
+        List<ActivityEntry> history = lines.Count > 1
+            ? lines.GetRange(0, lines.Count - 1) : new List<ActivityEntry>();
+
+        int drop = PrefixDrop(_mcRendered, history);
+        if (drop < 0) return false;
+
+        System.Windows.Documents.FlowDocument doc = _mcBody.Document;
+        for (int i = 0; i < drop && doc.Blocks.FirstBlock is not null; i++)
+            doc.Blocks.Remove(doc.Blocks.FirstBlock);
+        int added = 0;
+        for (int i = _mcRendered.Count - drop; i < history.Count; i++)
+        {
+            ActivityEntry e = history[i];
+            doc.Blocks.Add(new System.Windows.Documents.Paragraph(
+                new System.Windows.Documents.Run($"{e.When:HH:mm:ss}  {e.Text}"))
             {
-                Text = $"{e.When:HH:mm:ss}  {e.Text}",
-                FontFamily = new FontFamily("Consolas"), FontSize = 11, TextWrapping = TextWrapping.Wrap,
+                Margin = new Thickness(0),
                 Foreground = e.IsBad ? Hex("#FFCB6B") : e.IsGood ? Hex("#7CE38B")
                            : e.IsStep ? Hex("#8AA0B6") : Hex("#C6D2DE"),
-                Margin = new Thickness(0, 0, 0, 1),
             });
-        var scroll = new ScrollViewer
-        {
-            Height = 96, VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
-            Margin = new Thickness(0, 4, 0, 0), Content = lineStack,
-            Background = Hex("#0C0F13"), Padding = new Thickness(8, 5, 8, 5),
-        };
-        scroll.Loaded += (_, _) => scroll.ScrollToEnd();
-        MrgConsoleHost.Children.Add(new Border
-        {
-            CornerRadius = new CornerRadius(8), BorderBrush = Hex("#26303F"), BorderThickness = new Thickness(1),
-            ClipToBounds = true, Child = scroll,
-        });
+            added++;
+        }
+        _mcRendered = history;
+        if (added > 0) _mcBody.ScrollToEnd();
+
+        ActivityEntry? now = lines.Count > 0 ? lines[^1] : null;
+        _mcNowLabel.Text = running ? "NOW" : "LAST";
+        _mcNowLabel.Foreground = running ? Hex("#49F27E") : Hex("#5E7C9A");
+        _mcNowText.Text = now?.Text ?? "nothing yet — press Merge the bag and she'll narrate every step here.";
+        _mcNowText.Foreground = now is null ? Hex("#5E7C9A")
+                              : now.IsBad ? Hex("#FFCB6B") : now.IsGood ? Hex("#49F27E") : Hex("#DDE7F0");
+        _mcNowText.Effect = running && now is not null && !now.IsBad
+            ? new DropShadowEffect { Color = Color.FromRgb(0x49, 0xF2, 0x7E), BlurRadius = 12, ShadowDepth = 0, Opacity = 0.35 }
+            : null;
+        _mcNowBorder.Background = running ? Hex("#10301F") : Hex("#0C1420");
+        _mcNowBorder.BorderBrush = running ? Hex("#3FCB74") : Hex("#26303F");
+        return true;
     }
 
     internal const string MergeSource = "Merge";

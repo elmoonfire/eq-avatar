@@ -937,6 +937,27 @@ public partial class MainWindow
         };
         focusBox.Click += (_, _) => { _settings.FocusGameOnStart = focusBox.IsChecked == true; _settings.Save(); };
         opts.Children.Add(focusBox);
+        opts.Children.Add(new TextBlock { Text = "give wait", Foreground = Hex("#9FB6CC"), FontSize = 11, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 6, 0) });
+        var giveWait = new TextBox
+        {
+            Text = script.GiveSettleMs.ToString(), Width = 56, FontSize = 11.5, VerticalAlignment = VerticalAlignment.Center,
+            ToolTip = "Milliseconds to wait after dropping the item on the NPC, before pressing GIVE — the gap the "
+                    + "trade window has to appear in. Every failed hand-in so far has been a first offer that missed "
+                    + "and a retry that worked, which is what a GIVE landing before the window is up looks like. "
+                    + "Raise it if hand-ins still miss; lower it if your machine is quick and you want the seconds back.",
+        };
+        giveWait.LostFocus += (_, _) =>
+        {
+            script.GiveSettleMs = int.TryParse(giveWait.Text.Trim(), out int g) ? Math.Clamp(g, 200, 4000) : 1100;
+            giveWait.Text = script.GiveSettleMs.ToString();
+            Persist();
+        };
+        opts.Children.Add(giveWait);
+        opts.Children.Add(new TextBlock
+        {
+            Text = "ms before GIVE", Foreground = Hex("#5E7C9A"), FontSize = 10,
+            VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(8, 0, 14, 0),
+        });
         opts.Children.Add(new TextBlock { Text = "repeat", Foreground = Hex("#9FB6CC"), FontSize = 11, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 6, 0) });
         var repeat = new TextBox
         {
@@ -1146,8 +1167,6 @@ public partial class MainWindow
                         : e.IsGood ? Color.FromRgb(0x7C, 0xE3, 0x8B)
                         : e.IsStep ? Color.FromRgb(0x8A, 0xA0, 0xB6)
                                    : Color.FromRgb(0xC6, 0xD2, 0xDE))));
-        body.Height = 96;                            // ~5 steps, scrollable back through the run
-        body.Margin = new Thickness(0, 4, 0, 0);
         body.Loaded += (_, _) => body.ScrollToEnd();
 
         // Remember the live pieces so a step arriving mid-run can be APPENDED instead of forcing
@@ -1159,11 +1178,9 @@ public partial class MainWindow
         _qcNowText = nowText;
         _qcRunning = running;
         _qcRendered = history;
-        host.Children.Add(new Border
-        {
-            CornerRadius = new CornerRadius(8), BorderBrush = Hex("#26303F"), BorderThickness = new Thickness(1),
-            ClipToBounds = true, Child = body,
-        });
+        FrameworkElement console = MakeResizableConsole(body, "quest");
+        console.Margin = new Thickness(0, 4, 0, 0);
+        host.Children.Add(console);
         return host;
     }
 
