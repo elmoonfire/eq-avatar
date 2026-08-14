@@ -447,10 +447,15 @@ public partial class MainWindow
             // The score, not just the tier: it is the number the game is really tracking, it moves
             // by one for every copy that goes in, and "1006 of 1024" answers "how close am I?" in a
             // way that "+9, 494/512" never quite does.
+            // The GAME'S own words first. It never shows the internal score — what you see on the
+            // item is "+9" and "56/512", the remainder toward the next upgrade — so leading with a
+            // number no player ever sees would be the app inventing its own vocabulary. The score
+            // follows in smaller type, because it is ours: it is what makes the progress bar and
+            // the forecast honest, and it deserves to be visible, not hidden.
             Text = read is null ? "tier not read yet"
                  : (read is { } rd ? UpgradeScore.ScoreFrom(rd.Have, rd.Need) : null) is not { } sc
                      ? "counter unreadable — re-pick a tight box round just the numbers"
-                     : $"score {sc} / 1024   ·   +{tier}  ({progress}/{need})",
+                     : $"+{tier}   ·   {progress} / {need} toward +{tier + 1}",
             FontSize = 13, FontWeight = FontWeights.Bold, Foreground = Hex("#BFE3FF"),
             VerticalAlignment = VerticalAlignment.Center,
             ToolTip = "Every item carries a score out of 1024. Its tier is the highest power of two the score has "
@@ -459,8 +464,10 @@ public partial class MainWindow
         });
         head.Children.Add(new TextBlock
         {
-            Text = copies < 0 ? "   ·   press “Count what's in the bags” to forecast"
-                              : $"   ·   {copies} copy(s) in the bags",
+            Text = ((read is { } hs ? UpgradeScore.ScoreFrom(hs.Have, hs.Need) : null) is { } hsc
+                        ? $"   ({hsc} of 1024 toward +10)" : "")
+                 + (copies < 0 ? "   ·   press “Count what's in the bags” to forecast"
+                               : $"   ·   {copies} copy(s) in the bags"),
             FontSize = 11.5, Foreground = Hex("#9FB6CC"), VerticalAlignment = VerticalAlignment.Center,
         });
         MrgForecastHost.Children.Add(head);
@@ -529,15 +536,16 @@ public partial class MainWindow
             bool finished = projTier >= UpgradeScore.MaxTier;
             MrgForecastHost.Children.Add(MakeFireBar(finished ? 1.0 : (double)projScore / UpgradeScore.Max,
                 finished
-                    ? $"{copies} copy(s) → score 1024/1024 — a +10. Anything left over is spare."
-                    : $"{copies} copy(s) → score {projScore}/1024 = +{projTier} ({projProgress}/{projNeed} toward +{projTier + 1})"));
+                    ? $"{copies} copy(s) → +10, finished. Anything left over is spare."
+                    : $"{copies} copy(s) → +{projTier}, {projProgress}/{projNeed} toward +{projTier + 1}"
+                      + $"   ({projScore} of 1024)"));
 
             long toTen = UpgradeScore.ToReach(projScore, UpgradeScore.MaxTier);
             MrgForecastHost.Children.Add(new TextBlock
             {
                 Text = finished
                     ? "That finishes it: what you already have takes this item to +10."
-                    : $"After merging what you have: +{projTier}, score {projScore}. A +10 is {toTen:N0} more base "
+                    : $"After merging what you have: +{projTier}, {projProgress}/{projNeed}. A +10 is {toTen:N0} more base "
                     + "copies — one per Kerra cycle, so that is the number of quest runs still ahead. Merge order "
                     + "doesn't matter: scores simply add, and nothing is ever lost.",
                 FontSize = 11.5, TextWrapping = TextWrapping.Wrap, MaxWidth = 640, Foreground = Hex("#C6D2DE"),
