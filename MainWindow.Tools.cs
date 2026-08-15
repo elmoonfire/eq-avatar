@@ -89,7 +89,7 @@ public partial class MainWindow
             p.MergeButton.Set ? () => ShowMergeShot(p, "merge", "The Merge Item button",
                 "Pressed once per copy. If the item window has moved since, re-pick it.") : null));
         tiles.Children.Add(MakePickTile("ui-pick-slot.jpg", "the copy's icon",
-            p.HasIcon ? (!p.HasIconSize ? "⚠ re-pick me" : p.HasPixels ? "pixel-exact" : "⚠ colour only") : "she matches this", "",
+            IconTileStatus(p), "",
             p.HasIcon,
             "Put the FIXED SQUARE over ONE copy in your bag — the same square, the same size, every time, which is "
             + "the size everything gets compared at. Click to place it, arrow keys nudge it a pixel, the wheel "
@@ -101,7 +101,8 @@ public partial class MainWindow
                 + "keeps the icon's actual pixels instead."
                 : "The colours find the candidates fast; the icon's ACTUAL PIXELS decide which of them is really a "
                 + "copy, nudged a few pixels either way to find the best fit. A real copy matches over 85% even "
-                + "misaligned and dimmed; a different icon in the same colours scores around 45%."),
+                + "misaligned and dimmed; a different icon in the same colours scores around 45%.")
+            + IconSizeNote(p),
             () => { if (PickMergeRect(r => { }, "one copy of the item",
                         "Put the square over ONE copy in your bag, matched to the slot, then press Enter. "
                         + "These exact pixels become the reference, and this exact size becomes the size she "
@@ -409,6 +410,33 @@ public partial class MainWindow
             ActivityLog.Record(MergeSource, "⚠ the name test threw: " + ex.Message);
         }
         finally { _mrgNameBusy = false; }
+    }
+
+    /// <summary>The badge under the icon tile. The stored reference's SIZE belongs there because it
+    /// is not decoration — it is the stride the sweep steps across the bags with, and the number the
+    /// OCR &amp; picking settings page is now advertising. Two different numbers is not a fault (an
+    /// old reference still matches perfectly well), so this states them rather than warning.</summary>
+    private string IconTileStatus(MergePlan p)
+    {
+        if (!p.HasIcon) return "she matches this";
+        if (!p.HasIconSize) return "⚠ re-pick me";
+        if (!p.HasPixels) return "⚠ colour only";
+        QuestFind.IconPatch? patch = p.IconPixels;
+        return patch is { Ok: true } ? $"pixel-exact · {patch.W}×{patch.H}" : "pixel-exact";
+    }
+
+    /// <summary>Appended to the icon pick's tooltip when the reference in hand was learned at a
+    /// different size from the one the settings page is set to. Said HERE, next to the button that
+    /// fixes it, because a note only on the settings page is a note in the wrong room.</summary>
+    private string IconSizeNote(MergePlan p)
+    {
+        if (p.IconPixels is not { Ok: true } patch) return "";
+        int want = SwatchSize;
+        return patch.W == want && patch.H == want
+            ? ""
+            : $"\n\nThis reference was learned at {patch.W} × {patch.H} px; the square is now set to {want} × {want} "
+            + "(Account → Settings → OCR & picking). Nothing is broken — a reference matches at whatever size it "
+            + $"was learned — but re-picking it here is what moves it to {want}.";
     }
 
     /// <summary>The remembered square size, defended against a settings file that predates the

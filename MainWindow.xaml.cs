@@ -22,6 +22,7 @@ using EQAvatar.Spike.Log;
 using EQAvatar.Spike.Login;
 using EQAvatar.Spike.Map;
 using EQAvatar.Spike.Net;
+using EQAvatar.Spike.Ocr;
 using EQAvatar.Spike.Overlay;
 using EQAvatar.Spike.Roles;
 using EQAvatar.Spike.Update;
@@ -217,6 +218,10 @@ public partial class MainWindow : Window
         if (name == "PanelSessions") RefreshSessions();
         if (name == "PanelCombat") RefreshCombatPanel();
         if (name == "PanelLicensing" && ConnList.ItemsSource is null) _ = RefreshConnections();
+        // The OCR tab shows two things that other pages change under it — the square's size (any icon
+        // pick can write it) and which stored reference disagrees with it. The radio button stays
+        // checked across navigation, so Checked does NOT re-fire and only this reaches it.
+        if (name == "PanelSettings") SyncSwatchUi();
     }
 
     private void HomeGoGrind_Click(object sender, RoutedEventArgs e) => NavGrind.IsChecked = true;
@@ -1395,6 +1400,139 @@ public partial class MainWindow : Window
         TooltipOpacitySlider.Value = Math.Clamp(_settings.TooltipOpacity, 0.5, 1.0);
         UpdateTooltipOpacityLabel();
         ApplyTooltipOpacity();
+
+        SyncSwatchUi();
+    }
+
+    /// <summary>Which tab of the Settings page is showing. Same shape as the Game Data page's tabs:
+    /// one group of radio buttons, one handler, visibility only.</summary>
+    private void SettingsTab_Checked(object sender, RoutedEventArgs e)
+    {
+        // Checked fires DURING InitializeComponent for the tab that starts checked, and the view it
+        // is about to touch has not been created yet. Guarding on the LAST-declared of the two.
+        if (SettingsViewOcr is null) return;
+        string tag = (sender as RadioButton)?.Tag as string ?? "General";
+        SettingsViewGeneral.Visibility = tag == "General" ? Visibility.Visible : Visibility.Collapsed;
+        SettingsViewOcr.Visibility = tag == "Ocr" ? Visibility.Visible : Visibility.Collapsed;
+        if (tag == "Ocr") SyncSwatchUi();           // the plan, or the size itself, may have moved since
+    }
+
+    // ---------------- OCR & picking ----------------
+
+    /// <summary>Debounce for the size slider. Dragging it fires on every one of up to 120 steps, and
+    /// each save rewrites the whole settings file — so the write waits for the drag to stop.</summary>
+    private DispatcherTimer? _settingsSaveTimer;
+
+    /// <summary>True while the slider is being SET FROM settings rather than moved by the user, so
+    /// the round trip can't be mistaken for a change and written back.</summary>
+    private bool _swatchUiLoading;
+
+    private void QueueSettingsSave()
+    {
+        _settingsSaveTimer ??= new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(450) };
+        _settingsSaveTimer.Tick -= SettingsSaveTick;
+        _settingsSaveTimer.Tick += SettingsSaveTick;
+        _settingsSaveTimer.Stop();
+        _settingsSaveTimer.Start();
+    }
+
+    private void SettingsSaveTick(object? sender, EventArgs e)
+    {
+        _settingsSaveTimer?.Stop();
+        _settings.Save();
+    }
+
+    private void SwatchSize_Changed(object sender, RoutedPropertyChangedEventArgs<double> e)
+    {
+        // Setting Minimum on a Slider whose Value is still 0 coerces the Value and fires this, which
+        // happens during InitializeComponent, before any of the labels exist.
+        if (SwatchMismatchText is null || _swatchUiLoading) return;
+        int px = Math.Clamp((int)Math.Round(e.NewValue), CompassPickWindow.MinSwatch, CompassPickWindow.MaxSwatch);
+        if (px == _settings.IconSwatchPx) { RenderSwatchSetting(); return; }
+        _settings.IconSwatchPx = px;
+        RenderSwatchSetting();
+        QueueSettingsSave();
+    }
+
+    /// <summary>
+    /// Point the whole OCR tab at whatever the setting says RIGHT NOW.
+    ///
+    /// This is not just first-run wiring, and that was the bug: the slider is not the only thing
+    /// that writes this number. Re-picking an icon and wheeling the square writes it too, from a
+    /// different page — so a slider seeded once at startup sits at the old value beside a readout
+    /// showing the new one, and the user's first nudge of a thumb they believe is already correct
+    /// silently throws the picked size away. Anything that can show this tab re-seeds it.
+    /// </summary>
+    private void SyncSwatchUi()
+    {
+        if (SwatchMismatchText is null) return;
+        // The ENDS come from the picker's own limits, never from XAML: a range written in two places
+        // drifts, and a Minimum above a stored value would rewrite that value just by being shown.
+        // Assigning Minimum also COERCES a Value still at its default 0, raising ValueChanged — so
+        // the whole seeding runs under the flag, or opening the app would reset a 40 px square to 8.
+        _swatchUiLoading = true;
+        try
+        {
+            SwatchSizeSlider.Minimum = CompassPickWindow.MinSwatch;
+            SwatchSizeSlider.Maximum = CompassPickWindow.MaxSwatch;
+            SwatchSizeSlider.Value = SwatchSize;
+        }
+        finally { _swatchUiLoading = false; }
+        RenderSwatchSetting();
+    }
+
+    /// <summary>Everything on the OCR tab that follows from the one number. Nothing here is stored:
+    /// the compare count, the stride and the alignment radius are all worked out from the size, so
+    /// what the user reads is what the sweep will actually do.</summary>
+    private void RenderSwatchSetting()
+    {
+        if (SwatchMismatchText is null) return;
+        int px = SwatchSize;
+        SwatchSizeVal.Text = px + " px";
+
+        // Drawn at ONE SCREEN PIXEL PER GAME PIXEL. WPF lays out in device-independent units, so on
+        // a 150% display a Width of 40 is 60 real pixels and the square would be a lie — which is
+        // the one thing this control exists not to be.
+        double scale = 1.0;
+        try { scale = PresentationSource.FromVisual(this)?.CompositionTarget?.TransformToDevice.M11 ?? 1.0; }
+        catch { /* not composited yet; 1:1 is the right guess */ }
+        if (scale <= 0) scale = 1.0;
+        SwatchPreview.Width = SwatchPreview.Height = px / scale;
+        SwatchPreviewNote.Text = Math.Abs(scale - 1.0) < 0.001
+            ? "Hold this against one inventory slot in the game — it is drawn the same size the bot will use."
+            : $"Hold this against one inventory slot in the game. Your display is at {scale * 100:0}%, so this is "
+              + $"drawn {px / scale:0.#} units wide to land on {px} real pixels.";
+
+        // Every number here is READ OFF THE SEARCH, not guessed at: the stride is a third of the
+        // reference (QuestFind.FindAllIcons), and the radius is SearchPadFor. The cap test is the
+        // one the finder itself exposes for this purpose — "pad >= px/2" was wrong twice over, since
+        // the geometry only needs half a STEP, and it would have told the user at every selectable
+        // size that their search was compromised.
+        int pad = QuestFind.SearchPadFor(px);
+        bool capped = pad < QuestFind.SearchPadWanted(px);
+        SwatchDerived.Text =
+            $"A reference picked at this size compares {px * px * 3:n0} numbers per candidate, is stepped "
+            + $"{px / 3.0:0.#} px at a time across the bag area, and is searched ±{pad} px around each step for "
+            + "the best fit. "
+            + (capped
+                ? $"⚠ That radius has hit the {QuestFind.SearchPadCap} px cost ceiling, so it no longer covers the "
+                + "gap between steps — copies landing in those gaps will be missed. Use a smaller square."
+                : $"Half a step is {px / 6.0:0.#} px, so every position between steps is covered.");
+
+        // WHAT NOW DISAGREES. A reference is a picture, not a number — changing the size here cannot
+        // resize one that has already been learned, and a reference that no longer matches the size
+        // is the exact failure that found 5 of 14 copies. So say it, with the numbers.
+        string? gripe = null;
+        try
+        {
+            MergePlan p = MergePlan.Current;
+            if (p.IconPixels is { Ok: true } patch && (patch.W != px || patch.H != px))
+                gripe = $"Auto Merge's reference was learned at {patch.W} × {patch.H} px and still is — this number "
+                      + $"does not resize it. Re-pick the copy's icon on the Auto Merge page to move it to {px} × {px}.";
+        }
+        catch { /* a settings page must never depend on a plan file loading */ }
+        SwatchMismatchText.Text = gripe ?? "";
+        SwatchMismatch.Visibility = gripe is null ? Visibility.Collapsed : Visibility.Visible;
     }
 
     private void ApplyTooltipOpacity() => Application.Current.Resources["TooltipOpacity"] = _settings.TooltipOpacity;

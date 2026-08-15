@@ -2225,10 +2225,53 @@
 
                     <!-- ===== SETTINGS ===== -->
                     <Grid x:Name="PanelSettings" Margin="22" Visibility="Collapsed">
-                        <ScrollViewer VerticalScrollBarVisibility="Auto">
+                        <!-- Panel-LOCAL, like the Game Data page's own tab style. A StaticResource is
+                             resolved from the element upwards, so a style declared here reaches every
+                             tab button inside this panel and nothing outside it. -->
+                        <Grid.Resources>
+                            <Style x:Key="SettingsTab" TargetType="RadioButton">
+                                <Setter Property="Foreground" Value="#9FB6CC"/>
+                                <Setter Property="Cursor" Value="Hand"/>
+                                <Setter Property="Margin" Value="0,0,8,0"/>
+                                <Setter Property="Template">
+                                    <Setter.Value>
+                                        <ControlTemplate TargetType="RadioButton">
+                                            <Border x:Name="bd" CornerRadius="16" Padding="14,6" Background="#121A28" BorderBrush="#26405A" BorderThickness="1">
+                                                <ContentPresenter TextElement.Foreground="{TemplateBinding Foreground}" VerticalAlignment="Center"/>
+                                            </Border>
+                                            <ControlTemplate.Triggers>
+                                                <Trigger Property="IsChecked" Value="True">
+                                                    <Setter TargetName="bd" Property="Background" Value="#1B3A57"/>
+                                                    <Setter TargetName="bd" Property="BorderBrush" Value="#4FC3F7"/>
+                                                    <Setter Property="Foreground" Value="#EAF6FF"/>
+                                                </Trigger>
+                                            </ControlTemplate.Triggers>
+                                        </ControlTemplate>
+                                    </Setter.Value>
+                                </Setter>
+                            </Style>
+                        </Grid.Resources>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="*"/>
+                        </Grid.RowDefinitions>
+
+                        <StackPanel Grid.Row="0">
+                            <TextBlock Text="Settings" FontSize="19" FontWeight="Bold"/>
+                            <TextBlock Text="Global settings for the whole app. Per-module settings live on each panel and will migrate here over time." Foreground="{StaticResource TextDim}" FontSize="12" Margin="0,3,0,12"/>
+                        </StackPanel>
+
+                        <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,12">
+                            <RadioButton x:Name="SetTabGeneral" Style="{StaticResource SettingsTab}" GroupName="settingstab" Tag="General"
+                                         IsChecked="True" Checked="SettingsTab_Checked" Content="General"/>
+                            <RadioButton x:Name="SetTabOcr" Style="{StaticResource SettingsTab}" GroupName="settingstab" Tag="Ocr"
+                                         Checked="SettingsTab_Checked" Content="OCR &amp; picking"/>
+                        </StackPanel>
+
+                        <Grid Grid.Row="2">
+                        <ScrollViewer x:Name="SettingsViewGeneral" VerticalScrollBarVisibility="Auto">
                             <StackPanel MaxWidth="660" HorizontalAlignment="Left">
-                                <TextBlock Text="Settings" FontSize="19" FontWeight="Bold"/>
-                                <TextBlock Text="Global settings for the whole app. Per-module settings live on each panel and will migrate here over time." Foreground="{StaticResource TextDim}" FontSize="12" Margin="0,3,0,14"/>
 
                                 <Border Style="{StaticResource Card}">
                                     <StackPanel>
@@ -2268,6 +2311,64 @@
                                 </WrapPanel>
                             </StackPanel>
                         </ScrollViewer>
+
+                        <!-- ===== OCR & PICKING ===== -->
+                        <ScrollViewer x:Name="SettingsViewOcr" VerticalScrollBarVisibility="Auto" Visibility="Collapsed">
+                            <StackPanel MaxWidth="660" HorizontalAlignment="Left">
+
+                                <Border Style="{StaticResource Card}">
+                                    <StackPanel>
+                                        <TextBlock Text="THE PICKING SQUARE" FontSize="11" Foreground="{StaticResource TextDim}" Margin="0,0,0,6"/>
+                                        <TextBlock TextWrapping="Wrap" FontSize="12" Foreground="{StaticResource TextDim}" Margin="0,0,0,14"
+                                                   Text="The fixed square you place over one copy of an item when you pick its icon. It is a square by definition — the same length on every side — so one number sets it, and every number the search uses is worked out from this one rather than stored separately."/>
+
+                                        <Grid Margin="0,2">
+                                            <Grid.ColumnDefinitions><ColumnDefinition Width="170"/><ColumnDefinition Width="*"/><ColumnDefinition Width="66"/></Grid.ColumnDefinitions>
+                                            <TextBlock Text="Square size" VerticalAlignment="Center"
+                                                       ToolTip="Match it to one full inventory slot. Too small and you compare a crop of the icon; too large and the neighbouring slots end up inside the reference."/>
+                                            <Slider x:Name="SwatchSizeSlider" Grid.Column="1" SmallChange="1" LargeChange="4"
+                                                    TickFrequency="1" IsSnapToTickEnabled="True" IsMoveToPointEnabled="True"
+                                                    VerticalAlignment="Center" Margin="8,0" ValueChanged="SwatchSize_Changed"/>
+                                            <TextBlock x:Name="SwatchSizeVal" Grid.Column="2" Text="40 px" VerticalAlignment="Center"
+                                                       HorizontalAlignment="Right" Foreground="{StaticResource TextDim}"/>
+                                        </Grid>
+
+                                        <Grid Margin="0,14,0,0">
+                                            <Grid.ColumnDefinitions><ColumnDefinition Width="170"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                            <TextBlock Text="Actual size" VerticalAlignment="Top" Margin="0,2,0,0"
+                                                       ToolTip="Drawn at one screen pixel per game pixel, so you can hold it up against a slot."/>
+                                            <StackPanel Grid.Column="1" Orientation="Horizontal" Margin="8,0,0,0">
+                                                <Border x:Name="SwatchPreview" Width="40" Height="40" VerticalAlignment="Top"
+                                                        Background="#1B3A57" BorderBrush="#4FC3F7" BorderThickness="1"/>
+                                                <TextBlock x:Name="SwatchPreviewNote" Margin="12,0,0,0" FontSize="11" TextWrapping="Wrap"
+                                                           Width="300" Foreground="{StaticResource TextDim}" VerticalAlignment="Top"/>
+                                            </StackPanel>
+                                        </Grid>
+
+                                        <TextBlock x:Name="SwatchDerived" Margin="0,14,0,0" FontSize="11.5" TextWrapping="Wrap"
+                                                   Foreground="{StaticResource TextDim}"/>
+
+                                        <Border x:Name="SwatchMismatch" Visibility="Collapsed" Margin="0,12,0,0" Padding="10,8"
+                                                CornerRadius="6" Background="#2A2213" BorderBrush="#6B5520" BorderThickness="1">
+                                            <TextBlock x:Name="SwatchMismatchText" FontSize="11.5" TextWrapping="Wrap" Foreground="#FFCB6B"/>
+                                        </Border>
+                                    </StackPanel>
+                                </Border>
+
+                                <Border Style="{StaticResource Card}">
+                                    <StackPanel>
+                                        <TextBlock Text="WHAT THIS NUMBER DRIVES" FontSize="11" Foreground="{StaticResource TextDim}" Margin="0,0,0,8"/>
+                                        <TextBlock TextWrapping="Wrap" FontSize="12" Foreground="{StaticResource TextDim}"
+                                                   Text="It is the size of the square every picker opens with, the size of the reference it stores, the stride the bot steps across your bags with, and — through that stride — how far it looks either side of each step for the best fit. Nothing else stores a copy of it, so changing it here changes all of them at once. What it does NOT do is resize a reference you have already picked: those keep the pixels they were learned from until you re-pick them."/>
+                                    </StackPanel>
+                                </Border>
+
+                                <WrapPanel Margin="6,10,0,0">
+                                    <Button Content="Save settings" Click="SaveSettings_Click"/>
+                                </WrapPanel>
+                            </StackPanel>
+                        </ScrollViewer>
+                        </Grid>
                     </Grid>
 
                 </Grid>
