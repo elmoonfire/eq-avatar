@@ -158,6 +158,9 @@ public sealed class QuestRole
     /// that no longer existed — and the advice matters most when the score was unremarkable, which
     /// is exactly when the once-per-run ⚠ never fired.</summary>
     private string _lastMatch = "";
+    /// <summary>The last scan went through the PIXEL matcher, so advice about the colour tolerance
+    /// would be pointing at a dial that step never reads.</summary>
+    private bool _usedPixels;
     /// <summary>How many times this run has said the trigger phrase and then waited for a journal
     /// line. Two passes with nothing is evidence about THIS GAME's logging; a busy zone's chatter
     /// is evidence about the zone.</summary>
@@ -181,6 +184,18 @@ public sealed class QuestRole
     /// actually picked up and handed to the npc does work" — matches every confirmed hand-in in
     /// every log. If it doesn't confirm, the answer is the NEXT ITEM, not the same one again.
     /// </summary>
+    /// <summary>How well the real pixels have to match. 0.85 sits in the middle of a gap half the
+    /// scale wide — a real copy scores over 0.97 even brighter or highlighted, a different icon in
+    /// the same palette about 0.44 — so it is a threshold rather than a guess.</summary>
+    private const double NccAccept = 0.85;
+    /// <summary>The colour signature's bar, as a PROPOSER. Deliberately loose: a false candidate
+    /// costs a fraction of a millisecond and the pixels throw it out, while a missed one costs a
+    /// whole cycle.</summary>
+    private const double CoarsePropose = 60;
+    /// <summary>Candidate squares correlated before giving up. Each one is an alignment search —
+    /// hundreds of thousands of operations — and a hand-in needs ONE copy, not a census.</summary>
+    private const int MaxProposals = 220;
+
     private const int MaxStepMisses = 1;
     private int _finished;
 
@@ -598,16 +613,127 @@ public sealed class QuestRole
         // signature, or one whose screen grab failed, skips the scan entirely, and a stale value
         // here would be quoted back as though it described the item just handed over.
         _lastMatch = "";
+        _usedPixels = false;
 
         // Where the item ACTUALLY is right now. The picked slot is only the fallback: totems
         // migrate through the bag as each one is consumed, and clicking yesterday's slot is how
         // the first field test handed nothing to anyone.
         ScreenPoint slot = step.Slot;
-        if (_script.SmartFind && _script.BagSet && step.HasIcon)
+        // HasIcon as well: the coarse pass that PROPOSES squares is driven by the colour signature,
+        // and a file carrying pixels without one (a hand edit, a rollback) would have thrown a null
+        // straight out of the runner thread.
+        if (_script.SmartFind && _script.BagSet && step.HasPixels && step.HasIconSize && step.HasIcon)
         {
-            // The sliding search compares windows of the icon's OWN size, so its scores actually
-            // discriminate (the grid compare once called Indicolite Gauntlets a totem). Steps
-            // picked before icon sizes were stored fall back to the old grid scan.
+            // THE PIXELS DECIDE — the same thing Auto Merge arrived at, ported here because the
+            // Quest Runner had the identical problem and none of the fix. The colour signature
+            // proposes candidate squares (cheap, and its bar is deliberately loose because a false
+            // candidate costs a fraction of a millisecond and a missed one costs a cycle); then
+            // each candidate is aligned and judged on its real pixels.
+            //
+            // Why this and not a tighter tolerance: on Hayden's bag the two are not separable by
+            // any threshold. His Orders matched at 33 against a bar of 35 when found and 40 when
+            // not, and a Bone-clasped Girdle scored 35 — the right item, the missed item and the
+            // wrong item all inside five points. Cross-correlation puts a real copy over 0.97 and
+            // a different icon in the same palette at about 0.44.
+            // Tri-state, like the merge sweep's: "couldn't look" and "looked, found nothing" have
+            // opposite answers, and collapsing them is how an empty bag ends up clicking a stale
+            // picked slot and handing a stranger to the NPC.
+            //   Looked  false → the screen grab failed.
+            //   Best    null  → nothing proposed; Closest carries the nearest colour distance so
+            //                   the log can say HOW far off rather than just "none".
+            (bool Looked, QuestFind.CopyHit? Best, double Closest) Judge()
+            {
+                using System.Drawing.Bitmap? frame = QuestFind.Capture(_hwnd());
+                if (frame is null) return (false, null, 999);
+                int wantW = (int)Math.Round(step.IconW * frame.Width);
+                int wantH = (int)Math.Round(step.IconH * frame.Height);
+                QuestFind.CopyHit? best = null;
+                int looked = 0;
+                foreach (QuestFind.IconHit h in QuestFind.ProposeIcons(
+                             frame, _script.BagX, _script.BagY, _script.BagW, _script.BagH,
+                             step.IconSig!, step.IconW, step.IconH, CoarsePropose))
+                {
+                    // Bounded. The coarse pass steps in thirds of an icon, so a big bag can offer
+                    // hundreds of squares, and each correlation is an alignment search — hundreds
+                    // of thousands of operations. The sweep this was ported from stops at the
+                    // first acceptance for the same reason; a quest hand-in needs ONE copy, not
+                    // the best one in the bag.
+                    if (++looked > MaxProposals) break;
+                    (double ncc, int dx, int dy) = QuestFind.BestNcc(frame, h.X, h.Y, step.IconPixels!, wantW, wantH);
+                    if (best is null || ncc > best.Ncc)
+                        best = new QuestFind.CopyHit(h.X + (double)dx / frame.Width,
+                                                     h.Y + (double)dy / frame.Height, ncc, h.Dist);
+                    if (ncc >= NccAccept) break;          // that's a copy — nothing to gain by looking further
+                }
+                if (best is not null) return (true, best, best.Coarse);
+                QuestFind.IconHit? closest = QuestFind.FindIconInRect(
+                    frame, _script.BagX, _script.BagY, _script.BagW, _script.BagH,
+                    step.IconSig!, step.IconW, step.IconH);
+                return (true, null, closest?.Dist ?? 999);
+            }
+
+            (bool looked, QuestFind.CopyHit? pick, double closest) = Judge();
+            if ((pick is null || pick.Ncc < NccAccept) && (_script.OpenBagsKey ?? "").Trim().Length > 0)
+            {
+                if (OpenBags($"nothing matched {step.Item} — checking the bags are open"))
+                {
+                    Thread.Sleep(450);
+                    (bool l2, QuestFind.CopyHit? again, double c2) = Judge();
+                    if (l2)
+                    {
+                        // A SUCCESSFUL second look always counts as having looked, even when it
+                        // proposed nothing. Folding that into the same condition as "and it found
+                        // something better" meant a first pass whose screen grab failed, followed
+                        // by a clean look at a genuinely empty bag, still reported "couldn't scan"
+                        // — and then clicked the stale picked slot and handed a stranger to the NPC.
+                        looked = true;
+                        if (again is not null && (pick is null || again.Ncc > pick.Ncc))
+                        { pick = again; closest = c2; }
+                        else if (pick is null) closest = c2;
+                    }
+                }
+            }
+
+            if (!looked)
+            {
+                Log?.Invoke($"⚠ couldn't scan the bag area for {step.Item} — using the picked slot.");
+            }
+            else if (pick is { } p && p.Ncc >= NccAccept)
+            {
+                slot = new ScreenPoint { X = p.X, Y = p.Y };
+                _lastMatch = $"{p.Ncc * 100:0.0}% pixel match";
+                _usedPixels = true;
+                if (_narrate)
+                    Log?.Invoke($"· found {step.Item} at {p.X * 100:0.0}%, {p.Y * 100:0.0}% of the window "
+                              + $"— pixels match {p.Ncc * 100:0.0}% (a real copy is over {NccAccept * 100:0}%, "
+                              + "a different icon in the same colours is about 44%)");
+            }
+            else
+            {
+                _usedPixels = true;
+                // The three ways this ends are different facts and get different words. A negative
+                // correlation is BestNcc's "I couldn't read those pixels" sentinel, not a match of
+                // minus one hundred per cent.
+                _lastMatch = pick is null ? $"nothing proposed (closest colour {closest:0})"
+                           : pick.Ncc < 0 ? "couldn't read the pixels"
+                           : $"{pick.Ncc * 100:0.0}% pixel match";
+                Log?.Invoke(pick is null
+                    ? $"✖ no {step.Item} in the bag area — nothing in it even looks the right colour "
+                      + $"(closest square is {closest:0} away, and a candidate has to be within {CoarsePropose:0})."
+                    : pick.Ncc < 0
+                      ? $"✖ couldn't compare {step.Item}'s pixels — the best candidate sits too close to the edge "
+                        + "of the game window to line the reference up against."
+                      : $"✖ no {step.Item} in the bag area — the closest square matches {pick.Ncc * 100:0.0}% "
+                        + $"of its pixels and a real copy matches over {NccAccept * 100:0}%.");
+                _emptyBagMiss = true;
+                return false;
+            }
+        }
+        else if (_script.SmartFind && _script.BagSet && step.HasIcon)
+        {
+            // NO PIXELS STORED — an icon picked before this build. The colour signature alone is
+            // what the last four field tests were fought with, so it stays, and so does the
+            // warning: re-pick the slot once and the precise matcher takes over.
             bool sliding = step.HasIconSize;
             QuestFind.IconHit? Scan() => sliding
                 ? QuestFind.FindIconSliding(_hwnd(), _script, step)
@@ -615,9 +741,6 @@ public sealed class QuestRole
             double accept = sliding ? Math.Clamp(_script.IconTolerance, 8, 60) : QuestFind.IconAcceptDistance;
             QuestFind.IconHit? hit = Scan();
 
-            // A closed bag and an empty bag look identical from here. Before believing the empty
-            // one — which stops the run — press OPEN ALL BAGS and look again. Costs one keystroke
-            // on the last cycle; saves the whole night when a bag got shut at cycle 40.
             if ((hit is null || hit.Dist > accept) && (_script.OpenBagsKey ?? "").Trim().Length > 0)
             {
                 if (OpenBags($"nothing matched {step.Item} — checking the bags are open"))
@@ -635,33 +758,21 @@ public sealed class QuestRole
             else if (hit.Dist <= accept)
             {
                 slot = new ScreenPoint { X = hit.X, Y = hit.Y };
-                // A match within a few points of the limit is a guess, and a guess picks up the
-                // wrong item — Hayden's run offered a Bone-clasped Girdle that scored 35 against a
-                // ceiling of 35. Said out loud every time, not just while narrating, because the
-                // consequence (an item handed to an NPC) is not something to find out about later.
-                // ONCE per item per run, and amber. A margin can't tell a genuinely mediocre
-                // signature from a wrong item — Hayden's real Orders score 33 against a limit of
-                // 35, the Bone-clasped Girdle it grabbed scored 35 — so this can only ever say
-                // "look at this", not "this is wrong". Said every cycle it would be hundreds of
-                // identical blocking marshals; said once it is a fact worth having.
-                _lastMatch = $"{hit.Dist:0} of {accept:0} allowed";
-                bool marginal = sliding && hit.Dist > accept - 3 && _marginalSaid.Add(step.Item);
+                _lastMatch = $"{hit.Dist:0} of {accept:0} allowed (colour only)";
                 if (_narrate)
-                    Log?.Invoke(sliding
-                        ? $"· found {step.Item} at {hit.X * 100:0.0}%, {hit.Y * 100:0.0}% of the window "
-                          + $"(match {hit.Dist:0} of {accept:0} allowed)"
-                        : $"· found {step.Item} in bag cell {hit.Row + 1},{hit.Col + 1} (match {hit.Dist:0})");
-                if (marginal)
-                    Log?.Invoke($"⚠ {step.Item} only matched at {hit.Dist:0} against a limit of {accept:0} — that is "
-                              + "close enough to the edge to be a different item wearing a similar icon. If she starts "
-                              + "handing over the wrong thing, re-pick this item's slot with a tight box round the "
-                              + "icon. (Said once per item per run.)");
+                    Log?.Invoke($"· found {step.Item} at {hit.X * 100:0.0}%, {hit.Y * 100:0.0}% of the window "
+                              + $"(colour match {hit.Dist:0} of {accept:0} allowed)");
+                if (_marginalSaid.Add(step.Item))
+                    Log?.Invoke($"⚠ {step.Item}'s icon was learned before the precise matcher, so this is a COLOUR "
+                              + "average — the measure that put a Bone-clasped Girdle and the real item within "
+                              + "five points of each other. Re-pick this item's slot once (the fixed square, over "
+                              + "one copy) and she'll match its actual pixels instead.");
             }
             else
             {
-                // No spot holds this icon: the honest out-of-items signal, seen BEFORE an item is
-                // offered rather than inferred from two unanswered offers.
-                Log?.Invoke($"✖ no {step.Item} found in the bag area (closest match {hit.Dist:0}, need ≤ {accept:0}).");
+                _lastMatch = $"{hit.Dist:0} of {accept:0} allowed (colour only)";
+                Log?.Invoke($"✖ no {step.Item} found in the bag area (closest match {hit.Dist:0}, need ≤ {accept:0}). "
+                          + "Re-pick this item's slot to switch it to the precise pixel matcher.");
                 _emptyBagMiss = true;
                 return false;
             }
@@ -670,12 +781,10 @@ public sealed class QuestRole
         if (!ClickAt(slot, 260, $"the bag slot for {step.Item}")) return null;   // pick the item up
 
         // From here the item is ON THE CURSOR — as far as anything here can tell. (ClickAt returns
-        // true for "I moved the mouse and clicked", not for "an item was under it", so on an old
-        // grid-scan signature that "found" an empty square this is optimistic. It is still the best
-        // available reading, and it only ever drives a warning.) Every early exit from here has to
-        // put it back in ITS OWN slot first: the cycle restarts at step 1, and step 1's first act
-        // is to click step 1's slot — which, with step 2's item still held, drops it into the wrong
-        // bag square and every pick-up after that grabs the wrong thing.
+        // true for "I moved the mouse and clicked", not for "an item was under it".) Every early
+        // exit from here has to put it back in ITS OWN slot first: the cycle restarts at step 1,
+        // and step 1's first act is to click step 1's slot — which, with step 2's item still held,
+        // drops it into the wrong bag square and every pick-up after that grabs the wrong thing.
         _maybeHolding = true;
         bool holding = true;
         bool? Drop(bool? result)
@@ -951,8 +1060,11 @@ public sealed class QuestRole
                 ? $"↩ he handed it straight back — \"{StripStamp(refused)}\". Nothing was lost. That is not a "
                   + "missed click: either the task isn't assigned right now (the phrase may not re-assign it until "
                   + "the journal's request timer is up, or he may need hailing first), or what was picked up wasn't "
-                  + $"what I meant to pick up (it scored {(_lastMatch.Length > 0 ? _lastMatch : "unknown")} — "
-                  + "anything near the limit is a guess)."
+                  + $"what I meant to pick up (it scored {(_lastMatch.Length > 0 ? _lastMatch : "unknown")})."
+                  + (_usedPixels || _lastMatch.Length == 0
+                        ? ""
+                        : " That is a COLOUR average — re-pick this item's slot to switch it to the pixel matcher, "
+                        + "which the wrong item can't pass.")
                 : "↩ the trade closed and he kept nothing. Nothing was lost, and there was nothing more to wait for "
                   + "— either the task isn't assigned right now, or the item picked up wasn't the right one.");
             return;
@@ -1009,7 +1121,7 @@ public sealed class QuestRole
                 var oldSig = new List<string>();
                 foreach (TurnInStep st in _script.Steps)
                     if (!st.HasIcon) unarmed.Add($"{st.Item}'s icon isn't learned (re-pick its slot)");
-                    else if (!st.HasIconSize) oldSig.Add(st.Item);
+                    else if (!st.HasIconSize || !st.HasPixels) oldSig.Add(st.Item);
                 if (!_script.TargetByName)
                     Log?.Invoke("· not targeting by name (the say-phrase needs no target), so the nameplate can't "
                               + "be read and the fixed NPC pick does the work. Stand where you picked him.");
@@ -1019,15 +1131,42 @@ public sealed class QuestRole
                     ? "smart find ARMED: items by icon in the bag area, the NPC by nameplate."
                     : "⚠ smart find is ON but partly unarmed — " + string.Join("; ", unarmed)
                       + ". Unarmed parts fall back to the fixed picks, which is exactly what failed last time.");
+                if (unarmed.Count == 0 && oldSig.Count == 0 && _script.Steps.Count > 0
+                    && _script.Steps.All(x => x.HasPixels))
+                    Log?.Invoke("· matching by real pixels — a copy has to correlate over "
+                              + $"{NccAccept * 100:0}% to be touched, and a different icon in the same colours "
+                              + "scores about 44%.");
+                // Measured against the CURRENT window, not the one the pick was made in: BestNcc
+                // resamples to the live size FIRST and derives the radius from that, so a patch
+                // learned at 1280 wide and run at 2560 doubles the icon — which is precisely when
+                // the cap starts silently narrowing the search, and precisely when the learned
+                // size would have said nothing.
+                (double _wx, double _wy, double liveWf, double liveHf) =
+                    QuestFind.WindowRect(_hwnd()) ?? (0, 0, 0, 0);
+                foreach (TurnInStep st in _script.Steps)
+                {
+                    if (!st.HasPixels || liveWf <= 0) continue;
+                    int lw = (int)Math.Round(st.IconW * liveWf), lh = (int)Math.Round(st.IconH * liveHf);
+                    if (QuestFind.SearchPadWanted(lw) <= QuestFind.SearchPadCap
+                        && QuestFind.SearchPadWanted(lh) <= QuestFind.SearchPadCap) continue;
+                    Log?.Invoke($"⚠ {st.Item}'s icon is {lw}×{lh} px on screen right now, which "
+                                  + $"needs a wider alignment search than the {QuestFind.SearchPadCap} px cap allows "
+                                  + "— some copies may never get lined up, and a search that is silently too narrow "
+                                  + "reports real copies as 'not a copy'. Re-pick it with a TIGHTER square: a box "
+                                  + "the size of one slot is both faster and more accurate than a big one.");
+                }
                 if (oldSig.Count > 0)
                     // ⚠, not "·": the consoles colour warnings amber and dim the routine steps, and
                     // this one has now cost two field runs. The old grid scan divides the bag area
                     // into guessed cells and compares the middle of each — it has matched gauntlets
                     // to a totem at 24 and can "find" an item in an empty square with total
                     // confidence, after which every click in the gesture lands on nothing.
-                    Log?.Invoke("⚠ " + string.Join(", ", oldSig) + " still use(s) the OLD grid scan — "
-                              + "re-pick the slot once (drag a tight box round the icon) and the precise "
-                              + "sliding search takes over. Until then a 'found' line here may be an empty slot.");
+                    Log?.Invoke("⚠ " + string.Join(", ", oldSig) + " still match(es) by COLOUR AVERAGE — the "
+                              + "measure that cannot separate the real item from a Bone-clasped Girdle, because it "
+                              + "throws away almost all of the picture. RE-PICK THAT ITEM'S SLOT once, with the "
+                              + "fixed square over one copy, and she learns its actual pixels instead. That is the "
+                              + "single change that fixes 'it grabbed the wrong thing' and 'it can't find it any "
+                              + "more'.");
             }
 
             // Open the bags before the first scan rather than hoping they're up. Nothing in the
@@ -1391,8 +1530,14 @@ public sealed class QuestRole
                             + "quest's state, not the bot's aim: the task isn't assigned right now. The journal's "
                             + "request timer may not be up yet, or this NPC may want hailing before the phrase will "
                             + "re-assign it. If the journal DOES show the task, then what was picked up wasn't the "
-                            + $"right item — the last scan scored {(_lastMatch.Length > 0 ? _lastMatch : "unknown")}, "
-                            + "so lower \"icon match\" on the card until the wrong one stops qualifying.";
+                            + $"right item — the last scan scored {(_lastMatch.Length > 0 ? _lastMatch : "unknown")}"
+                            + (_usedPixels
+                                ? ", which is the pixel matcher, so the square really did hold this item. That "
+                                + "points back at the quest's state rather than at the aim."
+                                : _lastMatch.Length == 0
+                                  ? "."
+                                  : ", which is a COLOUR average — re-pick that item's slot and she'll match its "
+                                  + "actual pixels instead, which is the change that stops the wrong item qualifying.");
                     else if (scanFoundNothing)
                         why = "Nothing was ever offered: the bag scan couldn't find these items to pick up. Either "
                             + "you're out of them, or the bags aren't open (set an open-bags key on this card), or "

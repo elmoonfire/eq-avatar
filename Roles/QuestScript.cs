@@ -46,16 +46,35 @@ public sealed class TurnInStep
     /// EXACTLY this size, so a match is same-region-to-same-region and scores razor-sharp.</summary>
     public double IconW { get; set; }
     public double IconH { get; set; }
+    /// <summary>
+    /// The icon's ACTUAL PIXELS, at the size the game draws them.
+    ///
+    /// This is what Auto Merge learned the hard way and the Quest Runner spent four field tests
+    /// without. The 6×6 colour signature above throws away almost all of the picture and then
+    /// measures what's left with a ruler that puts a DIFFERENT icon in the same palette closer to
+    /// the reference than the RIGHT icon three pixels out of alignment — so no threshold can keep
+    /// one and drop the other. Hayden's log is that arithmetic in the field: his Orders matched at
+    /// 33 against a bar of 35 on a good pass and 40 on a bad one, while a Bone-clasped Girdle
+    /// scored 35, all three inside the same few points.
+    ///
+    /// Normalized cross-correlation over these pixels, with an alignment search, separates them by
+    /// half the scale: the right icon scores over 0.97 even when it's brighter or highlighted, and
+    /// a different icon in the same colours scores about 0.44.
+    /// </summary>
+    public QuestFind.IconPatch? IconPixels { get; set; }
+
     /// <summary>The picture the signature was learned from, so you can SEE what she matches
     /// against instead of trusting 108 numbers in a file.</summary>
     public PickShot? Shot { get; set; }
 
     [JsonIgnore] public bool HasIcon => IconSig is { Length: 108 };
     [JsonIgnore] public bool HasIconSize => IconW > 0.002 && IconH > 0.002;
+    [JsonIgnore] public bool HasPixels => IconPixels is { Ok: true };
 
     public TurnInStep Clone() => new()
     { Item = Item, Qty = Qty, Quest = Quest, Slot = new ScreenPoint { X = Slot.X, Y = Slot.Y },
-      IconSig = IconSig?.ToArray(), IconW = IconW, IconH = IconH, Shot = Shot };
+      IconSig = IconSig?.ToArray(), IconW = IconW, IconH = IconH, Shot = Shot,
+      IconPixels = IconPixels };
 }
 
 /// <summary>

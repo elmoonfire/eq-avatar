@@ -673,12 +673,53 @@ public partial class MainWindow
                             $"Put the square over one {captured.Item} in your inventory, then press Enter.",
                             (frame, box) =>
                             {
-                                captured.IconSig = QuestFind.SigFromRegion(frame, box.X, box.Y, box.W, box.H);
+                                double[]? sig = QuestFind.SigFromRegion(frame, box.X, box.Y, box.W, box.H);
+                                if (sig is null)
+                                {
+                                    // Assigning it anyway would NULL a signature that was already
+                                    // good, leave the pixels behind, and persist the pair — and the
+                                    // runner's proposer would then dereference the missing one.
+                                    //
+                                    // The snapshot goes too. By the time this runs the picker has
+                                    // already moved the slot point and stored a picture of the NEW
+                                    // square, while the signature still describes the OLD one — so
+                                    // the "here's what I match against" window would be showing a
+                                    // square the runner has never seen. A missing picture says
+                                    // "re-pick"; a wrong one says nothing and means it.
+                                    captured.Shot = null;
+                                    QstStatus.Text = "That square didn't produce a signature — the icon was NOT "
+                                                   + "relearned (the old one is still in use). Put the square fully "
+                                                   + "inside the game window, over one copy of the item, and re-pick.";
+                                    QstStatus.Foreground = Hex("#FFCB6B");
+                                    return;
+                                }
+                                captured.IconSig = sig;
+                                // THE PIXELS, same as Auto Merge learns them. The signature stays as
+                                // a fast proposer; this is what decides.
+                                QuestFind.IconPatch? patch = QuestFind.PatchFromRegion(frame, box.X, box.Y, box.W, box.H);
+                                // Capped, because this rides inside questscripts.json — which is
+                                // rewritten in full every time any field on any card loses focus.
+                                // At a slot-sized square it is under 3 KB; a big free drag could
+                                // put a quarter of a megabyte into a file paid for on every edit.
+                                captured.IconPixels = patch is { Ok: true } && patch.Data.Length <= 120_000 ? patch : null;
                                 captured.IconW = box.W;              // the box's own size drives the sliding
                                 captured.IconH = box.H;              // search — no columns, no rows, no questions
-                                if (captured.IconSig is not null)
-                                    QstStatus.Text = $"Saved — and learned {captured.Item}'s icon, so she'll find the "
-                                                   + "next copy wherever it sits in the bag area.";
+                                if (patch is { Ok: true } && patch.Data.Length > 120_000)
+                                {
+                                    QstStatus.Text = $"That square is {patch.W}×{patch.H} px — too big to store as a "
+                                                   + "pixel reference, so this item falls back to colour matching. "
+                                                   + "Shrink the square to about one slot (the wheel resizes it) and "
+                                                   + "re-pick: a tighter square is both faster and more accurate.";
+                                    QstStatus.Foreground = Hex("#FFCB6B");
+                                }
+                                else if (captured.IconSig is not null)
+                                    QstStatus.Text = captured.HasPixels
+                                        ? $"Saved — learned {captured.Item}'s icon as {captured.IconPixels!.W}×"
+                                          + $"{captured.IconPixels.H} real pixels (search radius ±"
+                                          + $"{QuestFind.SearchPadFor(captured.IconPixels.W)}). She'll match those "
+                                          + "rather than a colour average, which is what kept picking up the wrong item."
+                                        : $"Saved — and learned {captured.Item}'s icon, so she'll find the "
+                                          + "next copy wherever it sits in the bag area.";
                             },
                             sh => captured.Shot = sh,
                             SwatchSize, rememberSize: true)) Persist(); RenderQuests(); },
@@ -1000,7 +1041,8 @@ public partial class MainWindow
                     + "…(match N of M allowed)\" lines: a real match scores well under the limit, and anything just "
                     + "inside it is a guess that will pick up the wrong item. If she starts handing over the wrong "
                     + "thing, drop it until the wrong item stops qualifying — a few points ABOVE the score your "
-                    + "real item gets, not level with it.",
+                    + "real item gets, not level with it. ONLY used for items whose icon was picked before the "
+                    + "pixel matcher: re-pick an item's slot and this stops applying to it entirely.",
         };
         tolBox.LostFocus += (_, _) =>
         {
@@ -1483,7 +1525,12 @@ public partial class MainWindow
     {
         string note = !step.HasIcon
             ? "No icon signature on this step — she will click the fixed slot and hope. Re-pick it."
-            : step.HasIconSize
+            : step.HasPixels
+                ? $"She matches this item's REAL PIXELS ({step.IconPixels!.W}×{step.IconPixels.H}), aligning the "
+                + $"reference over each candidate square and requiring 85% correlation. A different icon in the "
+                + "same colours scores about 44%, so there is no threshold to tune here — either it is the item or "
+                + "it isn't."
+                : step.HasIconSize
                 ? "She slides a window of exactly this size across the bag area and clicks the closest match "
                 + "(needs a score of " + Math.Clamp(tolerance, 8, 60).ToString("0") + " or better, "
                 + "which is the \"icon match\" setting on the card)."
