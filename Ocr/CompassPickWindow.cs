@@ -29,9 +29,12 @@ namespace EQAvatar.Spike.Ocr;
 /// pixels into the reference, and a drag that varies makes every pick a different experiment.
 ///
 /// The swatch is a FIXED square, sized in real frame pixels, that you place with a click and nudge
-/// with the arrow keys — one keypress, one pixel, however the image is scaled on screen. What you
-/// see magnified beside it is exactly the pixels that get stored, which is the whole point: the
-/// comparison size and the picked size are the same number by construction.
+/// with the arrow keys — one keypress, one pixel, however the image is scaled on screen. Beside it
+/// is a magnified view of what is inside it, pixel for pixel.
+///
+/// This window does NOT know what the caller does with the box. On an icon pick the square's size
+/// is the answer; on a point pick only its centre survives. So nothing here promises that the
+/// square is "what gets stored" — the caller says what its own pick keeps, in its own hint.
 /// </summary>
 public sealed class CompassPickWindow : Window
 {
@@ -71,11 +74,14 @@ public sealed class CompassPickWindow : Window
     /// scaling this window does to fit the frame on screen can never leak into the result.</summary>
     private int _swPx, _swX, _swY;
     private bool _placed;
+    private readonly bool _offerSwatch;
+    private readonly string _baseHint;
     /// <summary>Magnified by a WHOLE number, never scaled to fit. At 168 px over a 32 px swatch the
     /// factor is 5.25, so nearest-neighbour draws some source columns six device pixels wide and
     /// others five — an uneven grid, in the one picture the user is asked to judge single-pixel
     /// alignment from.</summary>
-    private readonly Image _loupe = new() { Stretch = Stretch.Fill, HorizontalAlignment = HorizontalAlignment.Center };
+    private readonly Image _loupe = new()
+    { Stretch = Stretch.Fill, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center };
     private const int LoupeTarget = 168;
     private readonly TextBlock _readout = new()
     {
@@ -106,13 +112,17 @@ public sealed class CompassPickWindow : Window
     /// <param name="frame">A captured game frame to draw the box on.</param>
     /// <param name="title">Window title — names whatever is being picked.</param>
     /// <param name="hint">The one line of instruction shown above the frame.</param>
-    /// <param name="swatchPx">Non-zero offers the fixed square at this size, in frame pixels, and
-    /// starts in that mode. Zero keeps the original drag-only picker, which is what every caller
-    /// that isn't picking an inventory icon wants.</param>
+    /// <param name="swatchPx">Non-zero OFFERS the fixed square at this size, in frame pixels — the
+    /// button to switch to it appears. Zero is the original drag-only picker.</param>
+    /// <param name="startSwatch">Whether the square is the mode the window OPENS in. Separate from
+    /// offering it, because the two questions have different answers: a Place Item box or an
+    /// inventory icon wants the square first and the drag as the escape hatch, while a compass
+    /// strip, an HP bar, a bag area or a tier counter is a rectangle of a size only the user knows
+    /// and wants the drag first. Both are always one button apart.</param>
     public CompassPickWindow(System.Drawing.Bitmap frame,
                              string title = "Pick the compass region",
                              string hint = "Drag a box around the COMPASS strip (make it opaque in-game first), then press Enter.",
-                             int swatchPx = 0)
+                             int swatchPx = 0, bool startSwatch = false)
     {
         Title = title;
         Width = Math.Min(1280, frame.Width + 40);
@@ -130,10 +140,13 @@ public sealed class CompassPickWindow : Window
         _img.Source = src;
         _frameSrc = src;
 
-        _swatch = swatchPx > 0;
+        _offerSwatch = swatchPx > 0;
+        _baseHint = hint;
+        _swatch = swatchPx > 0 && startSwatch;
         _swPx = Math.Clamp(swatchPx > 0 ? swatchPx : 32, MinSwatch, MaxSwatch);
         _swX = (int)(_frameW / 2); _swY = (int)(_frameH / 2);
-        _hint.Text = _swatch ? SwatchHint(hint) : hint;
+        _hint.Text = HintText();
+        UpdateOkLabel();
 
         RenderOptions.SetBitmapScalingMode(_loupe, BitmapScalingMode.NearestNeighbor);
         _loupeBox = new Border
@@ -148,11 +161,18 @@ public sealed class CompassPickWindow : Window
                 {
                     new TextBlock
                     {
-                        Text = "EXACTLY WHAT GETS STORED", FontSize = 8.5, FontWeight = FontWeights.Bold,
+                        Text = "INSIDE THE SQUARE", FontSize = 8.5, FontWeight = FontWeights.Bold,
                         Foreground = new SolidColorBrush(Color.FromRgb(0x5E, 0x7C, 0x9A)),
                         Margin = new Thickness(0, 0, 0, 4),
                     },
-                    _loupe, _readout,
+                    // A FIXED-HEIGHT well, not the image itself. The magnification factor is
+                    // LoupeTarget/_swPx rounded DOWN, so the picture's height steps hard — at a
+                    // 84 px square it is 168 tall, at 85 it is 85. Letting that drive the panel
+                    // made one wheel notch shrink this Auto-height row by 83 px, which resizes the
+                    // canvas below it, which changes the scale everything on the frame is drawn
+                    // through. Pinning it here means the wheel resizes a picture and nothing else.
+                    new Border { Height = LoupeTarget, Child = _loupe },
+                    _readout,
                 },
             },
             Visibility = _swatch ? Visibility.Visible : Visibility.Collapsed,
@@ -202,6 +222,7 @@ public sealed class CompassPickWindow : Window
                 _ox = _swX; _oy = _swY;
                 _placed = true;
                 _ok.IsEnabled = true;
+                UpdateOkLabel();
                 DrawSwatch();
                 _canvas.CaptureMouse();
                 Focus();
@@ -276,6 +297,9 @@ public sealed class CompassPickWindow : Window
             // Small on purpose: this picker is also used for HP/mana bars, and a vertical bar is
             // only a few pixels wide on screen.
             _ok.IsEnabled = _band.Width > 5 && _band.Height > 3;
+            // Convert to frame pixels NOW, while the canvas is the size the drag happened in. From
+            // here on that is the drag's real record; the band's canvas rect is just a picture of it.
+            CaptureDragRect();
         };
 
         // The wheel resizes the square. One notch, one pixel — this is the number that has to match
@@ -311,34 +335,132 @@ public sealed class CompassPickWindow : Window
             }
             _placed = true;
             _ok.IsEnabled = true;
+            UpdateOkLabel();
             DrawSwatch();
             e.Handled = true;
         };
 
-        Loaded += (_, _) => { if (_swatch) { Focus(); DrawSwatch(); } };
-        // The band is positioned through the view scale, and maximising the window changes it. Without
-        // this the square is drawn over the wrong part of the frame until the next mouse move — and
-        // worse, HitTest is measuring against that stale rectangle, so a click meant to place it
-        // reads as a grab and the square jumps.
-        SizeChanged += (_, _) => { if (_swatch) DrawSwatch(); };
+        // Deliberately NOT drawing the square here. Drawing an unplaced square puts a finished-looking
+        // blue selection on screen above a dead Enter key, with nothing on screen saying why. The
+        // square appears the moment the pointer is over the picture and follows it until a click
+        // places it, which is the same information without the lie.
+        Loaded += (_, _) => { if (_swatch) Focus(); };
+        // The band is positioned through the view SCALE, and the scale changes whenever the canvas
+        // does — maximising the window, and also the loupe panel appearing or vanishing, which
+        // resizes the header row. Listening on the CANVAS rather than the window catches both, and
+        // it fires after the arrange pass, so the numbers are the ones actually on screen. Without
+        // this the box is drawn over the wrong part of the frame — and worse, HitTest measures
+        // against that stale rectangle, so a click meant to place the square reads as a grab.
+        _canvas.SizeChanged += (_, _) => Redraw();
     }
 
-    private static string SwatchHint(string hint) =>
-        hint + "\n\nA FIXED SQUARE, the exact size the bot compares with. Click to place it, drag it or use "
-             + "the ARROW KEYS to nudge it one pixel at a time (Shift = ten), and the WHEEL or +/− to resize it. "
-             + "Match it to one inventory slot — what you see magnified on the right is exactly the pixels that "
-             + "get stored. Switch to free drag for anything bigger.";
+    /// <summary>Redraw whichever selection this mode owns from its own record — the swatch from its
+    /// frame-pixel position, a completed drag from the frame rect captured when it was made.</summary>
+    private void Redraw()
+    {
+        if (!_swatch)
+        {
+            if (_dragOk) PlaceDragBand();
+            // A box that was started and abandoned — too small to accept, so never recorded — would
+            // otherwise sit there at coordinates that no longer mean anything. Not while one is
+            // actually being dragged, where the band is the live thing the mouse is drawing.
+            else if (_mode == DragMode.None) _band.Visibility = Visibility.Collapsed;
+            return;
+        }
+        if (_placed) { DrawSwatch(); return; }
+
+        // NOT placed yet: the square on screen is a preview that lives under the pointer. Redrawing
+        // it from _swX/_swY would be wrong — those were derived from the pointer at the OLD scale,
+        // so the preview would sit correctly over a frame position the pointer is no longer on. A
+        // click is then read against it as a GRAB (HitTest says Move), CentreSwatchOn is skipped,
+        // and the square jumps somewhere the user never clicked and stores that.
+        //
+        // This is not a corner case: the wheel is the invited way to size the square, and the loupe
+        // it resizes is what sets the header row's height — LoupeTarget / _swPx is integer division,
+        // so 84 → 85 px collapses the loupe from 168 px tall to 85 and moves the canvas under it.
+        if (_canvas.IsMouseOver) { CentreSwatchOn(Mouse.GetPosition(_canvas)); DrawSwatch(); }
+        else _band.Visibility = Visibility.Collapsed;
+    }
+
+    /// <summary>The instruction has to follow the mode. A window that opens on free drag while the
+    /// square is one button away, and never says so, is a feature nobody finds.</summary>
+    private string HintText() => _swatch
+        // Deliberately says nothing about what the square's SIZE means. On an icon pick the size is
+        // the reference and the stride; on a point pick only the centre survives and the size is
+        // thrown away. The caller knows which it is and says so in its own hint — this window
+        // claiming "exactly the pixels that get stored" on a pick that stores one coordinate would
+        // be a lie printed directly above the caller's line saying it clicks the centre.
+        ? _baseHint + "\n\nA FIXED SQUARE. Click to place it, drag it or use the ARROW KEYS to nudge it one "
+            + "pixel at a time (Shift = ten), and the WHEEL or +/− to resize it. The magnified view on the "
+            + "right shows what is inside it, pixel for pixel. Switch to free drag for anything bigger."
+        : _baseHint + (_offerSwatch
+            ? "\n\nDrag a box — or press “Back to the fixed square” for a set-size square you place with "
+              + "one click and nudge with the arrow keys, which is better for anything the size of an "
+              + "inventory slot."
+            : "");
+
+    /// <summary>A completed free drag, in FRAME pixels, remembered across a trip into swatch mode.
+    /// The two modes share one rectangle, so switching used to silently destroy a box the user had
+    /// already drawn — and the button is on every pick now, so that was one curious click away on
+    /// the bag area and the tier counter. Frame pixels rather than canvas points because the window
+    /// can be resized while the square is up, which would make stored canvas points point elsewhere.</summary>
+    private double _dragX, _dragY, _dragW, _dragH;
+    private bool _dragOk;
+
+    /// <summary>Record the band's rect in FRAME pixels. Canvas points are only meaningful at the
+    /// canvas size they were measured in, and that size changes — the window resizes, and the loupe
+    /// panel appearing or vanishing moves the header row's height.</summary>
+    private void CaptureDragRect()
+    {
+        (double sc, double ox, double oy) = View();
+        double left = Canvas.GetLeft(_band), top = Canvas.GetTop(_band);
+        _dragOk = _ok.IsEnabled && _band.Visibility == Visibility.Visible && sc > 0
+                  && !double.IsNaN(left) && !double.IsNaN(top);
+        if (!_dragOk) return;
+        _dragX = (left - ox) / sc; _dragY = (top - oy) / sc;
+        _dragW = _band.Width / sc; _dragH = _band.Height / sc;
+    }
+
+    /// <summary>Draw the remembered drag rect at the CURRENT scale.</summary>
+    private void PlaceDragBand()
+    {
+        (double sc, double ox, double oy) = View();
+        if (!_dragOk || sc <= 0) return;
+        Canvas.SetLeft(_band, ox + _dragX * sc); Canvas.SetTop(_band, oy + _dragY * sc);
+        _band.Width = Math.Max(0, _dragW * sc); _band.Height = Math.Max(0, _dragH * sc);
+        _band.Visibility = Visibility.Visible;
+    }
 
     private void SetMode(bool swatch)
     {
+        if (swatch == _swatch) return;
         _swatch = swatch;
+        _hint.Text = HintText();
         _loupeBox.Visibility = swatch ? Visibility.Visible : Visibility.Collapsed;
-        _band.Visibility = swatch ? Visibility.Visible : Visibility.Collapsed;
-        _ok.IsEnabled = swatch && _placed;
         _mode = DragMode.None;
         UpdateModeButton();
-        if (swatch) DrawSwatch();
+        if (swatch)
+        {
+            _ok.IsEnabled = _placed;
+            _band.Visibility = _placed ? Visibility.Visible : Visibility.Collapsed;
+        }
+        else
+        {
+            _ok.IsEnabled = _dragOk;
+            _band.Visibility = _dragOk ? Visibility.Visible : Visibility.Collapsed;
+        }
+        UpdateOkLabel();
+        // Everything below depends on the view SCALE, and the line above just changed the layout
+        // that determines it — WPF arranges after this handler returns, so measuring now would use
+        // the old canvas. _canvas.SizeChanged does the redraw when the size actually changes; this
+        // covers the case where it happens not to.
+        Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Loaded, new Action(Redraw));
     }
+
+    /// <summary>The disabled OK button is the only thing on screen that can answer "why did Enter do
+    /// nothing?", so it says so itself rather than looking broken.</summary>
+    private void UpdateOkLabel() =>
+        _ok.Content = _swatch && !_placed ? "Click the picture to place the square" : "Use this region (Enter)";
 
     private void UpdateModeButton() =>
         _modeBtn.Content = _swatch ? "Free drag instead" : "Back to the fixed square";

@@ -103,7 +103,9 @@ public partial class MainWindow
                 + "copy, nudged a few pixels either way to find the best fit. A real copy matches over 85% even "
                 + "misaligned and dimmed; a different icon in the same colours scores around 45%."),
             () => { if (PickMergeRect(r => { }, "one copy of the item",
-                        "Put the square over ONE copy in your bag, matched to the slot, then press Enter.",
+                        "Put the square over ONE copy in your bag, matched to the slot, then press Enter. "
+                        + "These exact pixels become the reference, and this exact size becomes the size she "
+                        + "compares with — so the square, not the magnified view, is what has to fit the slot.",
                         sh => Shot(p, "item", sh),
                         (frame, box) =>
                         {
@@ -146,7 +148,7 @@ public partial class MainWindow
                                 + "they were measured against the old picture."
                                 : "· re-picked the copy's icon.");
                         },
-                        _settings.IconSwatchPx)) { p.Save(); RenderMergeUi(); } },
+                        SwatchSize, rememberSize: true)) { p.Save(); RenderMergeUi(); } },
             p.HasIcon ? () => ShowMergeShot(p, "item", "The copy's icon",
                 p.HasIconSize
                     ? "She slides a window of exactly this size across the bag area and clicks the closest match."
@@ -409,18 +411,41 @@ public partial class MainWindow
         finally { _mrgNameBusy = false; }
     }
 
+    /// <summary>The remembered square size, defended against a settings file that predates the
+    /// setting or was hand-edited to zero. Zero reads as "no square offered", so an old settings
+    /// file would quietly turn the feature off on every pick with nothing said about it.</summary>
+    private int SwatchSize => Math.Clamp(_settings.IconSwatchPx <= 0 ? 32 : _settings.IconSwatchPx,
+                                         CompassPickWindow.MinSwatch, CompassPickWindow.MaxSwatch);
+
+    /// <summary>
+    /// A point pick, which is a region pick whose CENTRE is the only part kept.
+    ///
+    /// That makes the fixed square the better tool by some distance: the size is irrelevant to the
+    /// answer, so placing a square with one click and nudging it with the arrow keys beats dragging
+    /// a small box through a view where one mouse pixel is two frame pixels. Free drag is still one
+    /// button away.
+    /// </summary>
     private bool PickMergePoint(ScreenPoint point, string what, string hint, Action<PickShot?>? shot = null)
         => PickMergeRect(r => { point.X = r.X + r.W / 2; point.Y = r.Y + r.H / 2; }, what,
-                         hint + "  (drag a small box — she clicks its centre)", shot);
+                         hint + "  (she clicks the centre of whatever you mark — the square's size "
+                              + "doesn't matter here)", shot,
+                         swatchPx: SwatchSize);
 
     /// <param name="swatchPx">Non-zero opens the picker on the FIXED SQUARE instead of free drag —
     /// the right tool for an inventory slot, where the box has to be the same size every time and
-    /// the mouse cannot resolve a single frame pixel through the picker's scaled-down view. The
-    /// size the user settles on is written back to settings so the next pick starts there.</param>
+    /// the mouse cannot resolve a single frame pixel through the picker's scaled-down view.</param>
+    /// <param name="rememberSize">Whether the size the user settles on is written back to settings
+    /// as THE icon swatch size. True on the icon pick alone, because there the square's size is the
+    /// answer: it becomes the reference's dimensions and the stride the sweep searches with.
+    /// Everywhere else the square is only a placement aid — a point pick keeps its CENTRE and throws
+    /// the size away — so letting those write the setting means wheeling the square up to cover the
+    /// Merge Item button silently resizes the next icon pick to two slots wide, and the reference
+    /// quietly gains a neighbour's pixels. The square is still offered on every pick; only the
+    /// remembering is narrowed.</param>
     private bool PickMergeRect(Action<(double X, double Y, double W, double H)> store, string what, string hint,
                                Action<PickShot?>? shot = null,
                                Action<System.Drawing.Bitmap, (double X, double Y, double W, double H)>? learn = null,
-                               int swatchPx = 0)
+                               int swatchPx = 0, bool rememberSize = false)
     {
         // MergePlan.Current is the SAME object the running sweep reads every pass. Re-picking the
         // bag area under it would move the rectangle it is scanning mid-run — and a modal opened
@@ -439,9 +464,15 @@ public partial class MainWindow
             MrgStatus.Foreground = Hex("#FFCB6B");
             return false;
         }
-        var dlg = new CompassPickWindow(frame, "Pick " + what, hint, swatchPx) { Owner = this };
+        // The square is OFFERED on every pick and OPENS on the ones it suits. A bag area or a tier
+        // counter is a rectangle only the user knows the shape of, so those start on the drag — but
+        // the button is there, because the last thing this should do is make someone hunt for a
+        // feature they were told exists.
+        int offered = swatchPx > 0 ? swatchPx : SwatchSize;
+        var dlg = new CompassPickWindow(frame, "Pick " + what, hint, offered, startSwatch: swatchPx > 0)
+        { Owner = this };
         if (dlg.ShowDialog() != true) return false;
-        if (dlg.UsedSwatch && dlg.SwatchPx != swatchPx)
+        if (rememberSize && dlg.UsedSwatch && dlg.SwatchPx != offered)
         {
             _settings.IconSwatchPx = dlg.SwatchPx;
             try { _settings.Save(); } catch { /* a remembered size is not worth an exception */ }

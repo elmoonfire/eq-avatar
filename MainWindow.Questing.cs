@@ -681,7 +681,7 @@ public partial class MainWindow
                                                    + "next copy wherever it sits in the bag area.";
                             },
                             sh => captured.Shot = sh,
-                            _settings.IconSwatchPx)) Persist(); RenderQuests(); },
+                            SwatchSize, rememberSize: true)) Persist(); RenderQuests(); },
                 captured.Slot.Set ? () => ShowStepShot(captured, script.IconTolerance) : null));
 
             if (total > 1)
@@ -1412,7 +1412,7 @@ public partial class MainWindow
     private bool PickQuestPoint(ScreenPoint point, string what, string hint,
                                 Action<System.Drawing.Bitmap, (double X, double Y, double W, double H)>? learn = null,
                                 Action<PickShot?>? shot = null,
-                                int swatchPx = 0)
+                                int swatchPx = 0, bool rememberSize = false)
     {
         if (_grindTarget == IntPtr.Zero) AutoTargetEq();
         // Disposed here, not by the picker: CaptureFrame allocates a full-window 32bpp bitmap
@@ -1424,10 +1424,28 @@ public partial class MainWindow
             QstStatus.Foreground = Hex("#FFCB6B");
             return false;
         }
-        var dlg = new CompassPickWindow(frame, "Pick " + what,
-            swatchPx > 0 ? hint : hint + "  (drag a small box — she clicks its centre)", swatchPx) { Owner = this };
+        // A point pick keeps only the CENTRE, so the square is the better tool for all of them — the
+        // NPC, the GIVE button, the confirm, the item slot. One click beats dragging a small box
+        // through a view that halves the mouse's precision.
+        //
+        // But the item slot is not only a point pick: its `learn` callback keeps the box's SIZE as
+        // the reference's dimensions and the stride of the sliding search. Telling that user "she
+        // clicks the centre of whatever you mark" invites them to wheel the square out to a
+        // comfortable size, which quietly pulls the neighbouring slots into the reference. The two
+        // picks want opposite instructions, and rememberSize is exactly the thing that tells them
+        // apart — it is set on the pick whose box is learned.
+        int offered = swatchPx > 0 ? swatchPx : SwatchSize;
+        string tail = rememberSize
+            ? "  (these exact pixels become the reference AND this exact size becomes the size she "
+              + "compares with, so the square itself has to fit the slot — not the magnified view)"
+            : "  (she clicks the centre of whatever you mark — the square's size doesn't matter here)";
+        var dlg = new CompassPickWindow(frame, "Pick " + what, hint + tail, offered, startSwatch: true)
+        { Owner = this };
         if (dlg.ShowDialog() != true) return false;
-        if (dlg.UsedSwatch && dlg.SwatchPx != swatchPx)
+        // Only a pick whose LEARNING uses the box may set the remembered size. The NPC, the GIVE
+        // button and the confirm keep a centre and nothing else, so a square wheeled out to cover a
+        // button there would otherwise become the size of the next item pick's reference.
+        if (rememberSize && dlg.UsedSwatch && dlg.SwatchPx != offered)
         {
             _settings.IconSwatchPx = dlg.SwatchPx;
             try { _settings.Save(); } catch { /* a remembered size is not worth an exception */ }
@@ -1498,7 +1516,10 @@ public partial class MainWindow
             QstStatus.Foreground = Hex("#FFCB6B");
             return false;
         }
-        var dlg = new CompassPickWindow(frame, "Pick " + what, hint) { Owner = this };
+        // The square is OFFERED (a bag area can be easier to place than to drag) but never opens,
+        // and never writes the remembered size back: a bag area is a rectangle whose size is the
+        // user's judgement, and nothing about it should reach the icon reference.
+        var dlg = new CompassPickWindow(frame, "Pick " + what, hint, SwatchSize) { Owner = this };
         if (dlg.ShowDialog() != true) return false;
         store((dlg.NX, dlg.NY, dlg.NW, dlg.NH));
         // A bag area is already large; padding it further would just photograph the screen.
