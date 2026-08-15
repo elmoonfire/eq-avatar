@@ -414,8 +414,29 @@ public partial class MainWindow
     /// <summary>The remembered square size, defended against a settings file that predates the
     /// setting or was hand-edited to zero. Zero reads as "no square offered", so an old settings
     /// file would quietly turn the feature off on every pick with nothing said about it.</summary>
-    private int SwatchSize => Math.Clamp(_settings.IconSwatchPx <= 0 ? 32 : _settings.IconSwatchPx,
-                                         CompassPickWindow.MinSwatch, CompassPickWindow.MaxSwatch);
+    private int SwatchSize => Math.Clamp(
+        _settings.IconSwatchPx <= 0 ? CompassPickWindow.DefaultSwatch : _settings.IconSwatchPx,
+        CompassPickWindow.MinSwatch, CompassPickWindow.MaxSwatch);
+
+    /// <summary>Take back whatever the picker learned about how this user works — the square's size
+    /// (only where the size is the answer) and where they dragged the magnified view to. Both are
+    /// PREFERENCES, not the pick: the pick is already stored by the time this runs, so a settings
+    /// file that won't write must never surface as a failed pick.</summary>
+    private void AbsorbPickerPrefs(CompassPickWindow dlg, int offered, bool rememberSize)
+    {
+        bool dirty = false;
+        if (rememberSize && dlg.UsedSwatch && dlg.SwatchPx != offered)
+        {
+            _settings.IconSwatchPx = dlg.SwatchPx;
+            dirty = true;
+        }
+        if (dlg.LoupeMoved && (dlg.LoupeNX != _settings.LoupeNX || dlg.LoupeNY != _settings.LoupeNY))
+        {
+            _settings.LoupeNX = dlg.LoupeNX; _settings.LoupeNY = dlg.LoupeNY;
+            dirty = true;
+        }
+        if (dirty) try { _settings.Save(); } catch { /* a remembered preference is not worth an exception */ }
+    }
 
     /// <summary>
     /// A point pick, which is a region pick whose CENTRE is the only part kept.
@@ -469,14 +490,11 @@ public partial class MainWindow
         // the button is there, because the last thing this should do is make someone hunt for a
         // feature they were told exists.
         int offered = swatchPx > 0 ? swatchPx : SwatchSize;
-        var dlg = new CompassPickWindow(frame, "Pick " + what, hint, offered, startSwatch: swatchPx > 0)
+        var dlg = new CompassPickWindow(frame, "Pick " + what, hint, offered, startSwatch: swatchPx > 0,
+                                        loupeNX: _settings.LoupeNX, loupeNY: _settings.LoupeNY)
         { Owner = this };
         if (dlg.ShowDialog() != true) return false;
-        if (rememberSize && dlg.UsedSwatch && dlg.SwatchPx != offered)
-        {
-            _settings.IconSwatchPx = dlg.SwatchPx;
-            try { _settings.Save(); } catch { /* a remembered size is not worth an exception */ }
-        }
+        AbsorbPickerPrefs(dlg, offered, rememberSize);
         store((dlg.NX, dlg.NY, dlg.NW, dlg.NH));
         // Learning and the snapshot both read the PICKER'S frame, never a fresh grab — the modal
         // was covering the game, and a new capture would photograph this app (the 0.9.37 lesson).

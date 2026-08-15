@@ -89,16 +89,52 @@ public sealed class AppSettings
     /// reading when something has already gone wrong.</summary>
     public bool ConsoleDetail { get; set; } = false;
 
+    /// <summary>Deliberately the PICKER's own fallback rather than a second 40 written here. Two
+    /// constants that must agree, and don't have to, are a defect waiting for someone to change one:
+    /// the migration below compares against the old number, and if these ever drifted it would
+    /// "upgrade" people onto a size nothing else uses.</summary>
+    public const int DefaultIconSwatchPx = Ocr.CompassPickWindow.DefaultSwatch;
+
     /// <summary>
     /// The side, in real screen pixels, of the fixed square used to pick an inventory icon.
     ///
     /// Remembered so every pick is the SAME size. That is the point of the square: the size of the
     /// reference sets the stride the bot searches with and its contents are what everything is
     /// compared against, so a reference that changes size between picks makes every run a different
-    /// experiment. 32 is a starting guess — the picker shows the number and the magnified pixels,
+    /// experiment. 40 is a starting guess — the picker shows the number and the magnified pixels,
     /// and whatever the user settles on for their UI scale is kept.
+    ///
+    /// It was 32 through 0.10.34, which field use found too small for even the tightest slot, so
+    /// `SwatchRev` below carries a stored 32 up to the new default exactly once. ⚠ Known cost, and
+    /// it is not closable: a file written before `SwatchRev` existed carries no record of whether
+    /// its 32 was the untouched default or a size the user deliberately settled on, so someone in
+    /// the second group gets moved to 40 too. It is visible rather than silent — the picker's
+    /// readout states the number and the magnified pixels show the fit — and one wheel notch puts
+    /// it back. Any FUTURE default change must not lean on this: the marker now exists, so the
+    /// migration for it can key off the revision alone and leave chosen values alone.
     /// </summary>
-    public int IconSwatchPx { get; set; } = 32;
+    public int IconSwatchPx { get; set; } = DefaultIconSwatchPx;
+
+    /// <summary>Which generation of the swatch default this settings file has seen. Bumping a
+    /// DEFAULT does nothing for an existing install — the old value is written in the file and wins
+    /// forever — so a default worth changing needs a one-time migration, and a migration needs a
+    /// marker or it re-runs and stamps on a size the user chose deliberately afterwards.
+    ///
+    /// It has to DEFAULT to zero: a settings file written before this field existed has no key for
+    /// it, and System.Text.Json leaves an absent key at the property's initializer — so any non-zero
+    /// default would skip the migration on exactly the files that need it. An install with no
+    /// history instead gets the current number stamped on by <see cref="Fresh"/>, because there is
+    /// nothing there to carry forward and a size it picks AFTERWARDS is a deliberate choice.</summary>
+    public int SwatchRev { get; set; }
+
+    private const int SwatchRevCurrent = 1;
+
+    /// <summary>Where the picker's magnified view sits, as a fraction of the picture area, so it
+    /// lands in the same place at any window size. Negative = never moved, park it out of the way.
+    /// Kept because the useful position is next to whatever the user is picking, and on an ultrawide
+    /// the default corner is most of a metre from the bags.</summary>
+    public double LoupeNX { get; set; } = -1;
+    public double LoupeNY { get; set; } = -1;
 
     public bool HubEnabled { get; set; } = true;
 
@@ -263,10 +299,37 @@ public sealed class AppSettings
         try
         {
             if (File.Exists(FilePath))
-                return JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(FilePath)) ?? new AppSettings();
+            {
+                AppSettings? s = JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(FilePath));
+                if (s is null) return Fresh();
+                s.Migrate();
+                return s;
+            }
         }
         catch { /* fall through to defaults */ }
-        return new AppSettings();
+        return Fresh();
+    }
+
+    /// <summary>Settings for an install with NO history — no file on disk, or one we couldn't read.
+    /// Stamped at the current revision on purpose: every default it holds is already the newest one,
+    /// so there is nothing to carry forward, and anything the user changes from here is a DELIBERATE
+    /// choice that a migration must never overwrite. Without this a fresh install that picked the
+    /// old default by hand would have it silently "upgraded" on the next launch.</summary>
+    private static AppSettings Fresh() => new() { SwatchRev = SwatchRevCurrent };
+
+    /// <summary>One-time carries for settings whose DEFAULT changed, for a file written before the
+    /// change. Guarded by the revision marker so it runs once, and by the old value so it only
+    /// touches a setting still sitting on the number it is replacing — which is NOT the same as
+    /// "only touches values the user never chose"; see `IconSwatchPx` for why that one can't be
+    /// told apart on a file older than the marker. Not saved here: the next Save writes it, and a
+    /// migration that can't reach disk beats one that throws on startup.</summary>
+    private void Migrate()
+    {
+        if (SwatchRev < 1)
+        {
+            if (IconSwatchPx == 32) IconSwatchPx = DefaultIconSwatchPx;   // 32 fitted no slot
+            SwatchRev = 1;
+        }
     }
 
     public void Save()

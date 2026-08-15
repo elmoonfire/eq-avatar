@@ -109,6 +109,24 @@ public sealed class CompassPickWindow : Window
     /// glyph inside a slot; the ceiling is comfortably past any slot on any display.</summary>
     public const int MinSwatch = 8, MaxSwatch = 128;
 
+    /// <summary>Fallback square when the caller offers none — a full inventory slot at the common
+    /// UI scales. 32 was the guess through 0.10.34 and field use found it too small for any slot.</summary>
+    public const int DefaultSwatch = 40;
+
+    // ---------------------------------------------------------------- the movable magnified view
+    private bool _loupeDrag, _loupeTravelled;
+    private Point _loupeGrab, _loupeAt;
+    private double _loupeNX = -1, _loupeNY = -1;
+
+    /// <summary>Where the magnified view was left, as a fraction of the picture area. Negative means
+    /// it has never been moved — park it in the corner.</summary>
+    public double LoupeNX => _loupeNX;
+    public double LoupeNY => _loupeNY;
+
+    /// <summary>True once the user has actually dragged it, so a window that only ever parked it in
+    /// the default corner doesn't write that corner back as a deliberate choice.</summary>
+    public bool LoupeMoved { get; private set; }
+
     /// <param name="frame">A captured game frame to draw the box on.</param>
     /// <param name="title">Window title — names whatever is being picked.</param>
     /// <param name="hint">The one line of instruction shown above the frame.</param>
@@ -119,10 +137,14 @@ public sealed class CompassPickWindow : Window
     /// inventory icon wants the square first and the drag as the escape hatch, while a compass
     /// strip, an HP bar, a bag area or a tier counter is a rectangle of a size only the user knows
     /// and wants the drag first. Both are always one button apart.</param>
+    /// <param name="loupeNX">Where to put the magnified view, as a fraction of the picture area.
+    /// Negative parks it top right. Read back out of <see cref="LoupeNX"/> after the dialog closes,
+    /// but only persist it when <see cref="LoupeMoved"/> is true.</param>
     public CompassPickWindow(System.Drawing.Bitmap frame,
                              string title = "Pick the compass region",
                              string hint = "Drag a box around the COMPASS strip (make it opaque in-game first), then press Enter.",
-                             int swatchPx = 0, bool startSwatch = false)
+                             int swatchPx = 0, bool startSwatch = false,
+                             double loupeNX = -1, double loupeNY = -1)
     {
         Title = title;
         Width = Math.Min(1280, frame.Width + 40);
@@ -143,8 +165,12 @@ public sealed class CompassPickWindow : Window
         _offerSwatch = swatchPx > 0;
         _baseHint = hint;
         _swatch = swatchPx > 0 && startSwatch;
-        _swPx = Math.Clamp(swatchPx > 0 ? swatchPx : 32, MinSwatch, MaxSwatch);
+        _swPx = Math.Clamp(swatchPx > 0 ? swatchPx : DefaultSwatch, MinSwatch, MaxSwatch);
         _swX = (int)(_frameW / 2); _swY = (int)(_frameH / 2);
+        // Only a PAIR of sane fractions is a position. One of them missing, or either outside the
+        // picture, means the stored value can't be trusted — park it rather than putting the panel
+        // somewhere the user then has to hunt for.
+        if (loupeNX is >= 0 and <= 1 && loupeNY is >= 0 and <= 1) { _loupeNX = loupeNX; _loupeNY = loupeNY; }
         _hint.Text = HintText();
         UpdateOkLabel();
 
@@ -153,15 +179,20 @@ public sealed class CompassPickWindow : Window
         {
             CornerRadius = new CornerRadius(8), Background = new SolidColorBrush(Color.FromRgb(0x0C, 0x0F, 0x13)),
             BorderBrush = new SolidColorBrush(Color.FromRgb(0x2A, 0x4A, 0x57)), BorderThickness = new Thickness(1),
-            Padding = new Thickness(5), Margin = new Thickness(10, 0, 0, 0),
+            Padding = new Thickness(5),
             VerticalAlignment = VerticalAlignment.Top, Width = LoupeTarget + 14,
+            // It sits ON the picture now, so it can be dragged next to whatever is being picked.
+            // Parked in a corner it was useless on a wide monitor: the square is in the bags on one
+            // side and the magnified view of it was most of a metre away on the other, which is a
+            // long way to look while nudging something one pixel at a time.
+            Cursor = Cursors.SizeAll,
             Child = new StackPanel
             {
                 Children =
                 {
                     new TextBlock
                     {
-                        Text = "INSIDE THE SQUARE", FontSize = 8.5, FontWeight = FontWeights.Bold,
+                        Text = "INSIDE THE SQUARE  ·  DRAG ME", FontSize = 8.5, FontWeight = FontWeights.Bold,
                         Foreground = new SolidColorBrush(Color.FromRgb(0x5E, 0x7C, 0x9A)),
                         Margin = new Thickness(0, 0, 0, 4),
                     },
@@ -183,16 +214,13 @@ public sealed class CompassPickWindow : Window
         grid.RowDefinitions.Add(new RowDefinition());
         grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
 
-        var head = new Grid { Margin = new Thickness(0) };
-        head.ColumnDefinitions.Add(new ColumnDefinition());
-        head.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-        Grid.SetColumn(_hint, 0); head.Children.Add(_hint);
-        Grid.SetColumn(_loupeBox, 1); head.Children.Add(_loupeBox);
-        Grid.SetRow(head, 0); grid.Children.Add(head);
+        Grid.SetRow(_hint, 0); grid.Children.Add(_hint);
 
         var host = new Grid();
         host.Children.Add(_img);
         _canvas.Children.Add(_band);
+        // LAST, so it draws over the band rather than under it.
+        _canvas.Children.Add(_loupeBox);
         host.Children.Add(_canvas);
         Grid.SetRow(host, 1); grid.Children.Add(host);
 
@@ -351,7 +379,99 @@ public sealed class CompassPickWindow : Window
         // it fires after the arrange pass, so the numbers are the ones actually on screen. Without
         // this the box is drawn over the wrong part of the frame — and worse, HitTest measures
         // against that stale rectangle, so a click meant to place the square reads as a grab.
-        _canvas.SizeChanged += (_, _) => Redraw();
+        _canvas.SizeChanged += (_, _) => { Redraw(); PlaceLoupe(); };
+        // Its size is not known until it has been measured once, and PlaceLoupe needs the size to
+        // keep it on screen — so run again the first time it has one.
+        _loupeBox.SizeChanged += (_, _) => PlaceLoupe();
+
+        // ---- dragging the magnified view. Every one of these marks the event handled: the canvas
+        // underneath treats a press as "place the square here" and a move as "preview it here", so
+        // without this, grabbing the panel would silently move the pick.
+        _loupeBox.MouseLeftButtonDown += (_, e) =>
+        {
+            e.Handled = true;                      // BEFORE the guard below, not after it
+            _loupeGrab = e.GetPosition(_canvas);
+            _loupeAt = new Point(Canvas.GetLeft(_loupeBox), Canvas.GetTop(_loupeBox));
+            if (double.IsNaN(_loupeAt.X) || double.IsNaN(_loupeAt.Y)) return;
+            _loupeDrag = true;
+            _loupeTravelled = false;
+            _loupeBox.CaptureMouse();
+        };
+        _loupeBox.MouseMove += (_, e) =>
+        {
+            // Handled even when NOT dragging — otherwise moving the pointer across the panel reaches
+            // the canvas as a preview move and the square jumps to sit underneath it.
+            e.Handled = true;
+            if (!_loupeDrag) return;
+            Point p = e.GetPosition(_canvas);
+            double dx = p.X - _loupeGrab.X, dy = p.Y - _loupeGrab.Y;
+            // A press has to TRAVEL before it counts as a move. Without this a stray click on the
+            // panel is a placement, which matters because the position is persisted: it would write
+            // back wherever the panel happened to have been clamped to on a smaller window, and the
+            // next pick would open with it floating over the middle of the picture instead of where
+            // it was actually put. (Same 3 px rule as the console's drag grip.)
+            if (!_loupeTravelled && Math.Abs(dx) + Math.Abs(dy) < 3) return;
+            _loupeTravelled = true;
+            MoveLoupe(_loupeAt.X + dx, _loupeAt.Y + dy);
+        };
+        _loupeBox.MouseLeftButtonUp += (_, e) => { if (EndLoupeDrag()) e.Handled = true; };
+        // Capture dies when the window is deactivated — alt-tabbing to the game mid-drag, an OS
+        // notification, a system dialog. Without this the flag stays set, the panel then follows the
+        // pointer with no button held, and because its MouseMove swallows every move the pick's own
+        // preview is frozen behind it. (The console's drag grip learned this one first.)
+        _loupeBox.LostMouseCapture += (_, _) => EndLoupeDrag();
+    }
+
+    /// <summary>End a loupe drag if one is running, recording the position ONLY if it really moved.
+    /// Returns whether there was anything to end.</summary>
+    private bool EndLoupeDrag()
+    {
+        if (!_loupeDrag) return false;
+        _loupeDrag = false;
+        if (_loupeBox.IsMouseCaptured) _loupeBox.ReleaseMouseCapture();
+        if (_loupeTravelled) RecordLoupePos();
+        _loupeTravelled = false;
+        return true;
+    }
+
+    /// <summary>Put the magnified view where it was left — as a fraction of the CANVAS, so it lands
+    /// in the same place whatever size this dialog is opened at, and always fully on screen.</summary>
+    private void PlaceLoupe()
+    {
+        if (_loupeBox.Visibility != Visibility.Visible) return;
+        double cw = _canvas.ActualWidth;
+        if (cw <= 0 || _canvas.ActualHeight <= 0) return;
+        double bw = _loupeBox.ActualWidth > 0 ? _loupeBox.ActualWidth : LoupeTarget + 16;
+        // Never moved: out of the way, top right, which is where it used to live.
+        (double x, double y) = _loupeNX < 0 || _loupeNY < 0
+            ? (cw - bw - 12, 12.0)
+            : (_loupeNX * cw, _loupeNY * _canvas.ActualHeight);
+        MoveLoupe(x, y);
+        // Deliberately NOT re-recording what the clamp did. A position that had to be squeezed to
+        // fit a smaller window is not a position the user chose, and writing it back would walk the
+        // panel in from the edge a little further every time they picked on a smaller game window.
+        // _loupeNX/_loupeNY stay the INTENT; the clamp is just how it fits today.
+    }
+
+    /// <summary>Move it, keeping it wholly inside the canvas. Never records — the position is only
+    /// remembered when a drag ends, so nothing that merely re-fits the panel can rewrite it.</summary>
+    private void MoveLoupe(double x, double y)
+    {
+        double cw = _canvas.ActualWidth, ch = _canvas.ActualHeight;
+        if (cw <= 0 || ch <= 0) return;
+        double bw = _loupeBox.ActualWidth > 0 ? _loupeBox.ActualWidth : LoupeTarget + 16;
+        double bh = _loupeBox.ActualHeight > 0 ? _loupeBox.ActualHeight : LoupeTarget + 60;
+        Canvas.SetLeft(_loupeBox, Math.Clamp(x, 0, Math.Max(0, cw - bw)));
+        Canvas.SetTop(_loupeBox, Math.Clamp(y, 0, Math.Max(0, ch - bh)));
+    }
+
+    private void RecordLoupePos()
+    {
+        double cw = _canvas.ActualWidth, ch = _canvas.ActualHeight;
+        double x = Canvas.GetLeft(_loupeBox), y = Canvas.GetTop(_loupeBox);
+        if (cw <= 0 || ch <= 0 || double.IsNaN(x) || double.IsNaN(y)) return;
+        _loupeNX = x / cw; _loupeNY = y / ch;
+        LoupeMoved = true;
     }
 
     /// <summary>Redraw whichever selection this mode owns from its own record — the swatch from its
@@ -378,7 +498,11 @@ public sealed class CompassPickWindow : Window
         // This is not a corner case: the wheel is the invited way to size the square, and the loupe
         // it resizes is what sets the header row's height — LoupeTarget / _swPx is integer division,
         // so 84 → 85 px collapses the loupe from 168 px tall to 85 and moves the canvas under it.
-        if (_canvas.IsMouseOver) { CentreSwatchOn(Mouse.GetPosition(_canvas)); DrawSwatch(); }
+        // Not when the pointer is over the magnified view — that is a panel sitting ON the picture
+        // now, and treating a pointer resting on it as "the user is aiming here" would drag the
+        // preview out from under them and park it behind the panel.
+        if (_canvas.IsMouseOver && !_loupeBox.IsMouseOver)
+        { CentreSwatchOn(Mouse.GetPosition(_canvas)); DrawSwatch(); }
         else _band.Visibility = Visibility.Collapsed;
     }
 
@@ -391,8 +515,9 @@ public sealed class CompassPickWindow : Window
         // claiming "exactly the pixels that get stored" on a pick that stores one coordinate would
         // be a lie printed directly above the caller's line saying it clicks the centre.
         ? _baseHint + "\n\nA FIXED SQUARE. Click to place it, drag it or use the ARROW KEYS to nudge it one "
-            + "pixel at a time (Shift = ten), and the WHEEL or +/− to resize it. The magnified view on the "
-            + "right shows what is inside it, pixel for pixel. Switch to free drag for anything bigger."
+            + "pixel at a time (Shift = ten), and the WHEEL or +/− to resize it. The magnified view shows "
+            + "what is inside it, pixel for pixel — drag that panel anywhere you like, next to what you're "
+            + "picking. Switch to free drag for anything bigger."
         : _baseHint + (_offerSwatch
             ? "\n\nDrag a box — or press “Back to the fixed square” for a set-size square you place with "
               + "one click and nudge with the arrow keys, which is better for anything the size of an "
@@ -454,7 +579,8 @@ public sealed class CompassPickWindow : Window
         // that determines it — WPF arranges after this handler returns, so measuring now would use
         // the old canvas. _canvas.SizeChanged does the redraw when the size actually changes; this
         // covers the case where it happens not to.
-        Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Loaded, new Action(Redraw));
+        Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Loaded,
+            new Action(() => { Redraw(); PlaceLoupe(); }));
     }
 
     /// <summary>The disabled OK button is the only thing on screen that can answer "why did Enter do

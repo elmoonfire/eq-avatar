@@ -1439,17 +1439,14 @@ public partial class MainWindow
             ? "  (these exact pixels become the reference AND this exact size becomes the size she "
               + "compares with, so the square itself has to fit the slot — not the magnified view)"
             : "  (she clicks the centre of whatever you mark — the square's size doesn't matter here)";
-        var dlg = new CompassPickWindow(frame, "Pick " + what, hint + tail, offered, startSwatch: true)
+        var dlg = new CompassPickWindow(frame, "Pick " + what, hint + tail, offered, startSwatch: true,
+                                        loupeNX: _settings.LoupeNX, loupeNY: _settings.LoupeNY)
         { Owner = this };
         if (dlg.ShowDialog() != true) return false;
         // Only a pick whose LEARNING uses the box may set the remembered size. The NPC, the GIVE
         // button and the confirm keep a centre and nothing else, so a square wheeled out to cover a
         // button there would otherwise become the size of the next item pick's reference.
-        if (rememberSize && dlg.UsedSwatch && dlg.SwatchPx != offered)
-        {
-            _settings.IconSwatchPx = dlg.SwatchPx;
-            try { _settings.Save(); } catch { /* a remembered size is not worth an exception */ }
-        }
+        AbsorbPickerPrefs(dlg, offered, rememberSize);
 
         point.X = dlg.NX + dlg.NW / 2;
         point.Y = dlg.NY + dlg.NH / 2;
@@ -1519,8 +1516,11 @@ public partial class MainWindow
         // The square is OFFERED (a bag area can be easier to place than to drag) but never opens,
         // and never writes the remembered size back: a bag area is a rectangle whose size is the
         // user's judgement, and nothing about it should reach the icon reference.
-        var dlg = new CompassPickWindow(frame, "Pick " + what, hint, SwatchSize) { Owner = this };
+        var dlg = new CompassPickWindow(frame, "Pick " + what, hint, SwatchSize,
+                                        loupeNX: _settings.LoupeNX, loupeNY: _settings.LoupeNY)
+        { Owner = this };
         if (dlg.ShowDialog() != true) return false;
+        AbsorbPickerPrefs(dlg, SwatchSize, rememberSize: false);
         store((dlg.NX, dlg.NY, dlg.NW, dlg.NH));
         // A bag area is already large; padding it further would just photograph the screen.
         try { shot?.Invoke(PickShot.From(frame, dlg.NX, dlg.NY, dlg.NW, dlg.NH, pad: 0.06)); }
