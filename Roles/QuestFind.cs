@@ -215,12 +215,92 @@ public static class QuestFind
                 if (dist <= accept) raw.Add(new IconHit(x + iw / 2, y + ih / 2, -1, -1, dist));
             }
         // Best first, then greedily drop anything sitting on top of one already taken.
+        //
+        // ⚠ This dedupe is only safe when the COARSE score is also the judge (the colour-only
+        // paths). When native pixels judge afterwards, deduping here loses real copies: a window
+        // STRADDLING two adjacent identical icons — half of each — averages out to very nearly the
+        // icon itself, and when that straddle orders ahead of its neighbours it suppresses BOTH
+        // real centres… and then fails the pixel test, because the nearest true centre is half a
+        // slot away, outside the alignment search. Two copies traded for one ghost, per pair, which
+        // is exactly "19 in a bag, 3 counted — but 12 when I spread them out". Pixel-armed callers
+        // use FindAllCopies below, which aligns FIRST and dedupes on where icons actually are.
         foreach (IconHit h in raw.OrderBy(h => h.Dist))
         {
             bool overlaps = hits.Any(k => Math.Abs(k.X - h.X) < iw * 0.7 && Math.Abs(k.Y - h.Y) < ih * 0.7);
             if (!overlaps) hits.Add(h);
         }
         return hits;
+    }
+
+    /// <summary>A pixel-confirmed copy: where it ACTUALLY is (aligned, not the proposal grid's
+    /// guess), how well its pixels match, and the coarse distance that proposed it.</summary>
+    public sealed record CopyHit(double X, double Y, double Ncc, double Coarse);
+
+    /// <summary>
+    /// Every square that could PLAUSIBLY be the icon, with almost no deduplication — the raw
+    /// material for a pixel judge. The only trimming is of proposals so close together (under a
+    /// quarter icon) that they must snap to the same place; anything looser throws away real
+    /// copies, because the greedy suppressor cannot tell a straddle between two identical icons
+    /// from the icons themselves. That distinction is precisely what the pixels are for.
+    /// </summary>
+    public static List<IconHit> ProposeIcons(Bitmap frame, double bx, double by, double bw, double bh,
+                                             double[] sig, double iw, double ih, double accept)
+    {
+        var kept = new List<IconHit>();
+        if (sig.Length != SigGrid * SigGrid * 3 || iw <= 0.002 || ih <= 0.002) return kept;
+        double stepX = Math.Max(iw / 3, 0.002), stepY = Math.Max(ih / 3, 0.002);
+        var raw = new List<IconHit>();
+        int guard = 0;
+        bool bailed = false;
+        for (double y = by; y + ih <= by + bh + 1e-9 && !bailed; y += stepY)
+            for (double x = bx; x + iw <= bx + bw + 1e-9; x += stepX)
+            {
+                if (++guard > 40000) { bailed = true; break; }
+                double[]? probe = SigFromRegion(frame, x, y, iw, ih);
+                if (probe is null) continue;
+                double dist = SigDistance(probe, sig);
+                if (dist <= accept) raw.Add(new IconHit(x + iw / 2, y + ih / 2, -1, -1, dist));
+            }
+        // 0.25 is chosen against the two distances that matter: the proposal stride is a THIRD of
+        // an icon, so two grid proposals are at least 0.33 apart and never suppress each other —
+        // and a straddle sits 0.5 from each neighbour, so it never suppresses a real centre either.
+        // On today's fixed grid this pass therefore removes nothing at all; it exists as the safety
+        // rail for any future proposer with a finer or irregular step, so that "almost no dedupe"
+        // can never quietly become "no dedupe" and hand the judge the same square four times.
+        foreach (IconHit h in raw.OrderBy(h => h.Dist))
+            if (!kept.Any(k => Math.Abs(k.X - h.X) < iw * 0.25 && Math.Abs(k.Y - h.Y) < ih * 0.25))
+                kept.Add(h);
+        return kept;
+    }
+
+    /// <summary>
+    /// Every copy of the icon in the rect, judged by its PIXELS — align first, decide second,
+    /// dedupe last, on the aligned positions.
+    ///
+    /// The order is the entire fix for a counter that read 3 where 19 sat. Deduping the colour
+    /// proposals before the pixels judged let a straddle between two adjacent identical icons eat
+    /// both of its neighbours and then fail the pixel test itself; here every plausible proposal is
+    /// aligned to wherever its best correlation actually is, the ones that pass are by construction
+    /// centred on real icons, and only THEN are duplicates folded — at half an icon, which two
+    /// distinct slots can never violate.
+    /// </summary>
+    public static List<CopyHit> FindAllCopies(Bitmap frame, double bx, double by, double bw, double bh,
+                                              double[] sig, double iw, double ih, double proposeAt,
+                                              IconPatch reference, int wantW, int wantH, double nccAccept)
+    {
+        var confirmed = new List<CopyHit>();
+        foreach (IconHit h in ProposeIcons(frame, bx, by, bw, bh, sig, iw, ih, proposeAt))
+        {
+            (double best, int dx, int dy) = BestNcc(frame, h.X, h.Y, reference, wantW, wantH);
+            if (best < nccAccept) continue;
+            confirmed.Add(new CopyHit(h.X + (double)dx / frame.Width, h.Y + (double)dy / frame.Height,
+                                      best, h.Dist));
+        }
+        var final = new List<CopyHit>();
+        foreach (CopyHit c in confirmed.OrderByDescending(c => c.Ncc))
+            if (!final.Any(k => Math.Abs(k.X - c.X) < iw * 0.5 && Math.Abs(k.Y - c.Y) < ih * 0.5))
+                final.Add(c);
+        return final;
     }
 
     /// <summary>

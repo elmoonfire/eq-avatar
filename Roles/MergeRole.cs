@@ -549,9 +549,17 @@ public sealed class MergeRole
         // field log showed real copies scoring 25–29 against a bar of 35, which is close enough to
         // the edge that a slightly different slot background would have silently dropped them
         // before anything ever looked at them properly.
+        // Pixel-armed plans propose with ALMOST NO deduplication (ProposeIcons), because the greedy
+        // overlap dedupe eats real copies whenever two identical icons sit in adjacent slots: the
+        // window straddling the pair orders ahead of both real centres, suppresses them, then fails
+        // the pixel test itself. The sweep saw it as "nothing left" with copies still in the bag —
+        // the same fault that made the counter read 3 where 19 sat.
         double proposeAt = _plan.HasPixels ? CoarsePropose : QuestFind.SlidingAcceptDistance;
-        List<QuestFind.IconHit> all = QuestFind.FindAllIcons(frame, _plan.BagX, _plan.BagY, _plan.BagW, _plan.BagH,
-            _plan.IconSig!, _plan.IconW, _plan.IconH, proposeAt);
+        List<QuestFind.IconHit> all = _plan.HasPixels
+            ? QuestFind.ProposeIcons(frame, _plan.BagX, _plan.BagY, _plan.BagW, _plan.BagH,
+                _plan.IconSig!, _plan.IconW, _plan.IconH, proposeAt)
+            : QuestFind.FindAllIcons(frame, _plan.BagX, _plan.BagY, _plan.BagW, _plan.BagH,
+                _plan.IconSig!, _plan.IconW, _plan.IconH, proposeAt);
         double limit = _plan.HasFineIcon && confirmedFine >= 0
             ? Math.Clamp(confirmedFine + FineDrift, FineFloor, FineLimit)
             : FineLimit;
@@ -590,7 +598,11 @@ public sealed class MergeRole
                     // each pass judges afresh and the only cost of being wrong is a millisecond.
                     ActivityLog.Detail(MergeSource,
                         $"below the bar at {h.X * 100:0.0}%,{h.Y * 100:0.0}%: {best:0.000}");
-                    if (_saidBelow.Add(((int)(h.X * 1000), (int)(h.Y * 1000))))
+                    // Quantised to icon-sized cells, not raw position. The raw proposals now come in
+                    // four to nine per icon, and keying the "said it already" set on each of them
+                    // would narrate the same look-alike totem half a dozen times per bag.
+                    if (_saidBelow.Add(((int)(h.X / Math.Max(0.002, _plan.IconW)),
+                                        (int)(h.Y / Math.Max(0.002, _plan.IconH)))))
                         Log?.Invoke(best < 0
                             ? $"· couldn't read the pixels at {h.X * 100:0.0}%, {h.Y * 100:0.0}% — too close to the "
                               + "edge of the window to compare."
@@ -599,8 +611,15 @@ public sealed class MergeRole
                     continue;
                 }
                 accepted++;
-                Log?.Invoke($"· {h.X * 100:0.0}%, {h.Y * 100:0.0}% matches the copy's pixels {best * 100:0.0}%.");
-                return new Look(true, new Candidate(h, null, -1, double.MaxValue, best), all.Count,
+                // The candidate carries the ALIGNED centre, not the proposal grid's guess. The grab
+                // clicks it and the skip list remembers it, so a proposal up to a sixth of an icon
+                // out can neither make the click clip a neighbouring slot nor leave a skip entry
+                // that a later pass's slightly different proposal fails to match.
+                var snapped = new QuestFind.IconHit(h.X + (double)ddx / frame.Width,
+                                                   h.Y + (double)ddy / frame.Height, -1, -1, h.Dist);
+                Log?.Invoke($"· {snapped.X * 100:0.0}%, {snapped.Y * 100:0.0}% matches the copy's pixels "
+                          + $"{best * 100:0.0}%.");
+                return new Look(true, new Candidate(snapped, null, -1, double.MaxValue, best), all.Count,
                                 knownWrong, belowBar, h.Dist, accepted);
             }
 
@@ -920,26 +939,49 @@ public sealed class MergeRole
     {
         var outp = new List<(double, double, double)>();
         if (!plan.ScanReady) return null;
-        using System.Drawing.Bitmap? frame = QuestFind.Capture(hwnd);
-        if (frame is null) return null;
 
-        double at = plan.HasPixels ? CoarsePropose : QuestFind.SlidingAcceptDistance;
-        List<QuestFind.IconHit> all = QuestFind.FindAllIcons(frame, plan.BagX, plan.BagY, plan.BagW, plan.BagH,
-                                                             plan.IconSig!, plan.IconW, plan.IconH, at);
         if (!plan.HasPixels)
         {
-            foreach (QuestFind.IconHit h in all) outp.Add((h.X, h.Y, h.Dist));
+            using System.Drawing.Bitmap? f = QuestFind.Capture(hwnd);
+            if (f is null) return null;
+            // Colour-only: the coarse score IS the judge, so the overlap dedupe inside FindAllIcons
+            // is the right one and the count is whatever it says.
+            foreach (QuestFind.IconHit h in QuestFind.FindAllIcons(f, plan.BagX, plan.BagY, plan.BagW,
+                         plan.BagH, plan.IconSig!, plan.IconW, plan.IconH, QuestFind.SlidingAcceptDistance))
+                outp.Add((h.X, h.Y, h.Dist));
             return outp;
         }
-        foreach (QuestFind.IconHit h in all)
+
+        // TWO frames, a beat apart, and a copy counts if EITHER saw it. One frame is a single
+        // moment of a screen that is never still: spell sparkles, the levitate shimmer and item
+        // flashes drift across the bags, and whichever icons they happened to cover that instant
+        // fail the pixel test — which is how the same bag counted differently every press. The
+        // union is safe in a way it wouldn't be for a looser metric, because a false POSITIVE
+        // needs a slot to correlate ≥85% with the exact reference, and sparkle glare only ever
+        // destroys a match, never manufactures one. Read failure stays distinct: null means
+        // NEITHER frame could be read, not "0 copies".
+        var found = new List<QuestFind.CopyHit>();
+        bool readAny = false;
+        for (int pass = 0; pass < 2; pass++)
         {
+            if (pass > 0) Thread.Sleep(280);
+            using System.Drawing.Bitmap? frame = QuestFind.Capture(hwnd);
+            if (frame is null) continue;
+            readAny = true;
             // The SAME arguments the sweep uses, resize included. A count that skipped the rescale
-            // would disagree with the run the moment the window changed size — and the count is what
-            // the forecast, and the user's decision to press Run, are both built on.
-            (double best, _, _) = QuestFind.BestNcc(frame, h.X, h.Y, plan.IconPixels!,
-                (int)Math.Round(plan.IconW * frame.Width), (int)Math.Round(plan.IconH * frame.Height));
-            if (best >= NccAccept) outp.Add((h.X, h.Y, best));
+            // would disagree with the run the moment the window changed size — and the count is
+            // what the forecast, and the user's decision to press Run, are both built on.
+            foreach (QuestFind.CopyHit c in QuestFind.FindAllCopies(frame, plan.BagX, plan.BagY,
+                         plan.BagW, plan.BagH, plan.IconSig!, plan.IconW, plan.IconH, CoarsePropose,
+                         plan.IconPixels!,
+                         (int)Math.Round(plan.IconW * frame.Width),
+                         (int)Math.Round(plan.IconH * frame.Height), NccAccept))
+                if (!found.Any(k => Math.Abs(k.X - c.X) < plan.IconW * 0.5
+                                 && Math.Abs(k.Y - c.Y) < plan.IconH * 0.5))
+                    found.Add(c);
         }
+        if (!readAny) return null;
+        foreach (QuestFind.CopyHit c in found) outp.Add((c.X, c.Y, c.Ncc));
         outp.Sort((a, b) => b.Item3.CompareTo(a.Item3));
         return outp;
     }
