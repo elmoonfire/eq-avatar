@@ -33,6 +33,10 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- The title-bar wordmark. Embedded rather than installed, so it renders the same on a
+         machine that has never seen it. Michroma is SIL OFL with fsType 0 - embedding is
+         explicitly permitted; the licence ships beside the file. -->
+    <Resource Include="assets\fonts\Michroma-Regular.ttf" />
     <Resource Include="assets\eqavatar-512.png" />
     <Resource Include="assets\mascot.jpg" />
     <Resource Include="assets\data\mobs.json.gz" />
