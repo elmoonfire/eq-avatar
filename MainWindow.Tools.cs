@@ -346,7 +346,7 @@ public partial class MainWindow
             MrgStatus.Foreground = Hex("#FFCB6B");
             return;
         }
-        if (_grindTarget == IntPtr.Zero) AutoTargetEq();
+        AutoTargetEq();   // also notices a game window that has CLOSED since it was detected
         if (_grindTarget == IntPtr.Zero) { ShowToast("EverQuest not found"); return; }
 
         _mrgNameBusy = true;
@@ -505,7 +505,7 @@ public partial class MainWindow
             MrgStatus.Foreground = Hex("#FFCB6B");
             return false;
         }
-        if (_grindTarget == IntPtr.Zero) AutoTargetEq();
+        AutoTargetEq();   // also notices a game window that has CLOSED since it was detected
         using System.Drawing.Bitmap? frame = VitalsSvc.CaptureFrame();
         if (frame is null)
         {
@@ -612,7 +612,7 @@ public partial class MainWindow
             MrgStatus.Foreground = Hex("#FFCB6B");
             return;
         }
-        if (_grindTarget == IntPtr.Zero) AutoTargetEq();
+        AutoTargetEq();   // also notices a game window that has CLOSED since it was detected
         if (_grindTarget == IntPtr.Zero) { ShowToast("EverQuest not found"); return; }
         if (_mergeRun is { Running: true }) { ShowToast("Stop the sweep first"); return; }
 
@@ -1067,7 +1067,7 @@ public partial class MainWindow
             MrgStatus.Foreground = Hex("#FFCB6B");
             return;
         }
-        if (_grindTarget == IntPtr.Zero) AutoTargetEq();
+        AutoTargetEq();   // also notices a game window that has CLOSED since it was detected
         var probe = new MergeRole(p, new ForegroundSendInputSink(() => _grindTarget), () => _grindTarget);
         (int Have, int Need)? read = await probe.ReadTierAsync();
         if (read is null)
@@ -1114,7 +1114,7 @@ public partial class MainWindow
             || _questRun is { Running: true } || _questStarting)
         { ShowToast("Something else is running — Stop (F12) first"); return; }
 
-        if (_grindTarget == IntPtr.Zero) AutoTargetEq();
+        AutoTargetEq();   // also notices a game window that has CLOSED since it was detected
         if (_grindTarget == IntPtr.Zero) { ShowToast("EverQuest not found"); return; }
 
         MergePlan plan = MergePlan.Current;

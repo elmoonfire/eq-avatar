@@ -141,8 +141,26 @@ public partial class MainWindow
     // ---------------- header: auto target + info ----------------
 
     /// <summary>Find the game window without a click — runs whenever the Grind page opens.</summary>
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern bool IsWindow(IntPtr h);
+
+    /// <summary>True when the targeted game window has DIED since it was detected — which also
+    /// clears the stale handle, so every "is the game targeted?" check downstream asks a real
+    /// question again. A window handle is a claim about the past: the game detected at launch
+    /// stays "detected" forever unless someone actually asks Windows whether it still exists,
+    /// and nothing did — so a closed game left the app insisting it was open, refusing to help
+    /// launch it again until the app itself was restarted.</summary>
+    private bool GameWindowDied()
+    {
+        if (_grindTarget == IntPtr.Zero || IsWindow(_grindTarget)) return false;
+        _grindTarget = IntPtr.Zero;
+        return true;
+    }
+
     private void AutoTargetEq()
     {
+        if (GameWindowDied())
+            GrindLogLine("The game window closed — it'll be re-detected when it's back.");
         if (_grindTarget != IntPtr.Zero)
         {
             if (GrindTargetLabel.Text is "—" or "") GrindTargetLabel.Text = "game targeted";

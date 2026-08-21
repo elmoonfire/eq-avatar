@@ -144,13 +144,62 @@ public partial class MainWindow : Window
     {
         _hwnd = new WindowInteropHelper(this).Handle;
         HwndSource.FromHwnd(_hwnd)?.AddHook(WndProc);
-        // Global panic key: F12 stops the grind even while the game is focused.
-        RegisterHotKey(_hwnd, PANIC_HOTKEY_ID, 0, VK_F12);
+        // Global panic key: F12 stops everything even while the game is focused.
+        //
+        // The RETURN VALUE is the whole story here. Only one app on the system may own a hotkey,
+        // F12 is the most fought-over key on a gaming PC (it is Steam's screenshot key, among
+        // others), and losing the race used to be completely silent — the panic key just didn't
+        // exist, discovered mid-run. So: the failure is named out loud, and a low-level keyboard
+        // hook watches for F12 as well, which no other app can take away. Both firing on one press
+        // is handled by a debounce in Panic() itself.
+        bool got = RegisterHotKey(_hwnd, PANIC_HOTKEY_ID, 0, VK_F12);
+        bool hooked = Input.PanicKey.Install(VK_F12, () => Dispatcher.BeginInvoke(new Action(Panic)));
+        if (!got && !hooked)
+        {
+            ActivityLog.Record(MergeSource, "⚠ F12 could not be claimed OR watched — another app owns it and "
+                                          + "the keyboard hook failed. The Stop buttons still work.");
+            ActivityLog.Record(QuestSource, "⚠ F12 could not be claimed OR watched — another app owns it and "
+                                          + "the keyboard hook failed. The Stop buttons still work.");
+        }
+        else if (!got)
+            Diag.BotLog.Log("app", "another app owns F12 — the keyboard watcher is covering it");
         // Repeat the last Input-probe action while EQ is focused (safe chord so it won't clash with in-game F9).
         RegisterHotKey(_hwnd, PROBE_HOTKEY_ID, MOD_CONTROL | MOD_ALT, VK_F9);
         // Ctrl+Alt+M rather than a bare key: this fires while EQ has focus, so a single letter
         // would be swallowed out of the middle of anything the user typed in game.
         RegisterHotKey(_hwnd, MERGE_HOTKEY_ID, MOD_CONTROL | MOD_ALT, VK_M);
+    }
+
+    private DateTime _lastPanic = DateTime.MinValue;
+    private int _panicHookTick;
+
+    /// <summary>
+    /// EVERYTHING stops — every role that can send input, the launcher automation included, which
+    /// the old panic path missed even though auto-login moves the mouse and clicks like any role.
+    /// Debounced because two watchers may both see one press; announced because a panic key the
+    /// user cannot tell fired is indistinguishable from one that doesn't work — which is exactly
+    /// how it was reported.
+    /// </summary>
+    private void Panic()
+    {
+        if ((DateTime.Now - _lastPanic).TotalMilliseconds < 400) return;
+        _lastPanic = DateTime.Now;
+        StopGrind_Click(this, new RoutedEventArgs());
+        StopFollower_Click(this, new RoutedEventArgs());
+        StopMouseDemo();
+        _login?.Stop();
+        // The Keymaps page owns the mouse and keyboard too — the auto-capture scrolls the bind
+        // list for over a minute, and the apply TYPES into the game. Review caught both missing
+        // from the first version of this method, under a toast claiming everything had stopped.
+        _kmAuto?.Cancel();
+        _kmApplyCts?.Cancel();
+        _questStartCancelled = true;
+        // Recorded into BOTH module consoles, not a neutral source neither one shows: whoever
+        // pressed the panic key is watching one of these, and the line saying it worked has to be
+        // the next line they see there.
+        ActivityLog.Record(MergeSource, "■ F12 — everything stopped.");
+        ActivityLog.Record(QuestSource, "■ F12 — everything stopped.");
+        ShowToast("F12 — everything stopped");
     }
 
     private IntPtr WndProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
@@ -160,9 +209,7 @@ public partial class MainWindow : Window
             int id = wParam.ToInt32();
             if (id == PANIC_HOTKEY_ID)
             {
-                StopGrind_Click(this, new RoutedEventArgs());
-                StopFollower_Click(this, new RoutedEventArgs());
-                StopMouseDemo();
+                Panic();
                 handled = true;
             }
             else if (id == PROBE_HOTKEY_ID)
@@ -251,6 +298,22 @@ public partial class MainWindow : Window
         UpdateForeground();
         UpdateTopmost();
         if (!_ready) return;
+        // The panic hook gets a heartbeat. Windows silently REMOVES a low-level hook whose UI
+        // thread stalls past its timeout — and when another app owns F12 the hook is the only
+        // panic route, so a silently dead hook is the original bug back again with no symptom.
+        // There is no API to ask whether a hook still lives; re-seating it every ~30 s costs a
+        // millisecond and makes the answer always yes.
+        if (++_panicHookTick >= 100) { _panicHookTick = 0; Input.PanicKey.Refresh(); }
+        // The watchdog for a game that has CLOSED. Every other check of the handle happens when
+        // the user does something; this is the one that notices within a heartbeat and says so,
+        // instead of the app insisting the game is open until someone tries to use it.
+        if (GameWindowDied())
+        {
+            GrindTargetLabel.Text = "game not found — launch EQ, then click ◎";
+            LaunchStatus.Text = "The game window closed. Launch is ready whenever you are.";
+            GrindLogLine("The game window closed — it'll be re-detected when it's back.");
+            LoginLogLine("The game window closed. Launch is ready to run again.");
+        }
         UpdateChip();
         if (PanelHome.Visibility == Visibility.Visible) RefreshHome();
     }
@@ -772,7 +835,7 @@ public partial class MainWindow : Window
         if (_grind is { Running: true } || _hunt is { Running: true }
             || _questRun is { Running: true } || _questStarting || _mergeRun is { Running: true })
         { ShowToast("Already running — Stop (F12) first"); return; }
-        if (_grindTarget == IntPtr.Zero) AutoTargetEq();     // the game may have launched after this page opened
+        AutoTargetEq();   // also notices a game window that has CLOSED since it was detected     // the game may have launched after this page opened
         if (_grindTarget == IntPtr.Zero)
         {
             SetGrindBanner(1, "CAN'T START — EverQuest window not found. Launch the game, then press ◎.");
@@ -1679,15 +1742,38 @@ public partial class MainWindow : Window
         LaunchStatus.Text = "Launching… watch the Login Console for each step.";
     }
 
-    private void BeginLaunch(bool startLauncher)
+    /// <summary>Guards BeginLaunch against itself: a double-click on Launch used to stop the
+    /// healthy launch the first click had just started — and could start a SECOND LaunchPad
+    /// process, because the fresh AutoLogin had no idea the first one had already run the exe.</summary>
+    private bool _launchPending;
+
+    private async void BeginLaunch(bool startLauncher)
     {
+        if (_launchPending) { LoginLogLine("Launch already starting."); return; }
+        _launchPending = true;
+        try
+        {
         _settings.LauncherPath = LauncherPathBox.Text.Trim();
-        if (_login is { Running: true }) { LoginLogLine("Launch already running."); return; }
+        if (_login is { } old && old.Running)
+        {
+            // "Running" can be the last couple of seconds of a loop that is already unwinding —
+            // its screen read takes no cancellation token, so a Stop lands only at the next await.
+            // Refusing here made "press Stop, press Launch" fail with "already running", which is
+            // the exact lockout this launch path was just cured of. Stop it and wait it out.
+            // The wait watches OLD, the object it stopped — the field, were it reassigned under
+            // this await, would be someone else's healthy launch reading as "didn't stop".
+            old.Stop();
+            LoginLogLine("A previous launch was still winding down — stopped it; starting fresh…");
+            for (int i = 0; i < 40 && old.Running; i++) await Task.Delay(150);
+            if (old.Running) { LoginLogLine("The previous launch didn't stop — try Launch again."); return; }
+        }
         _login = new AutoLogin(LoginServerBox.Text, _settings) { LauncherPath = startLauncher ? _settings.LauncherPath : "" };
         _login.Log += m => Dispatcher.Invoke(() => { LoginLogLine(m); LaunchStatus.Text = m; });
         _login.Done += () => Dispatcher.Invoke(() => { LoginLogLine("Reached the game. Launch complete."); LaunchStatus.Text = "In the game. ▶"; });
         _login.Start();
         LoginLogLine(startLauncher ? "Launch requested from Command Center." : "Auto-login started.");
+        }
+        finally { _launchPending = false; }
     }
 
     private void PickLauncher_Click(object sender, RoutedEventArgs e)
@@ -2235,6 +2321,7 @@ public partial class MainWindow : Window
             UnregisterHotKey(_hwnd, PROBE_HOTKEY_ID);
             UnregisterHotKey(_hwnd, MERGE_HOTKEY_ID);
         }
+        Input.PanicKey.Uninstall();
         StopWatch();
         ActivityLog.Added -= OnActivityAdded;      // static event: leaving this attached leaks the window
         _overlay?.Close();

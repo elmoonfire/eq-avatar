@@ -1340,7 +1340,7 @@ public partial class MainWindow
     {
         if (_hoverTestBusy) return;
         if (_questStarting || _questRun is { Running: true }) { ShowToast("Stop the run first"); return; }
-        if (_grindTarget == IntPtr.Zero) AutoTargetEq();
+        AutoTargetEq();   // also notices a game window that has CLOSED since it was detected
         if (_grindTarget == IntPtr.Zero)
         {
             QstStatus.Text = "EverQuest window not found — launch the game, then try again.";
@@ -1456,7 +1456,7 @@ public partial class MainWindow
                                 Action<PickShot?>? shot = null,
                                 int swatchPx = 0, bool rememberSize = false)
     {
-        if (_grindTarget == IntPtr.Zero) AutoTargetEq();
+        AutoTargetEq();   // also notices a game window that has CLOSED since it was detected
         // Disposed here, not by the picker: CaptureFrame allocates a full-window 32bpp bitmap
         // (~15 MB at 1440p) and the picker only reads its size. Four picks a quest adds up fast.
         using System.Drawing.Bitmap? frame = VitalsSvc.CaptureFrame();
@@ -1552,7 +1552,7 @@ public partial class MainWindow
     private bool PickQuestRect(Action<(double X, double Y, double W, double H)> store, string what, string hint,
                                Action<PickShot?>? shot = null)
     {
-        if (_grindTarget == IntPtr.Zero) AutoTargetEq();
+        AutoTargetEq();   // also notices a game window that has CLOSED since it was detected
         using System.Drawing.Bitmap? frame = VitalsSvc.CaptureFrame();
         if (frame is null)
         {
@@ -1667,7 +1667,7 @@ public partial class MainWindow
         if (_grind is { Running: true } || _hunt is { Running: true } || _mergeRun is { Running: true })
         { ShowToast("Something else is running — Stop (F12) first"); return; }
 
-        if (_grindTarget == IntPtr.Zero) AutoTargetEq();
+        AutoTargetEq();   // also notices a game window that has CLOSED since it was detected
         if (_grindTarget == IntPtr.Zero)
         {
             QuestFail(script, "✖ EverQuest window not found — launch the game, then try again.");

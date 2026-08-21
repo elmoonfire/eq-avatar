@@ -36,6 +36,10 @@ public partial class MainWindow
     private bool _kmInit;
     private bool _kmBusy;
     private CancellationTokenSource? _kmAuto;
+    /// <summary>Cancels a keybind APPLY in flight. Exists so the panic key reaches it: ApplyAsync
+    /// types keystrokes into the game, and it used to be handed CancellationToken.None — an
+    /// automation F12 could not stop even in principle, under a toast saying everything had.</summary>
+    private CancellationTokenSource? _kmApplyCts;
 
     // import-from-a-friend state
     private sealed record DiffRow(KeyBind Theirs, KeyBind? Mine, CheckBox Box);
@@ -652,8 +656,9 @@ public partial class MainWindow
         try
         {
             var applier = new Input.KeybindApplier();
+            _kmApplyCts = new CancellationTokenSource();
             var outcome = await applier.ApplyAsync(hwnd, changes,
-                msg => Dispatcher.Invoke(() => KmImportStatus.Text = msg), CancellationToken.None);
+                msg => Dispatcher.Invoke(() => KmImportStatus.Text = msg), _kmApplyCts.Token);
 
             // trust only what the game showed us afterwards
             var store = KeyMapStore.Current;
@@ -691,13 +696,21 @@ public partial class MainWindow
                                       $"{outcome.NotFound} not found, {outcome.Skipped} skipped, {outcome.Sweeps} sweeps");
             RenderKeymaps();
         }
+        catch (OperationCanceledException)
+        {
+            // F12, almost certainly. Some binds may already be set — the game's own screen is the
+            // truth, so say to look there rather than pretending nothing happened.
+            KmImportStatus.Foreground = Hex("#FFCB6B");
+            KmImportStatus.Text = "apply stopped — binds already set stay set; check the Key binds screen.";
+            Diag.BotLog.Log("keymap", "apply cancelled (panic key or stop)");
+        }
         catch (Exception ex)
         {
             KmImportStatus.Foreground = Hex("#FFCB6B");
             KmImportStatus.Text = "apply failed: " + ex.Message;
             Diag.BotLog.Log("keymap", "apply error: " + ex);
         }
-        finally { _kmBusy = false; KmApplyBtn.IsEnabled = true; }
+        finally { _kmBusy = false; KmApplyBtn.IsEnabled = true; _kmApplyCts = null; }
     }
 
     private void KmInfo_Click(object sender, RoutedEventArgs e)

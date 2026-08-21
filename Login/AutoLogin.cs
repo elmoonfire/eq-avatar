@@ -33,7 +33,14 @@ public sealed class AutoLogin
     private bool _launcherStarted;
     private string _lastSeen = "";
 
-    public bool Running => _cts is { IsCancellationRequested: false };
+    /// <summary>THE LOOP IS ALIVE — not "cancel wasn't requested", which is what this used to
+    /// test. The loop also ENDS by itself: reaching the game, the 8-minute timeout, an error. None
+    /// of those cancel anything, so the old test stayed true forever after the first successful
+    /// launch — and since Launch refuses while Running, closing the game and pressing Launch again
+    /// got "already running" until the whole app was restarted. The house rule exists because of
+    /// exactly this shape, and this class predates the rule.</summary>
+    public bool Running => _alive;
+    private volatile bool _alive;
 
     public AutoLogin(string server, AppSettings settings)
     {
@@ -44,14 +51,24 @@ public sealed class AutoLogin
     public void Start()
     {
         if (Running) return;
-        _cts = new CancellationTokenSource();
+        _alive = true;                     // set HERE, not in the task — Start() twice in one tick
+        _cts = new CancellationTokenSource();   // must see the first one as already running
         _ = Task.Run(() => Loop(_cts.Token));
     }
 
-    public void Stop() { _cts?.Cancel(); Log?.Invoke("Auto-login stopped."); }
+    /// <summary>Idempotent and quiet about it: the panic key calls this on every press, and a
+    /// console line claiming to have stopped a launch that wasn't running reads as a bug.</summary>
+    public void Stop()
+    {
+        if (!Running) return;
+        _cts?.Cancel();
+        Log?.Invoke("Auto-login stopped.");
+    }
 
     private async Task Loop(CancellationToken ct)
     {
+        try
+        {
         Log?.Invoke($"Auto-login started (server: {_server}). Leave the launcher/game in front.");
         DateTime deadline = DateTime.Now.AddMinutes(8);   // generous — the launcher can update for a while
         try
@@ -150,6 +167,8 @@ public sealed class AutoLogin
         }
         catch (OperationCanceledException) { }
         catch (Exception ex) { Log?.Invoke("Auto-login error: " + ex.Message); }
+        }
+        finally { _alive = false; }        // EVERY exit — success, timeout, cancel, throw
     }
 
     /// <summary>Print the distinct text OCR found this pass (only when it changes) so a missed
