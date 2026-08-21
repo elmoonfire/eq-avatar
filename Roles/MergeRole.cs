@@ -793,18 +793,73 @@ public sealed class MergeRole
                             tokens.Length, CountTokenHits(blob, tokens));
     }
 
-    /// <summary>Is this point inside (or just outside) the target item's own window? Derived from
-    /// the picks that are already on it, so it needs nothing new from the user.</summary>
-    private bool InTargetWindow(double fx, double fy)
+    /// <summary>The target item window's extent, derived from the picks that are already on it —
+    /// so it needs nothing new from the user. Null when no relevant pick exists yet.</summary>
+    private static (double X0, double Y0, double X1, double Y1)? TargetBox(MergePlan plan)
     {
         var xs = new List<double>();
         var ys = new List<double>();
-        if (_plan.PlaceBox.Set) { xs.Add(_plan.PlaceBox.X); ys.Add(_plan.PlaceBox.Y); }
-        if (_plan.MergeButton.Set) { xs.Add(_plan.MergeButton.X); ys.Add(_plan.MergeButton.Y); }
-        if (_plan.TierSet) { xs.Add(_plan.TierX); xs.Add(_plan.TierX + _plan.TierW); ys.Add(_plan.TierY); ys.Add(_plan.TierY + _plan.TierH); }
-        if (xs.Count == 0) return false;
-        return fx >= xs.Min() - TargetWindowPad && fx <= xs.Max() + TargetWindowPad
-            && fy >= ys.Min() - TargetWindowPad && fy <= ys.Max() + TargetWindowPad;
+        if (plan.PlaceBox.Set) { xs.Add(plan.PlaceBox.X); ys.Add(plan.PlaceBox.Y); }
+        if (plan.MergeButton.Set) { xs.Add(plan.MergeButton.X); ys.Add(plan.MergeButton.Y); }
+        if (plan.TierSet) { xs.Add(plan.TierX); xs.Add(plan.TierX + plan.TierW); ys.Add(plan.TierY); ys.Add(plan.TierY + plan.TierH); }
+        if (xs.Count == 0) return null;
+        return (xs.Min(), ys.Min(), xs.Max(), ys.Max());
+    }
+
+    /// <summary>Is this point inside (or just outside) the target item's own window?</summary>
+    private bool InTargetWindow(double fx, double fy)
+    {
+        if (TargetBox(_plan) is not { } b) return false;
+        return fx >= b.X0 - TargetWindowPad && fx <= b.X1 + TargetWindowPad
+            && fy >= b.Y0 - TargetWindowPad && fy <= b.Y1 + TargetWindowPad;
+    }
+
+    /// <summary>
+    /// Somewhere SAFE to leave the mouse while the screen is being read — far from the target
+    /// item's window and outside the bag area.
+    ///
+    /// This exists because the game draws things AT the cursor, and the reads photograph the
+    /// desktop. After the Merge Item click the cursor is resting ON the button, a thumb's width
+    /// from the tier counter — close enough that the button's own tooltip, or the held item's icon
+    /// riding the cursor after a refused merge, is drawn straight over the "n/m" the run is about
+    /// to read. That is what "the tier counter suddenly stops reading" was: nothing wrong with the
+    /// pick or the OCR, just our own cursor's furniture photographed on top of the number.
+    /// </summary>
+    public static (double X, double Y) ParkSpot(MergePlan plan)
+    {
+        (double X, double Y)[] candidates =
+        {
+            (0.5, 0.08), (0.08, 0.5), (0.92, 0.5), (0.5, 0.92), (0.08, 0.08), (0.92, 0.08),
+        };
+        (double X0, double Y0, double X1, double Y1)? tgt = TargetBox(plan);
+        (double X0, double Y0, double X1, double Y1)? bag = plan.BagSet
+            ? (plan.BagX, plan.BagY, plan.BagX + plan.BagW, plan.BagY + plan.BagH) : null;
+
+        static double DistToBox(double x, double y, (double X0, double Y0, double X1, double Y1) b)
+        {
+            double dx = Math.Max(0, Math.Max(b.X0 - x, x - b.X1));
+            double dy = Math.Max(0, Math.Max(b.Y0 - y, y - b.Y1));
+            return Math.Sqrt(dx * dx + dy * dy);
+        }
+
+        (double X, double Y) best = candidates[0];
+        double bestScore = -1;
+        foreach ((double X, double Y) c in candidates)
+        {
+            double d = 1.0;
+            if (tgt is { } t) d = Math.Min(d, DistToBox(c.X, c.Y, t));
+            if (bag is { } g) d = Math.Min(d, DistToBox(c.X, c.Y, g));
+            if (d > bestScore) { bestScore = d; best = c; }
+        }
+        return best;
+    }
+
+    /// <summary>Move the cursor to the parking spot, so nothing it drags around — tooltips, a held
+    /// item's icon — can sit on top of whatever is about to be photographed.</summary>
+    private void ParkCursor()
+    {
+        (double px, double py) = ParkSpot(_plan);
+        if (Screen(px, py) is (int x, int y)) HumanizedMouse.MoveInstant(x, y);
     }
 
     /// <summary>
@@ -1045,8 +1100,17 @@ public sealed class MergeRole
              + "and your bags before running again.");
     }
 
-    /// <summary>Read the target item's "n/m" counter. Returns null when it can't be read.</summary>
-    public async Task<(int Have, int Need)?> ReadTierAsync()
+    /// <summary>What the tier OCR saw on its most recent FAILED read — "" when it saw literally
+    /// nothing. Kept so the blind-miss narration can show the user the evidence instead of just
+    /// the verdict: an empty read means something opaque is covering the counter, while garbage
+    /// means the box has drifted or the text changed shape. Different problems, different advice.</summary>
+    private string _lastTierRaw = "";
+
+    /// <summary>Read the target item's "n/m" counter. Returns null when it can't be read.
+    /// One failed parse earns ONE quiet retry a beat later: the read lands 300-odd ms after a
+    /// merge click, and the game repaints that window exactly then — a half-drawn number is a
+    /// moment, not a fault.</summary>
+    public async Task<(int Have, int Need)?> ReadTierAsync(bool retryOnce = true)
     {
         if (!_plan.TierSet) return null;
         string text = await ScreenText.ReadRectAsync(_hwnd(), _plan.TierX, _plan.TierY, _plan.TierW, _plan.TierH);
@@ -1057,7 +1121,72 @@ public sealed class MergeRole
         ActivityLog.Detail(MergeSource,
             $"tier OCR read \"{(text ?? "").Replace("\r", " ").Replace("\n", " ").Trim()}\" → "
             + (parsed is { } t ? $"{t.Have}/{t.Need}" : "nothing usable"));
+        if (parsed is null && retryOnce)
+        {
+            await Task.Delay(260);
+            return await ReadTierAsync(retryOnce: false);
+        }
+        if (parsed is null) _lastTierRaw = (text ?? "").Replace("\r", " ").Replace("\n", " ").Trim();
         return parsed;
+    }
+
+    /// <summary>What the cursor is carrying, as far as the pixels can tell.</summary>
+    private enum Held { Item, Nothing, Unknown }
+
+    /// <summary>
+    /// Is the copy's icon riding the cursor right now?
+    ///
+    /// This is the witness that keeps the run moving when the tier counter can't be read: a
+    /// refused merge hands the item straight back to the cursor, and a successful one consumes
+    /// it — so with the cursor parked over empty screen, "is the icon at the cursor" separates
+    /// the two without reading a single character. The verdict is deliberately three-way. The
+    /// icon found near the cursor is a refused merge, full stop. NOTHING like it near the cursor
+    /// is a merge — the only other way for the item to leave the cursor is the user taking it,
+    /// mid-run, from a game window the run controls. And the middle band is an honest "couldn't
+    /// tell", never rounded to either answer, because a wrong "merged" here is the phantom-merge
+    /// chain and a wrong "refused" re-clicks a slot that may be empty.
+    ///
+    /// MUST be called with the cursor parked (ParkCursor) — over the bags, the real copies on
+    /// screen would answer for the cursor.
+    /// </summary>
+    private Held HeldOnCursor()
+    {
+        if (!_plan.HasPixels) return Held.Unknown;
+        // Foreground first. Capture photographs the DESKTOP, and if another window stole focus
+        // between the merge click and now, its pixels at the park spot would be judged instead of
+        // the game's — and random foreign pixels land in the "Nothing" band far more often than
+        // they fake an exact icon. A wrong "Nothing" is the one verdict that lets the copy ride
+        // the cursor into the next slot's click, so it is only ever given over the game's own
+        // frame. ("Item" at ≥85% needs no such guard: a foreign window cannot plausibly
+        // manufacture the exact reference.)
+        if (!_sink.Ready) return Held.Unknown;
+        IntPtr h = _hwnd();
+        if (h == IntPtr.Zero || !GetWindowRect(h, out RECT r)) return Held.Unknown;
+        int winW = r.Right - r.Left, winH = r.Bottom - r.Top;
+        if (winW <= 0 || winH <= 0) return Held.Unknown;
+        using System.Drawing.Bitmap? frame = QuestFind.Capture(h);
+        if (frame is null) return Held.Unknown;
+        (int cx, int cy) = HumanizedMouse.CursorPos();
+        double nx = (cx - r.Left) / (double)winW, ny = (cy - r.Top) / (double)winH;
+        if (nx < 0 || nx > 1 || ny < 0 || ny > 1) return Held.Unknown;
+        int iconW = (int)Math.Round(_plan.IconW * frame.Width);
+        int iconH = (int)Math.Round(_plan.IconH * frame.Height);
+        // The game anchors the held icon to the cursor at an offset it chooses, so the search
+        // radius is TWO icons in every direction — generous on purpose. The costly mistake here
+        // is asymmetric: missing a held icon reads as "merged" while the item silently rides the
+        // cursor into the next slot's click, so the search errs wide. The price scales with the
+        // icon — milliseconds at 26 px, up to around a second at 60 px on a 4K frame — and is
+        // paid once per unreadable counter, not per merge.
+        (double best, _, _) = QuestFind.BestNcc(frame, nx, ny, _plan.IconPixels!, iconW, iconH,
+                                                padOverride: 2 * Math.Max(iconW, iconH));
+        ActivityLog.Detail(MergeSource, $"cursor check: icon match {best:0.000} at the parked cursor");
+        if (best >= NccAccept) return Held.Item;
+        // -1 with a frame in hand means the whole search area was FLAT — a solid panel, a dark
+        // corner. For a textured icon that is positive evidence of absence, not a failed read:
+        // the edge-of-frame bail-out that also returns -1 is unreachable here, because the search
+        // pad (two icons) is wider than the margin any park spot leaves to the window edge.
+        if (best <= 0.60) return Held.Nothing;
+        return Held.Unknown;
     }
 
     /// <summary>
@@ -1122,18 +1251,50 @@ public sealed class MergeRole
             }
             await Task.Delay(600, ct);
 
+            // Parked FIRST, even for the very first read: the user has usually just clicked Run,
+            // and their cursor is wherever the mouse happened to be — including over the target
+            // item's window, where the game draws a tooltip straight onto the counter.
+            ParkCursor();
+            await Task.Delay(220, ct);
             (int Have, int Need)? start = await ReadTierAsync();
+            long lastScore;
             if (start is null)
             {
-                Finish("Can't start — the tier counter didn't read. Keep the target item's window open and "
-                     + "re-pick a tight box around just the \"n/m\" numbers.");
-                return;
+                // NOT a reason to refuse any more. The counter is the score-keeper, but it stopped
+                // being the only witness releases ago: the server's own merge line and the cursor
+                // check both confirm merges without reading a character. Starting blind costs the
+                // forecast, not the merges — and the counter is re-read every attempt, so the first
+                // read that lands brings the numbers back.
+                // _watcherLive, not "_watcher is not null": a configured log path whose file is
+                // missing is a witness in name only, and a plan with no pixels either would start
+                // with zero working witnesses — every attempt blind, stopped after three.
+                if (_plan.HasPixels || _watcherLive)
+                {
+                    lastScore = -1;
+                    Log?.Invoke("⚠ the tier counter didn't read (OCR saw "
+                              + (_lastTierRaw.Length == 0 ? "nothing at all — is something covering it?"
+                                                          : $"\"{Trim(_lastTierRaw, 40)}\"")
+                              + "). Starting anyway: merges will be confirmed by the server's chat line and "
+                              + "the cursor check, and the score will pick up from the first read that lands.");
+                    Stats.Tier = "unread";
+                }
+                else
+                {
+                    Finish("Can't start — the tier counter didn't read, and this plan has no other way to "
+                         + "tell a merge from a click on an empty slot (no pixel reference, no chat log). "
+                         + "Keep the target item's window open and re-pick a tight box around the \"n/m\", "
+                         + "or re-pick the copy's icon with the fixed square.");
+                    return;
+                }
             }
-            Stats.Tier = $"{start.Value.Have}/{start.Value.Need}";
-            long lastScore = UpgradeScore.ScoreFrom(start.Value.Have, start.Value.Need) ?? -1;
-            if (lastScore >= 0)
-                Log?.Invoke($"· target is score {lastScore}/1024 — a +{UpgradeScore.TierFor(lastScore)}, "
-                          + $"{UpgradeScore.Max - lastScore} base copies short of a +10.");
+            else
+            {
+                Stats.Tier = $"{start.Value.Have}/{start.Value.Need}";
+                lastScore = UpgradeScore.ScoreFrom(start.Value.Have, start.Value.Need) ?? -1;
+                if (lastScore >= 0)
+                    Log?.Invoke($"· target is score {lastScore}/1024 — a +{UpgradeScore.TierFor(lastScore)}, "
+                              + $"{UpgradeScore.Max - lastScore} base copies short of a +10.");
+            }
             Log?.Invoke(_plan.ScanReady
                 ? $"Auto Merge: target is at {Stats.Tier}. Finding copies by their icon — every slot in the bag "
                   + "area gets looked at, and only squares that actually hold one get clicked."
@@ -1232,7 +1393,9 @@ public sealed class MergeRole
             // empty square after the first ladder step would be counted and logged as a merge —
             // and the put-back branch, which is the only cursor recovery in the sweep, would never
             // run again.
-            int lastHave = start.Value.Have, lastNeed = start.Value.Need;
+            // -1 = no baseline, which every consumer below already treats as "don't infer from the
+            // numerator" — the exact state a blind start is in until the first read lands.
+            int lastHave = start?.Have ?? -1, lastNeed = start?.Need ?? -1;
             if (lastScore >= UpgradeScore.Max)
             {
                 HumanizedMouse.MoveInstant(home.x, home.y);
@@ -1241,6 +1404,13 @@ public sealed class MergeRole
                 return;
             }
             int blindMisses = 0;
+            // Merges confirmed only by the cursor since the last successful counter read. The
+            // cursor can say THAT a merge happened but never what it was worth, so a run surviving
+            // on it alone has no idea how close the target is to +10 — and a +10 quietly consumes
+            // every further copy for nothing. This cap is the blast radius: big enough to clear a
+            // full bag of nineteen on a bad OCR night, far too small to eat a stack.
+            int unscored = 0;
+            const int UnscoredLimit = 30;
             bool cancelled = false;
 
             // The bag is READ, not walked. A guessed grid clicks every square whether or not it holds
@@ -1567,18 +1737,95 @@ public sealed class MergeRole
                     else ActivityLog.Detail(MergeSource, $"server confirmed the merge: \"{got}\"");
                 }
 
+                // Parked BEFORE the read, every time. The cursor is resting on the Merge Item
+                // button — a thumb's width from the counter — and the game draws the button's
+                // tooltip, and any refused item's icon, AT the cursor. Photograph the counter with
+                // the cursor there and the read comes back empty, three times running, and the old
+                // code stopped the whole run over furniture our own mouse was holding up.
+                ParkCursor();
+                await Task.Delay(200, ct);
                 (int Have, int Need)? now = await ReadTierAsync();
 
                 if (now is null && !loggedMerge)
                 {
+                    // The counter is unreadable and the server said nothing. Before counting this
+                    // as blindness, ask the one witness that needs no text: a refused merge hands
+                    // the copy straight back to the CURSOR, a successful one consumes it — and the
+                    // cursor is already parked over empty screen from the read above.
+                    Held held = HeldOnCursor();
+                    if (held == Held.Item)
+                    {
+                        blindMisses = 0;
+                        Log?.Invoke($"⚠ {where}: the merge was refused — the copy is back on the cursor "
+                                  + "(the tier counter couldn't be read, so the cursor answered instead). "
+                                  + "Putting it back and not trying that square again.");
+                        Stats.Skipped++;
+                        if (grid is null) { tried.Add((sx, sy)); deadEnds++; }
+                        pendingFine = null;
+                        await ReturnHeldAsync(sx, sy, ct);
+                        if (Finished) { HumanizedMouse.MoveInstant(home.x, home.y); return; }
+                        // The same five-strikes stop as the readable-skip path, because the same
+                        // fault produces BOTH symptoms at once: an item window that has moved takes
+                        // the counter out of its box AND puts the Place click somewhere useless, so
+                        // every refusal lands here. Without this check the run would carry every
+                        // copy in the bag to the wrong spot and back, then report "Done — 0 merged"
+                        // as though it had finished something.
+                        if (grid is null && deadEnds >= 5)
+                        {
+                            HumanizedMouse.MoveInstant(home.x, home.y);
+                            Finish($"⚠ Stopped after {Stats.Merged} merge(s): five squares in a row looked like "
+                                 + "copies and merged nothing — the last of them refused outright, with the tier "
+                                 + "counter unreadable. That pattern usually means the target item's window has "
+                                 + "moved — re-pick Place Item, Merge Item and the tier counter.");
+                            return;
+                        }
+                        continue;
+                    }
+                    if (held == Held.Nothing)
+                    {
+                        // Merged, on the cursor's word. Counted and narrated — but nothing is
+                        // LEARNED from it (no reject un-learning, no reference capture): those
+                        // decisions are reserved for the stronger witnesses, because a wrong one
+                        // here persists to disk and outlives the run.
+                        blindMisses = 0;
+                        deadEnds = 0;
+                        Stats.Merged++;
+                        if (Stats.Tier.Length > 0 && !Stats.Tier.EndsWith(StaleTier)) Stats.Tier += StaleTier;
+                        unscored++;
+                        Log?.Invoke("✔ merged — the tier counter couldn't be read (OCR saw "
+                                  + (_lastTierRaw.Length == 0 ? "nothing" : $"\"{Trim(_lastTierRaw, 40)}\"")
+                                  + "), but the cursor is empty and a refused merge would have handed the "
+                                  + "copy back. The score above is from before this merge.");
+                        if (unscored >= UnscoredLimit)
+                        {
+                            HumanizedMouse.MoveInstant(home.x, home.y);
+                            Finish($"⚠ Stopped after {Stats.Merged} merge(s): {UnscoredLimit} merges since the "
+                                 + "tier counter last read. The merges are real, but without the counter there is "
+                                 + "no way to see the score — or to stop at +10 before spare copies start "
+                                 + "vanishing into a finished item. Fix the counter read (is the item window "
+                                 + "where its pick says it is?) and run again.");
+                            return;
+                        }
+                        // The baseline is gone until a read lands — same invalidation as a
+                        // log-confirmed merge with an unreadable counter, for the same reason:
+                        // the next real read must not be mistaken for a fresh merge.
+                        lastScore = -1; lastHave = -1; lastNeed = -1;
+                        pendingFine = null;
+                        continue;
+                    }
+
                     blindMisses++;
-                    Log?.Invoke($"⚠ {where}: couldn't read the tier counter ({blindMisses} of 3).");
+                    Log?.Invoke($"⚠ {where}: couldn't tell what happened — the tier counter didn't read "
+                              + $"(OCR saw {(_lastTierRaw.Length == 0 ? "nothing at all" : $"\"{Trim(_lastTierRaw, 40)}\"")}), "
+                              + $"no server line arrived, and the cursor check couldn't decide ({blindMisses} of 3).");
                     await ReturnHeldAsync(sx, sy, ct);
                     if (Finished) { HumanizedMouse.MoveInstant(home.x, home.y); return; }
                     if (blindMisses >= 3)
                     {
-                        Finish($"Stopped after {Stats.Merged} merge(s): the tier counter stopped reading three "
-                             + "times running. Is the target item's window still open and unobstructed?");
+                        Finish($"Stopped after {Stats.Merged} merge(s): three attempts running produced no "
+                             + "evidence in any direction — the counter didn't read, the log said nothing, and "
+                             + "the cursor couldn't be seen. Is the game still on screen, with the target "
+                             + "item's window open?");
                         HumanizedMouse.MoveInstant(home.x, home.y);
                         return;
                     }
@@ -1586,6 +1833,16 @@ public sealed class MergeRole
                 }
 
                 blindMisses = 0;
+                if (now is not null) unscored = 0;         // the score-keeper is back; the cap is moot
+                // A log-confirmed merge with an unreadable counter is just as scoreless as a
+                // cursor-confirmed one — the chat line says THAT it merged, never what the total
+                // is. Leaving these out of the cap meant a live watcher switched the +10
+                // protection off entirely on exactly the nights the counter was dead.
+                // Incremented HERE, stopped LATER: the moved-block below is what counts this very
+                // merge into Stats.Merged, and finishing before it runs would report one merge
+                // fewer than actually happened — in the one message whose whole job is the number.
+                else if (loggedMerge) unscored++;
+                bool capBlown = unscored >= UnscoredLimit;
                 if (now is { } t) Stats.Tier = $"{t.Have}/{t.Need}";
                 else if (Stats.Tier.Length > 0 && !Stats.Tier.EndsWith(StaleTier)) Stats.Tier += StaleTier;
 
@@ -1796,6 +2053,17 @@ public sealed class MergeRole
                              + "picks have moved. Check them before running again.");
                         return;
                     }
+                }
+
+                if (capBlown)
+                {
+                    HumanizedMouse.MoveInstant(home.x, home.y);
+                    Finish($"⚠ Stopped after {Stats.Merged} merge(s): {UnscoredLimit} merges since the tier "
+                         + "counter last read. The merges are real, but without the counter there is no way to "
+                         + "see the score — or to stop at +10 before spare copies start vanishing into a "
+                         + "finished item. Fix the counter read (is the item window where its pick says it is?) "
+                         + "and run again.");
+                    return;
                 }
 
                 await Task.Delay(260 + _rng.Next(200), ct);

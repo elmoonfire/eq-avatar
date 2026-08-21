@@ -528,8 +528,13 @@ public static class QuestFind
     /// patch was learned at. The patch is stored in pixels but located by fractions, so a resized
     /// window would otherwise compare a 26 px reference against a 21 px icon plus five pixels of a
     /// neighbouring slot — every real copy failing, and nothing on screen to say why.</param>
+    /// <param name="padOverride">A caller-supplied search radius in pixels, replacing the derived
+    /// one. The derived pad covers half a PROPOSAL STEP, which is right when the centre came from
+    /// the sliding scan — but a caller asking "is the icon anywhere NEAR here?" (the held-item
+    /// check, whose icon rides the cursor at an offset the game chooses) needs to name its own
+    /// radius, because its uncertainty has nothing to do with any stride.</param>
     public static (double Best, int Dx, int Dy) BestNcc(Bitmap frame, double cx, double cy, IconPatch reference,
-                                                        int wantW = 0, int wantH = 0)
+                                                        int wantW = 0, int wantH = 0, int padOverride = 0)
     {
 
         if (!reference.Ok) return (-1, 0, 0);
@@ -544,7 +549,8 @@ public static class QuestFind
         int px = (int)Math.Round(cx * frame.Width) - w / 2;
         int py = (int)Math.Round(cy * frame.Height) - h / 2;
         // Sized to the step the proposals actually came in on, per axis.
-        int padX = SearchPadFor(w), padY = SearchPadFor(h);
+        int padX = padOverride > 0 ? padOverride : SearchPadFor(w);
+        int padY = padOverride > 0 ? padOverride : SearchPadFor(h);
 
         // CLAMPED to the frame rather than abandoned at it. Returning "no match" for anything near
         // the window edge would blind the sweep to whole rows of the bag — the bottom row of an
