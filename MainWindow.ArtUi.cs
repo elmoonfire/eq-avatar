@@ -166,7 +166,12 @@ public partial class MainWindow
             if (GrindTargetLabel.Text is "—" or "") GrindTargetLabel.Text = "game targeted";
             return;
         }
-        if (WindowFinder.GuessEverQuest() is { } w)
+        // IsGameWindow, same as AutoLogin's own guard, because GuessEverQuest's title fallback
+        // matches the LaunchPad too — its window also names the game. Without this, the 3-second
+        // seek latches onto the LAUNCHER during every app-driven launch (the exact window where
+        // nothing is targeted yet), announces "game detected" over the login narration, and then
+        // narrates a false "game window closed" when the LaunchPad hands off and exits.
+        if (WindowFinder.GuessEverQuest() is { } w && WindowFinder.IsGameWindow(w.Handle))
         {
             _grindTarget = w.Handle;
             GrindTargetLabel.Text = $"{w.ProcessName} · {w.Title}";

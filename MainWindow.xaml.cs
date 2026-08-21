@@ -172,6 +172,7 @@ public partial class MainWindow : Window
 
     private DateTime _lastPanic = DateTime.MinValue;
     private int _panicHookTick;
+    private int _gameSeekTick;
 
     /// <summary>
     /// EVERYTHING stops — every role that can send input, the launcher automation included, which
@@ -304,6 +305,20 @@ public partial class MainWindow : Window
         // There is no API to ask whether a hook still lives; re-seating it every ~30 s costs a
         // millisecond and makes the answer always yes.
         if (++_panicHookTick >= 100) { _panicHookTick = 0; Input.PanicKey.Refresh(); }
+        // The OTHER half of the game-window watchdog below: a game that APPEARED. Launching
+        // outside the app (or after a close) used to go unnoticed until the user visited a page
+        // that happened to look. Every ~3 s while nothing is targeted is cheap — one EnumWindows —
+        // and never runs while a manual ◎ pick or a live target is held, so it can't fight either.
+        if (_grindTarget == IntPtr.Zero && ++_gameSeekTick >= 10)
+        {
+            _gameSeekTick = 0;
+            AutoTargetEq();
+            if (_grindTarget != IntPtr.Zero)
+            {
+                LaunchStatus.Text = "Game detected — already running.";
+                LoginLogLine("Found the game running — connected to it.");
+            }
+        }
         // The watchdog for a game that has CLOSED. Every other check of the handle happens when
         // the user does something; this is the one that notices within a heartbeat and says so,
         // instead of the app insisting the game is open until someone tries to use it.
@@ -2249,6 +2264,15 @@ public partial class MainWindow : Window
         UpdateLaunchLabel();
         VersionRun.Text = "v" + AppSettings.AppVersion;
         LoadMascot();
+        // The game may already be RUNNING — the app restarts far more often than the game does
+        // (updates alone restart it), and until now nothing looked for an existing window until
+        // the user visited a page that happened to need one. Look right away, and say so.
+        AutoTargetEq();
+        if (_grindTarget != IntPtr.Zero)
+        {
+            LaunchStatus.Text = "Game detected — already running.";
+            LoginLogLine("Found the game already running — connected to it.");
+        }
         _ready = true;
         UpdateChip();
         RefreshHome();
