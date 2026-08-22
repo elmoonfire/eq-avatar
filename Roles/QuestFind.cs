@@ -388,6 +388,21 @@ public static class QuestFind
         }
         [System.Text.Json.Serialization.JsonIgnore]
         public bool Ok => W > 3 && H > 3 && Pixels.Length == W * H * 3;
+
+        /// <summary>
+        /// A patch that lives only in memory, with no base64 round trip.
+        ///
+        /// Stored patches come out of a JSON file, so <see cref="Data"/> is their real form and
+        /// <see cref="Pixels"/> decodes it once. A CROP has no file behind it: encoding 2,880 bytes
+        /// to base64 only so the very next line can decode them again is about 11 KB of garbage per
+        /// call, and the call sites make it inside a loop bounded at 220 candidates — several
+        /// megabytes a scan to rebuild something byte-identical every time.
+        ///
+        /// NOT for anything that gets serialised. <see cref="Data"/> is deliberately left empty, so
+        /// a patch made this way and written to questscripts.json would come back blank.
+        /// </summary>
+        public static IconPatch InMemory(byte[] px, int w, int h, int frameW, int frameH)
+            => new() { W = w, H = h, FrameW = frameW, FrameH = frameH, _px = px };
     }
 
     /// <summary>
@@ -460,6 +475,142 @@ public static class QuestFind
         if (px is null) return null;
         return new IconPatch
         { W = w, H = h, FrameW = frame.Width, FrameH = frame.Height, Data = Convert.ToBase64String(px) };
+    }
+
+    /// <summary>How much of a patch's width and height the centre crop keeps. 0.76 throws away a
+    /// twelfth of the picture off each side — enough to clear a slot's frame, its background and the
+    /// corner a stack draws its quantity in, while still leaving 58% of the area to correlate.
+    /// A CONSTANT rather than a parameter, because <see cref="CentreOf"/> memoises its result per
+    /// patch and a per-call crop size would hand back somebody else's crop.</summary>
+    public const double CentreKeep = 0.76;
+
+    /// <summary>
+    /// One crop per patch, for as long as the patch itself lives.
+    ///
+    /// The crop is a pure function of the patch, and it is asked for hundreds of times per scan for
+    /// an input that cannot change in between. A weak table keyed on the patch keeps exactly one
+    /// and lets it die with the patch — so re-picking an icon does not leave the old crop behind,
+    /// and nothing has to remember to invalidate anything.
+    /// </summary>
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<IconPatch, IconPatch> _centres = new();
+
+    /// <summary>
+    /// The middle of a patch, with the outer border thrown away.
+    ///
+    /// An inventory slot is not just an icon: it has a frame, a background that differs between
+    /// bag windows and between highlighted and plain rows, and — for anything stacked — a quantity
+    /// number drawn in a corner. All of that sits at the EDGES, and all of it changes while the
+    /// item does not. Correlating the middle answers "is this the same picture" without asking the
+    /// chrome to agree as well.
+    ///
+    /// Used as a SECOND opinion, never a replacement: see <see cref="Score"/>, which computes the
+    /// full-patch score first and only consults this when that one has already failed.
+    /// </summary>
+    public static IconPatch? CentreOf(IconPatch p)
+    {
+        if (p is not { Ok: true }) return null;
+        return _centres.GetValue(p, static k =>
+        {
+            int w = Math.Max(4, (int)Math.Round(k.W * CentreKeep));
+            int h = Math.Max(4, (int)Math.Round(k.H * CentreKeep));
+            // A patch small enough that the crop would be the whole thing gets itself back, and
+            // Score recognises that by reference and skips the pointless second search.
+            if (w >= k.W || h >= k.H) return k;
+            int x0 = (k.W - w) / 2, y0 = (k.H - h) / 2;
+            byte[] src = k.Pixels, dst = new byte[w * h * 3];
+            for (int y = 0; y < h; y++)
+                Buffer.BlockCopy(src, ((y0 + y) * k.W + x0) * 3, dst, y * w * 3, w * 3);
+            return IconPatch.InMemory(dst, w, h, k.FrameW, k.FrameH);
+        });
+    }
+
+    /// <summary>
+    /// How high the CENTRE-ONLY comparison is allowed to lift a score: just under
+    /// <see cref="PixelAccept"/>, so a crop can win a square a chance but never a certainty.
+    ///
+    /// Every calibration number in this file — a real copy over 0.97, a different icon in the same
+    /// palette about 0.44, every non-copy measured under 0.51 — was measured on the WHOLE patch.
+    /// None of them has been measured on 58% of one, and two things push a crop's non-copy ceiling
+    /// up: fewer samples (correlation noise scales with 1/sqrt(n)), and BestNcc returning the
+    /// maximum over hundreds of alignment offsets, whose upward bias grows as the sample shrinks.
+    ///
+    /// So a crop-won score lands in the PROVISIONAL band by construction. That band already has
+    /// the right answer to "I think this is it but I can't prove it": offer the item and let the
+    /// server say. What it must never do is reach the strict bar, where a square is clicked and
+    /// given away on nobody's word but the arithmetic's.
+    ///
+    /// SQUASHED INTO THE BAND, NOT CLIPPED AT IT. `Math.Min(centre, CropCeiling)` was the obvious
+    /// way to write this and it is a serious bug: every crop win above the ceiling returns the
+    /// identical 0.84, the selectors are all strict `>`, and so the FIRST square in proposal order
+    /// wins and nothing can displace it. A girdle whose middle scores 0.855 in the top row would
+    /// beat the real item whose middle scores 0.990 further down, because both report 0.84 and
+    /// 0.84 is not greater than 0.84. The map below is strictly increasing in `centre`, so ranking
+    /// survives the ceiling — which is the entire reason the scan compares scores at all.
+    /// </summary>
+    public const double CropCeiling = 0.84;
+
+    /// <summary>
+    /// How well the WHOLE square has to do before the centre is worth a second search.
+    ///
+    /// Not a safety bar — a cost one, and a large one. The crop is a full alignment search of its
+    /// own, run for every candidate the colour pass proposes, and that pass proposes hundreds
+    /// (MaxProposals caps it at 220). Doing it unconditionally added about 40% to the hottest loop
+    /// in the app, in exactly the state where the loop already runs to its cap because nothing
+    /// reaches the strict bar and nothing breaks early.
+    ///
+    /// 0.30 is far below anything this is meant to rescue. The field misses that started all of
+    /// this scored 0.552, 0.730 and 0.764 on the whole patch; a square scoring under 0.30 is not
+    /// the right item behind a changed border, it is a different picture.
+    /// </summary>
+    public const double CropTryFrom = 0.30;
+
+    /// <summary>
+    /// How well a square matches a reference: the whole patch, and its middle, best of the two.
+    ///
+    /// The second opinion exists because of a field report — "the icons look the same on my
+    /// screen" — against arithmetic that said 55%. When a person looking at two slots sees the
+    /// same icon, the disagreement is almost never about the icon; it is about everything ELSE
+    /// inside the square, and all of that lives at the edges.
+    ///
+    /// SHARED, and shared deliberately: the runner scans with this and the quest card's hover test
+    /// reports with it. A hover test computing a different number than the run is worse than no
+    /// hover test, because it is consulted precisely when the two disagree.
+    /// </summary>
+    /// <returns>
+    /// Ncc — the score to judge and rank by. Cropped — whether the crop was LOAD-BEARING, i.e. the
+    /// whole patch alone would not have cleared <see cref="ProbableAccept"/>; that is what decides
+    /// whether a score is calibrated evidence, and it is deliberately NOT the same question as
+    /// "did the crop nudge the number up". Full — the whole-patch score, carried out so the log can
+    /// say what actually happened rather than quoting a guarantee that was measured on a different
+    /// picture. Five rounds of review have turned on that distinction; it should be printable.
+    /// </returns>
+    public static (double Ncc, int Dx, int Dy, bool Cropped, double Full) Score(
+        Bitmap frame, double cx, double cy, IconPatch reference, int wantW, int wantH)
+    {
+        (double full, int dx, int dy) = BestNcc(frame, cx, cy, reference, wantW, wantH);
+        // Already a copy, too far off to be worth a second search, or unreadable. The unreadable
+        // case rides in on the same test: BestNcc's "I could not measure that" is -1, which is
+        // below CropTryFrom, so it returns untouched and the caller narrates it as its own outcome
+        // rather than having it quietly overwritten by a crop score of nothing.
+        if (full >= PixelAccept || full < CropTryFrom) return (full, dx, dy, false, full);
+        IconPatch? mid = CentreOf(reference);
+        if (mid is null || ReferenceEquals(mid, reference)) return (full, dx, dy, false, full);
+        int mw = Math.Max(4, (int)Math.Round(wantW * (double)mid.W / Math.Max(1, reference.W)));
+        int mh = Math.Max(4, (int)Math.Round(wantH * (double)mid.H / Math.Max(1, reference.H)));
+        (double centre, int cdx, int cdy) = BestNcc(frame, cx, cy, mid, mw, mh);
+        if (centre <= full) return (full, dx, dy, false, full);
+        // Maps centre ∈ (full, 1.0] onto (full, CropCeiling], monotonically. A perfect middle
+        // reports exactly the ceiling; everything else reports proportionally less, so two crop
+        // wins can still be told apart and the better one still wins.
+        double capped = full + (CropCeiling - full) * (centre - full) / (1.0 - full);
+        // `Cropped` means the crop is LOAD-BEARING — the whole patch would not have cleared the
+        // provisional floor on its own — not merely that it nudged the number up. Callers use this
+        // flag to decide what a score is EVIDENCE for, and "the crop won by a hair over a full
+        // patch that already scored 0.76" is calibrated evidence: the 0.51 non-copy ceiling was
+        // measured on exactly that full patch. Reporting `true` there closed the learning gate on
+        // almost every real copy it exists to learn from — the same dead switch as `!_offered`,
+        // reintroduced through a different door.
+        return capped > full ? (capped, cdx, cdy, full < ProbableAccept, full) : (full, dx, dy, false, full);
     }
 
     /// <summary>

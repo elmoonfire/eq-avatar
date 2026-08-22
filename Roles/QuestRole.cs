@@ -214,6 +214,12 @@ public sealed class QuestRole
     /// <summary>Where that photograph was taken, so the same square can be looked at again AFTER
     /// the hand-in — the face that remains is the one the next scan has to recognise.</summary>
     private ScreenPoint _pendingLookAt = new();
+    /// <summary>Whether the pick this photograph belongs to was won by the CENTRE-ONLY comparison.
+    /// A crop win is fit to offer on and not fit to learn from — see LearnLookIfProved.</summary>
+    private bool _pendingLookCropped;
+    /// <summary>Whether the pick this photograph belongs to was won by a LEARNED look rather than
+    /// the stored reference. A look is not calibrated evidence — see LearnLookIfProved.</summary>
+    private bool _pendingLookFromLook;
     private readonly Dictionary<string, int> _learnsPerItem = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> _learnCapSaid = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> _learnSaid = new(StringComparer.OrdinalIgnoreCase);
@@ -653,6 +659,8 @@ public sealed class QuestRole
         _lastPos = "";
         _lastColour = -1;
         _pendingLook = null;
+        _pendingLookCropped = false;
+        _pendingLookFromLook = false;
         _pixelUnreadable = "";
         _usedPixels = false;
 
@@ -682,10 +690,28 @@ public sealed class QuestRole
             //   Looked  false → the screen grab failed.
             //   Best    null  → nothing proposed; Closest carries the nearest colour distance so
             //                   the log can say HOW far off rather than just "none".
-            (bool Looked, QuestFind.CopyHit? Best, double Closest) Judge()
+            //   Cropped       → the winning score came from the centre-only comparison, so it is
+            //                   capped below the strict bar and the log should say which picture
+            //                   the number is about.
+            //   Probe   the actual square the score was measured on, lifted out of THIS frame
+            //           while it is still alive. Carried out rather than re-grabbed later because
+            //           the very next thing this method's caller may do is press the open-bags key
+            //           — a toggle — and a diagnostic photograph taken after that is a picture of
+            //           the 3D world captioned with a number measured against a bag.
+            //   Ref/RefLabel  WHICH stored picture produced the score — the original reference or
+            //           one of the learned appearances. The diagnostic draws this one, because
+            //           drawing the original beside a probe scored against a learned look would
+            //           show two images that were never compared, and would hide a bad look behind
+            //           a good reference at exactly the moment someone is hunting for it.
+            (bool Looked, QuestFind.CopyHit? Best, double Closest, bool Cropped, double Whole,
+             QuestFind.IconPatch? Probe, QuestFind.IconPatch? Ref, string RefLabel) Judge()
             {
+                bool bestCropped = false;
+                double bestWhole = -1;
+                QuestFind.IconPatch? bestRef = step.IconPixels;
+                string bestRefLabel = "stored reference";
                 using System.Drawing.Bitmap? frame = QuestFind.Capture(_hwnd());
-                if (frame is null) return (false, null, 999);
+                if (frame is null) return (false, null, 999, false, -1, null, null, "");
                 int wantW = (int)Math.Round(step.IconW * frame.Width);
                 int wantH = (int)Math.Round(step.IconH * frame.Height);
                 QuestFind.CopyHit? best = null;
@@ -707,10 +733,17 @@ public sealed class QuestRole
                     // first acceptance for the same reason; a quest hand-in needs ONE copy, not
                     // the best one in the bag.
                     if (++looked > MaxProposals) break;
-                    (double ncc, int dx, int dy) = QuestFind.BestNcc(frame, h.X, h.Y, step.IconPixels!, wantW, wantH);
+                    (double ncc, int dx, int dy, bool crop, double whole) = QuestFind.Score(
+                        frame, h.X, h.Y, step.IconPixels!, wantW, wantH);
                     if (best is null || ncc > best.Ncc)
+                    {
                         best = new QuestFind.CopyHit(h.X + (double)dx / frame.Width,
                                                      h.Y + (double)dy / frame.Height, ncc, h.Dist);
+                        bestCropped = crop;
+                        bestWhole = whole;
+                        bestRef = step.IconPixels;
+                        bestRefLabel = "stored reference";
+                    }
                     if (ncc >= NccAccept) break;          // that's a copy — nothing to gain by looking further
                     if (looks.Length > 0 && ncc > 0)
                     {
@@ -738,29 +771,50 @@ public sealed class QuestRole
                 if (best is not null && best.Ncc < NccAccept)
                     foreach ((QuestFind.IconHit h, double _) in shortlist)
                     {
-                        foreach (QuestFind.IconPatch look in looks)
+                        for (int li = 0; li < looks.Length; li++)
                         {
+                            QuestFind.IconPatch look = looks[li];
                             if (look is not { Ok: true }) continue;
-                            (double n2, int x2, int y2) = QuestFind.BestNcc(frame, h.X, h.Y, look, wantW, wantH);
+                            (double n2, int x2, int y2, bool crop2, double whole2) = QuestFind.Score(
+                                frame, h.X, h.Y, look, wantW, wantH);
                             // h.Dist is still the COLOUR distance the record's contract promises —
                             // the running correlation rides alongside in the tuple rather than
                             // overwriting a field whose name means something else.
                             if (n2 > best!.Ncc)
+                            {
                                 best = new QuestFind.CopyHit(h.X + (double)x2 / frame.Width,
                                                              h.Y + (double)y2 / frame.Height, n2, h.Dist);
+                                bestCropped = crop2;
+                                bestWhole = whole2;
+                                bestRef = look;
+                                bestRefLabel = $"learned appearance {li + 1} of {looks.Length}";
+                            }
                             if (best!.Ncc >= NccAccept) break;
                         }
                         if (best!.Ncc >= NccAccept) break;
                     }
 
-                if (best is not null) return (true, best, best.Coarse);
+                if (best is not null)
+                {
+                    // Only for the picture, and only when there is a disagreement worth showing —
+                    // a square that scored something but not enough — and only while a picture is
+                    // still wanted. Lifting a patch costs a LockBits and a base64 encode, and the
+                    // miss path runs every cycle for the rest of a grind long after the one picture
+                    // this item gets has been written.
+                    QuestFind.IconPatch? probe = best.Ncc > 0 && best.Ncc < ProbableAccept && WantDump(step)
+                        ? QuestFind.PatchFromRegion(frame, best.X - step.IconW / 2, best.Y - step.IconH / 2,
+                                                    step.IconW, step.IconH)
+                        : null;
+                    return (true, best, best.Coarse, bestCropped, bestWhole, probe, bestRef, bestRefLabel);
+                }
                 QuestFind.IconHit? closest = QuestFind.FindIconInRect(
                     frame, _script.BagX, _script.BagY, _script.BagW, _script.BagH,
                     step.IconSig!, step.IconW, step.IconH);
-                return (true, null, closest?.Dist ?? 999);
+                return (true, null, closest?.Dist ?? 999, false, -1, null, null, "");
             }
 
-            (bool looked, QuestFind.CopyHit? pick, double closest) = Judge();
+            (bool looked, QuestFind.CopyHit? pick, double closest, bool cropped, double whole,
+             QuestFind.IconPatch? probe, QuestFind.IconPatch? shown, string shownAs) = Judge();
             // ProbableAccept, not NccAccept: a provisional match is going ahead either way, so
             // pressing the open-bags key would toggle the bags SHUT and then click into the 3D
             // world at the remembered coordinates — on every hand-in, in exactly the state this
@@ -770,7 +824,8 @@ public sealed class QuestRole
                 if (OpenBags($"nothing matched {step.Item} — checking the bags are open"))
                 {
                     Thread.Sleep(450);
-                    (bool l2, QuestFind.CopyHit? again, double c2) = Judge();
+                    (bool l2, QuestFind.CopyHit? again, double c2, bool crop2, double whole2,
+                     QuestFind.IconPatch? probe2, QuestFind.IconPatch? shown2, string shownAs2) = Judge();
                     if (l2)
                     {
                         // A SUCCESSFUL second look always counts as having looked, even when it
@@ -779,8 +834,16 @@ public sealed class QuestRole
                         // by a clean look at a genuinely empty bag, still reported "couldn't scan"
                         // — and then clicked the stale picked slot and handed a stranger to the NPC.
                         looked = true;
+                        // The flag and the photograph travel WITH the hit they describe. Letting
+                        // the second look overwrite them while the first look's hit is the one kept
+                        // would caption one square's number with another square's picture — and the
+                        // second look is the one taken after the open-bags toggle, so it is exactly
+                        // the wrong picture to inherit.
                         if (again is not null && (pick is null || again.Ncc > pick.Ncc))
-                        { pick = again; closest = c2; }
+                        {
+                            pick = again; closest = c2; cropped = crop2; whole = whole2;
+                            probe = probe2; shown = shown2; shownAs = shownAs2;
+                        }
                         else if (pick is null) closest = c2;
                     }
                 }
@@ -818,12 +881,48 @@ public sealed class QuestRole
                 // Held, not saved. It only reaches the script if the server accepts the hand-in.
                 _pendingLook = SnapAt(step, slot);
                 _pendingLookAt = slot;
+                _pendingLookCropped = cropped;
+                // WHICH picture vouched for this square. `ProbableAccept`'s 0.70 is admissible
+                // because every non-copy measured under 0.51 AGAINST THE STORED REFERENCE. It says
+                // nothing about correlation against a learned look, which is not a calibrated
+                // reference at all — it is a photograph of a bag square that an earlier hand-in
+                // happened to confirm. Learning from a look-won square puts a fresh 0.70-radius
+                // ball around a picture that was itself only 0.70-close to another picture, and
+                // MaxLooks evicts the OLDEST first, so the well-founded entries leave and the
+                // drifted ones stay. Every look stays exactly one hop from calibrated evidence.
+                bool fromLook = !ReferenceEquals(shown, step.IconPixels);
+                _pendingLookFromLook = fromLook;
                 if (_narrate || _provisionalSaid.Add(step.Item))
                 Log?.Invoke($"· {step.Item} at {prov.X * 100:0.0}%, {prov.Y * 100:0.0}% matches {prov.Ncc * 100:0.0}% "
-                          + $"— under the {NccAccept * 100:0}% bar but far above the {ProbableAccept * 100:0}% a "
-                          + "different item could reach, so this is almost certainly one wearing a face I haven't "
-                          + "seen (a stack's count changes as it shrinks). Offering it: if he takes it, that proves "
-                          + "it and I'll remember this look.");
+                          + $"— under the {NccAccept * 100:0}% bar, so this looks like the item wearing a face I "
+                          + "haven't photographed yet (a stack's count changes as it shrinks)."
+                          // BOTH NUMBERS, whenever they differ. The 0.51 non-copy ceiling was
+                          // measured on the WHOLE patch, so it is a guarantee about the whole-patch
+                          // score and about nothing else — quoting it beside a crop-lifted number
+                          // was the error this line has now made in both directions. Printing the
+                          // pair also produces, on the first real run, the measurement that would
+                          // settle what a crop score is worth. Nobody has that measurement yet.
+                          + (whole >= 0 && whole < prov.Ncc - 0.0005
+                              ? $" The whole square scored {whole * 100:0.0}% and its MIDDLE lifted that to "
+                                + $"{prov.Ncc * 100:0.0}%, so something around the icon has changed — the slot's "
+                                + "frame or background, or the count a stack draws in its corner. A centre-lifted "
+                                + $"score can't go past {QuestFind.CropCeiling * 100:0}%."
+                              : "")
+                          // The promise at the end of this line has to be the one the gate will
+                          // actually keep. Saying "I'll remember this look" and then refusing to is
+                          // how someone spends an evening wondering why the numbers never improve.
+                          + (cropped
+                              ? " The middle is doing the work here, and I've never measured what a DIFFERENT item's "
+                                + "middle can reach — so this is enough to offer on and not enough to write down."
+                              : fromLook
+                                ? $" {(whole >= 0 ? whole * 100 : prov.Ncc * 100):0.0}% on the whole square — but "
+                                  + "that was against an appearance I learned earlier, not the stored reference, and "
+                                  + "only the reference's numbers have ever been measured. Offering it; not writing "
+                                  + "this one down."
+                                : $" {(whole >= 0 ? whole * 100 : prov.Ncc * 100):0.0}% on the whole square is far "
+                                  + $"above the {ProbableAccept * 100:0}% a different item could reach — every "
+                                  + "non-copy measured under 51% — so if he takes it I'll remember this look.")
+                          + " Offering it.");
             }
             else if (pick is { } p && p.Ncc >= NccAccept)
             {
@@ -860,6 +959,7 @@ public sealed class QuestRole
                            : $"{pick.Ncc * 100:0.0}% pixel match";
                 if (pick is not null) _lastPos = $"{pick.X * 100:0.0}%, {pick.Y * 100:0.0}%";
                 else _lastColour = closest;
+                if (pick is not null && pick.Ncc > 0) DumpNoMatch(step, shown, shownAs, probe, pick.Ncc, cropped);
                 Log?.Invoke(pick is null
                     ? $"✖ no {step.Item} in the bag area — nothing in it even looks the right colour "
                       + $"(closest square is {closest:0} away, and a candidate has to be within {CoarsePropose:0})."
@@ -1144,6 +1244,151 @@ public sealed class QuestRole
 
     private bool _warnedHeld;
 
+    /// <summary>
+    /// Write the reference and the square it wouldn't match to a PNG, side by side, magnified.
+    ///
+    /// Five rounds have now been spent reasoning about a number. Hayden says the icons look
+    /// identical on his screen and the arithmetic says 55%, and one of those is wrong in a way no
+    /// amount of argument from either end will settle. A picture of the two things being compared
+    /// settles it in a second: either they are plainly different, or the box is off, or there is a
+    /// count in the corner, or they really are the same and the fault is mine.
+    ///
+    /// The probe is HANDED IN, taken from the frame the score was measured on. Grabbing a fresh
+    /// screenshot here looked simpler and was wrong: the caller presses the open-bags key when
+    /// nothing matched, that key is a TOGGLE, and so by the time this runs the bags are shut. The
+    /// picture would have been of the 3D world, captioned with a number measured against a bag —
+    /// a diagnostic that manufactures its own false evidence, which is worse than none.
+    /// </summary>
+    private void DumpNoMatch(TurnInStep step, QuestFind.IconPatch? shown, string shownAs,
+                             QuestFind.IconPatch? probe, double ncc, bool cropped)
+    {
+        string key = DumpKey(step);
+        if (!WantDump(step)) return;
+        if (shown is not { Ok: true } refr) return;
+        // BOUNDED ATTEMPTS, AND THE COUNTER MOVES FIRST. Marking it dumped up front silenced the
+        // diagnostic for the whole run after one transient failure; not counting failures at all
+        // leaves the far more likely steady state — the picture open in a viewer, so Save throws
+        // every time — retrying two bitmaps, a PNG encode and a log line on every miss for the rest
+        // of the night.
+        int tries = _dumpTries.TryGetValue(key, out int t) ? t : 0;
+        if (tries >= MaxDumpTries) return;
+        _dumpTries[key] = ++tries;
+        // A probe that could not be lifted is counted like any other failure, because the usual
+        // reason is PERMANENT: the square sits close enough to the edge of the window that its full
+        // box doesn't fit on the frame. BestNcc clamps its search area and still scores, so this is
+        // not covered by the "couldn't read the pixels" branch upstream — without a counter here the
+        // run would promise a picture every cycle and never produce one.
+        if (probe is not { Ok: true } got)
+        {
+            Log?.Invoke(tries >= MaxDumpTries
+                ? $"· can't photograph the square I'm comparing {step.Item} against — it sits too close to the edge "
+                  + "of the game window for its whole box to fit on screen. Drag the bag in from the edge, or "
+                  + "re-pick this item's icon with a smaller square."
+                : $"· couldn't photograph the square for {step.Item} that time — I'll try again on the next miss.");
+            return;
+        }
+        try
+        {
+            // The two panels are drawn at the sizes they really are, side by side, so a size
+            // mismatch is visible as a size mismatch rather than hidden by scaling one to the
+            // other. Zoom is clamped by the OUTPUT width: an icon box dragged large on a 4K window
+            // would otherwise ask for a bitmap several thousand pixels across.
+            int cw = Math.Max(refr.W, got.W), ch = Math.Max(refr.H, got.H);
+            int zoom = Math.Clamp(1400 / Math.Max(1, cw * 2), 1, 6);
+            const int Gap = 14, Top = 22;
+            using var outp = new System.Drawing.Bitmap(cw * zoom * 2 + Gap, ch * zoom + Top);
+            using (var g = System.Drawing.Graphics.FromImage(outp))
+            {
+                g.Clear(System.Drawing.Color.FromArgb(12, 15, 19));
+                Blit(g, refr, 0, Top, zoom);
+                Blit(g, got, cw * zoom + Gap, Top, zoom);
+                using var font = new System.Drawing.Font("Segoe UI", 9f);
+                using var ink = new System.Drawing.SolidBrush(System.Drawing.Color.Gainsboro);
+                g.DrawString($"{shownAs} ({refr.W}×{refr.H})", font, ink, 2, 3);
+                g.DrawString($"what's there now — {ncc * 100:0.0}%{(cropped ? " (middle only)" : "")}",
+                             font, ink, cw * zoom + Gap + 2, 3);
+            }
+            string dir = System.IO.Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "EQAvatar", "diag");
+            System.IO.Directory.CreateDirectory(dir);
+            string safe = string.Concat(key.Split(System.IO.Path.GetInvalidFileNameChars()));
+            if (safe.Trim().Length == 0) safe = "item";
+            string file = System.IO.Path.Combine(dir, $"nomatch-{safe}.png");
+            outp.Save(file, System.Drawing.Imaging.ImageFormat.Png);
+            // MARKED ONLY ON SUCCESS. Marking it up front meant one transient failure — a screen
+            // grab that missed, a box clipped by the window edge, or the overwhelmingly likely case
+            // of the last picture still open in an image viewer — silenced the diagnostic for the
+            // rest of the run, in the exact session it was written to serve.
+            _dumped.Add(key);
+            Log?.Invoke($"· wrote a side-by-side picture of what I'm comparing to {file} — open it. On the left is "
+                      + $"the {shownAs} the {ncc * 100:0.0}% was measured against; on the right is the square as it "
+                      + "is now. If those two look the same to you, the box is picking up something around the icon "
+                      + "that isn't the icon, and that is on me to fix."
+                      + (zoom < 6 ? " (Drawn small — the icon box is large enough that a full magnification "
+                                    + "wouldn't fit, so zoom in yourself.)" : ""));
+        }
+        catch (Exception ex)
+        {
+            // SAID, not swallowed. A diagnostic that fails silently is indistinguishable from one
+            // that was never attempted, and "where's the picture you promised?" is the next
+            // question either way. Said at most MaxDumpTries times, because the most likely cause
+            // is the last one still open in a viewer and that does not fix itself mid-run.
+            Log?.Invoke(_dumpTries[key] >= MaxDumpTries
+                ? $"· gave up writing the comparison picture for {step.Item} ({ex.Message}). If it's open in a "
+                  + "viewer, close it and start the run again."
+                : $"· couldn't write the comparison picture ({ex.Message}) — I'll try again on the next miss.");
+        }
+
+        // One bitmap per panel and ONE draw call, instead of a GDI+ brush created, filled and
+        // destroyed per source pixel — three native round trips each, and a large icon box has tens
+        // of thousands of pixels. Nearest-neighbour with a half-pixel offset so magnification shows
+        // the real pixels as squares rather than smearing them into a guess about the icon.
+        static void Blit(System.Drawing.Graphics g, QuestFind.IconPatch p, int ox, int oy, int zoom)
+        {
+            using var bmp = new System.Drawing.Bitmap(p.W, p.H, System.Drawing.Imaging.PixelFormat.Format24bppRgb);
+            System.Drawing.Imaging.BitmapData bits = bmp.LockBits(
+                new System.Drawing.Rectangle(0, 0, p.W, p.H),
+                System.Drawing.Imaging.ImageLockMode.WriteOnly, System.Drawing.Imaging.PixelFormat.Format24bppRgb);
+            try
+            {
+                byte[] px = p.Pixels;
+                var row = new byte[p.W * 3];
+                for (int y = 0; y < p.H; y++)
+                {
+                    // Stored RGB, drawn as BGR — Format24bppRgb is byte-order BGR in memory, and
+                    // getting this backwards produces a picture that looks convincingly like the
+                    // icon in the wrong colours, which is the worst possible outcome for a tool
+                    // whose whole job is answering "do these two look the same".
+                    for (int x = 0; x < p.W; x++)
+                    {
+                        int i = (y * p.W + x) * 3;
+                        row[x * 3] = px[i + 2]; row[x * 3 + 1] = px[i + 1]; row[x * 3 + 2] = px[i];
+                    }
+                    System.Runtime.InteropServices.Marshal.Copy(row, 0, IntPtr.Add(bits.Scan0, y * bits.Stride),
+                                                                row.Length);
+                }
+            }
+            finally { bmp.UnlockBits(bits); }
+            g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.NearestNeighbor;
+            g.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.Half;
+            g.DrawImage(bmp, ox, oy, p.W * zoom, p.H * zoom);
+        }
+    }
+
+    private readonly HashSet<string> _dumped = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, int> _dumpTries = new(StringComparer.OrdinalIgnoreCase);
+    private const int MaxDumpTries = 3;
+
+    private static string DumpKey(TurnInStep step) => step.Item.Length > 0 ? step.Item : "item";
+
+    /// <summary>Is a comparison picture still wanted for this item? Asked BEFORE the probe patch is
+    /// lifted out of the frame, so a miss that will produce nothing also costs nothing.</summary>
+    private bool WantDump(TurnInStep step)
+    {
+        string key = DumpKey(step);
+        return !_dumped.Contains(key) && (!_dumpTries.TryGetValue(key, out int t) || t < MaxDumpTries);
+    }
+
     /// <summary>Photograph one square, right now, at the icon's own size.</summary>
     private QuestFind.IconPatch? SnapAt(TurnInStep step, ScreenPoint at)
     {
@@ -1175,16 +1420,58 @@ public sealed class QuestRole
     /// before shot above the provisional floor — which is exactly the question "is this the same
     /// item wearing a different face, or is it nothing?" An empty slot fails it outright.
     ///
-    /// The gate on both is `_offered` and nothing weaker. `_advanced` — the reward line, the
-    /// quest's own success phrases — does not name the item, so a provisional pick that grabbed
-    /// something else the NPC happens to want would teach the runner that the wrong item IS this
-    /// one, permanently and invisibly.
+    /// The gate wants POSITIVE evidence and NO CONTRADICTION, which are two different things and
+    /// are checked separately below.
     /// </summary>
     private void LearnLookIfProved(TurnInStep step)
     {
         QuestFind.IconPatch? before = _pendingLook;
         _pendingLook = null;
-        if (before is not { Ok: true } || _assumedThisStep || !_offered) return;
+        // EITHER confirmation counts. Gating this on `_offered` alone made the whole feature dead
+        // on Hayden's server: every single hand-in in his logs is confirmed by the reward line —
+        // "You have been given: Hamed's Ring of Tears" — and not one by "You offered 1 …". A gate
+        // that never opens is not a safety measure, it is a switch left off.
+        //
+        // But `_advanced` alone is NOT enough, and the reason is the whole hazard of this feature.
+        // `_offered` names the item; `_advanced` does not. So a provisional pick that grabbed a
+        // Bone-clasped Girdle the NPC also accepts produces "You offered 1 Bone-clasped Girdle"
+        // (which sets `_wrongOffer`, not `_offered`) followed by a reward line (which sets
+        // `_advanced`) — and learning on `_advanced` alone would write the GIRDLE's picture into
+        // this item's appearances, where it matches at ~1.00 for ever after, at the STRICT bar,
+        // with no provisional warning and nothing in the log to say why. Re-picking the icon is the
+        // only cure and nothing would tell anyone to.
+        //
+        // So: `_advanced` is the positive evidence, and the absence of a contradiction is the
+        // safety. The parser has already read every offer line in this window and written down
+        // anything that named the wrong item, went to the wrong recipient, or spilled another of
+        // this script's items. If it saw any of that, this hand-in does not get to teach anybody
+        // anything, however happily it ended.
+        bool contradicted;
+        lock (_windowGate) contradicted = _wrongOffer.Length > 0 || _wrongNpc.Length > 0 || _spilled;
+
+        // AND THE PICK ITSELF HAS TO HAVE BEEN CALIBRATED EVIDENCE.
+        //
+        // The contradiction test above only bites on a server that prints offer lines — and this
+        // user's server does not print them at all, which is the whole reason `_advanced` had to be
+        // admitted. On that server the guard is inert, so it cannot be the only thing standing
+        // between a mis-picked item and a permanent wrong face in the collection.
+        //
+        // This is the test that works everywhere. `ProbableAccept = 0.70` is a MEASURED bar: every
+        // non-copy correlated under 0.51 over the WHOLE patch. A crop win has no such measurement
+        // behind it — CropCeiling's own note says so — it is a hunch about the middle of a picture,
+        // deliberately good enough to justify offering an item and seeing what the server says.
+        // Offering costs one item if it is wrong. Learning costs every run from here.
+        //
+        // So the two decisions get different evidence: the crop can win a square its CHANCE, and
+        // only the full patch can win it a place in the collection. On this user's bag that means
+        // the 55% misses keep going through provisionally every cycle without ever consolidating,
+        // and the 73%/76% ones consolidate on the first confirmed hand-in — which is the right way
+        // round, because the second kind is the one the numbers actually vouch for.
+        bool crop = _pendingLookCropped, fromLook = _pendingLookFromLook;
+        _pendingLookCropped = false;
+        _pendingLookFromLook = false;
+        if (before is not { Ok: true } || _assumedThisStep || contradicted || crop || fromLook
+            || !(_offered || _advanced)) return;
 
         // BOUNDED PER RUN. Every admission rewrites questscripts.json in full — every step's
         // base64 snapshot and reference with it — and a shrinking stack presents a new face on

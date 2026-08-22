@@ -1340,13 +1340,13 @@ public partial class MainWindow
     /// readable at all — so the hover test can put the cursor on the closest thing even when it
     /// FAILS, which is the case someone is actually trying to look at.
     /// </summary>
-    private (ScreenPoint At, double Ncc, bool Looked, bool Proposed, double Colour) BestPixelMatch(
-        QuestScript script, TurnInStep st)
+    private (ScreenPoint At, double Ncc, bool Looked, bool Proposed, double Colour, double Whole, bool FromLook)
+        BestPixelMatch(QuestScript script, TurnInStep st)
     {
         using System.Drawing.Bitmap? frame = QuestFind.Capture(_grindTarget);
-        if (frame is null) return (new ScreenPoint(), -1, false, false, 999);
+        if (frame is null) return (new ScreenPoint(), -1, false, false, 999, -1, false);
         int wantW = (int)Math.Round(st.IconW * frame.Width), wantH = (int)Math.Round(st.IconH * frame.Height);
-        double bestN = -1; double bx = 0, by = 0; bool any = false;
+        double bestN = -1, bestWhole = -1; double bx = 0, by = 0; bool any = false, bestFromLook = false;
         QuestFind.IconPatch[] looksArr = QuestScriptStore.Current.Read(() => st.IconLooks.ToArray());
         var shortlist = new List<(QuestFind.IconHit H, double Ncc)>();
         int looked = 0;
@@ -1355,9 +1355,17 @@ public partial class MainWindow
                      st.IconSig!, st.IconW, st.IconH, QuestFind.CoarseProposeAt))
         {
             if (++looked > QuestFind.MaxProposals) break;
-            (double ncc, int dx, int dy) = QuestFind.BestNcc(frame, h.X, h.Y, st.IconPixels!, wantW, wantH);
+            // QuestFind.Score, not BestNcc: the run judges with the centre-crop second opinion, and
+            // a hover test that computes a different number than the run is worse than no hover
+            // test — it is consulted precisely when the two disagree, and it would then confidently
+            // report "NO match, 55%" about a square the runner is about to click.
+            (double ncc, int dx, int dy, _, double whole) = QuestFind.Score(
+                frame, h.X, h.Y, st.IconPixels!, wantW, wantH);
             if (!any || ncc > bestN)
-            { bestN = ncc; bx = h.X + (double)dx / frame.Width; by = h.Y + (double)dy / frame.Height; any = true; }
+            {
+                bestN = ncc; bestWhole = whole; any = true; bestFromLook = false;
+                bx = h.X + (double)dx / frame.Width; by = h.Y + (double)dy / frame.Height;
+            }
             if (ncc >= QuestFind.PixelAccept) break;
             if (looksArr.Length > 0 && ncc > 0)
             {
@@ -1384,9 +1392,12 @@ public partial class MainWindow
                     // Centred on the PROPOSAL every time. Accumulating into bx/by walked the search
                     // centre across the slot as each look won, so the next look was correlated
                     // against a moved target — and bx/by is where the cursor gets parked.
-                    (double n2, int x2, int y2) = QuestFind.BestNcc(frame, h.X, h.Y, look, lw, lh);
+                    (double n2, int x2, int y2, _, double whole2) = QuestFind.Score(frame, h.X, h.Y, look, lw, lh);
                     if (n2 > bestN)
-                    { bestN = n2; bx = h.X + (double)x2 / frame.Width; by = h.Y + (double)y2 / frame.Height; }
+                    {
+                        bestN = n2; bestWhole = whole2; bestFromLook = true;
+                        bx = h.X + (double)x2 / frame.Width; by = h.Y + (double)y2 / frame.Height;
+                    }
                     if (bestN >= QuestFind.PixelAccept) break;
                 }
                 if (bestN >= QuestFind.PixelAccept) break;
@@ -1403,8 +1414,8 @@ public partial class MainWindow
                 st.IconSig!, st.IconW, st.IconH);
             colour = closest?.Dist ?? 999;
         }
-        return any ? (new ScreenPoint { X = bx, Y = by }, bestN, true, true, colour)
-                   : (new ScreenPoint(), -1, true, false, colour);
+        return any ? (new ScreenPoint { X = bx, Y = by }, bestN, true, true, colour, bestWhole, bestFromLook)
+                   : (new ScreenPoint(), -1, true, false, colour, -1, false);
     }
 
     /// <summary>
@@ -1456,8 +1467,16 @@ public partial class MainWindow
                 // it can't find things.
                 if (script.SmartFind && script.BagSet && st.HasPixels && st.HasIconSize && st.HasIcon)
                 {
-                    (ScreenPoint at, double ncc, bool looked, bool proposed, double colour) =
-                        BestPixelMatch(script, st);
+                    (ScreenPoint at, double ncc, bool looked, bool proposed, double colour, double whole,
+                     bool fromLook) = BestPixelMatch(script, st);
+                    // Said whenever the middle of the icon scored better than the whole square, on
+                    // this screen as well as in the run — this is where someone comes to find out
+                    // why a square they can see isn't being matched, and "76% whole, 84% middle" is
+                    // the answer: something around the icon has changed, not the icon.
+                    string lift = whole >= 0 && whole < ncc - 0.0005
+                        ? $" (the whole square is {whole * 100:0.0}%; its middle lifts that to {ncc * 100:0.0}%, "
+                          + "so something around the icon has changed — a slot frame, a background, a stack's count)"
+                        : "";
                     if (!looked) label += " — couldn't grab the screen, showing the fixed pick";
                     else if (ncc >= QuestFind.PixelAccept)
                     {
@@ -1479,10 +1498,22 @@ public partial class MainWindow
                             ? " — found a candidate but couldn't read its pixels (too close to the window edge). "
                               + "The cursor is on it."
                             : ncc >= QuestFind.ProbableAccept
-                              ? $" — PROVISIONAL: {ncc * 100:0.0}%, under the {QuestFind.PixelAccept * 100:0}% bar "
-                                + $"but above the {QuestFind.ProbableAccept * 100:0}% floor, so the run would offer "
-                                + "it and learn this look if he takes it. The cursor is on it."
-                              : $" — NO match: closest square is {ncc * 100:0.0}% and a copy needs "
+                              ? $" — PROVISIONAL: {ncc * 100:0.0}%{lift}, under the "
+                                + $"{QuestFind.PixelAccept * 100:0}% bar but above the "
+                                + $"{QuestFind.ProbableAccept * 100:0}% floor, so the run would offer it"
+                                // The prediction has to match the gate. `fromLook` is the one part
+                                // of it this screen can actually see — a square won by an appearance
+                                // learned earlier is offered but never written down, because only
+                                // the stored reference's numbers have ever been measured.
+                                + (whole >= QuestFind.ProbableAccept && !fromLook
+                                    ? " and learn this look if he takes it."
+                                    : fromLook
+                                      ? " — though it won't write this look down: that score is against an "
+                                        + "appearance it learned earlier, not the stored reference."
+                                      : " — though it won't write this look down, because only the whole square "
+                                        + "clearing the floor counts as proof.")
+                                + " The cursor is on it."
+                              : $" — NO match: closest square is {ncc * 100:0.0}%{lift} and a copy needs "
                                 + $"{QuestFind.PixelAccept * 100:0}% (or {QuestFind.ProbableAccept * 100:0}% to be "
                                 + "offered provisionally). The cursor is on it — look at what's there.";
                     }
