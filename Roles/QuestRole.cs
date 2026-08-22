@@ -1189,6 +1189,16 @@ public sealed class QuestRole
                       : $"Its middle scored {centre * 100:0.0}%, no better than the whole square's "
                         + $"{whole * 100:0.0}% — so this is NOT the slot's frame, its background or a stack's "
                         + "count. Those all sit at the edges, and cropping them away changed nothing. ";
+
+                // AND THE ONE THAT IS USUALLY THE REAL ANSWER. Appended to whichever branch fired,
+                // because a reference that is mostly empty slot explains every one of them: the
+                // score is being carried by furniture that every slot shares, so it stays
+                // respectable when the item is absent and collapses when the NEIGHBOURS change.
+                // ONLY on the branch that actually prints `detail`. Building it on the other one
+                // spent the once-per-run token and threw the sentence away — so the single most
+                // useful thing this run had to say went missing for the rest of it, on the strength
+                // of one early pass where nothing was proposed.
+                if (pick is not null) detail += TooLooseWarning(step);
                 _lastDetail = pick is null ? "" : $"{sifted}. {detail}".Trim();
                 Log?.Invoke(pick is null
                     ? $"✖ no {step.Item} in the bag area — nothing in it even looks the right colour "
@@ -1662,6 +1672,64 @@ public sealed class QuestRole
         // Capped is measured in PROBES, because probes are what the judging loop counts.
         return new Sift(proposals.Count, squares, proposals.Count > MaxProposals, bestColour, x0, y0, x1, y1);
     }
+
+    /// <summary>
+    /// "This square isn't one slot", with the numbers, or nothing at all.
+    ///
+    /// Two signals, and the ORDER matters. Ink running off the edge of the reference is the strong
+    /// one: a square that really sits inside a slot has that slot's frame and the gap to the next
+    /// one around it, all background, so its ink cannot reach the border. Ink that does reach it
+    /// means the square cut through something — and a fuller bag makes that MORE likely, which is
+    /// the right direction, since a fuller bag is exactly when an oversized square starts failing.
+    /// The area fraction is the weaker one and is kept only as a second chance, because a bounding
+    /// box inflated by the neighbours it accidentally contains reports a healthy number.
+    ///
+    /// Said once per item per run: it is advice, not news.
+    /// </summary>
+    private string TooLooseWarning(TurnInStep step)
+    {
+        if (step.IconPixels is not { Ok: true } r) return "";
+        if (QuestFind.ContentBox(r) is not { } inner) return "";
+        double area = inner.AreaFraction(r);
+        if (!inner.RunsOffEdge && area >= 0.55) return "";
+        // The token is spent LAST, after everything that could decline. Checking it first meant a
+        // reference that had nothing to report still burned the one chance to report.
+        if (!_looseSaid.Add(DumpKey(step))) return "";
+
+        // THREE STRENGTHS OF CLAIM, because the evidence comes in three strengths.
+        //
+        // The density test is the confident one, and it has a blind spot that runs the wrong way: a
+        // FULL bag inks every slot, so a square straddling four of them reads as dense and the
+        // accusation goes quiet — in exactly the state that causes the failure ("fifty reward items
+        // piled up around it"). So ink reaching the edge still gets said, just not as an accusation:
+        // no pixel test can tell "the square caught its neighbours" from "the icon fills its
+        // square", and asserting the first at a good pick is how the previous draft ended up giving
+        // advice that could never be satisfied. State what was seen, give both readings, and let
+        // the person holding the screen decide — they can see their own bag.
+        return $"And this may well be why: what I stored as {step.Item} is a {r.W}×{r.H} px square, and "
+             + (inner.LikelyNeighbours
+                 ? $"the picture in it runs off {inner.Edges()} while only {inner.Ink * 100:0}% of the square is "
+                   + "inked at all. That combination means the square is wider than one inventory slot and has "
+                   + "caught part of what sits beside it"
+                   + (inner.Top && inner.Bottom && !inner.Left && !inner.Right
+                       ? " — above and below, so if your copies are stacked in a column, this reference is partly "
+                         + "made of the OTHER copies. The last one in a column has an empty slot above it, which is "
+                         + "not what the reference says should be there, and that is when it stops matching. "
+                       : ". It works while the neighbours stay put and stops the moment they change. ")
+                 : area < 0.55
+                   ? $"{step.Item} only fills {inner.W}×{inner.H} of it — {area * 100:0}%. The rest is empty slot, "
+                     + "so most of what I'm comparing is furniture that every slot shares. "
+                   // Ink at the edge on a square that is otherwise densely inked. Could be either
+                   // thing, and I cannot tell which — so I say so rather than picking one.
+                   : $"the picture in it reaches {inner.Edges()}. I can't tell from the pixels alone whether that "
+                     + "is because the square is bigger than one slot and has caught what's beside it, or simply "
+                     + "because the icon fills its square — but you can: hold that square against one slot in your "
+                     + "bag and see whether it fits inside the slot's frame. ")
+             + "If it doesn't, re-pick this item's icon with a smaller square (the wheel resizes it while you drag, "
+             + "or set the default in Account → Settings → OCR & picking) so it fits INSIDE one slot's frame.";
+    }
+
+    private readonly HashSet<string> _looseSaid = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>Photograph one square, right now, at the icon's own size.</summary>
     private QuestFind.IconPatch? SnapAt(TurnInStep step, ScreenPoint at)

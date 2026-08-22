@@ -152,15 +152,79 @@ public partial class MainWindow
     /// launch it again until the app itself was restarted.</summary>
     private bool GameWindowDied()
     {
-        if (_grindTarget == IntPtr.Zero || IsWindow(_grindTarget)) return false;
+        if (_grindTarget == IntPtr.Zero) return false;
+        if (IsWindow(_grindTarget))
+        {
+            // REMEMBERED WHILE IT IS STILL ANSWERABLE. Once the handle is dead there is no route
+            // from it back to the process, so the one question worth asking about a vanished game
+            // window — did the client die, or did it just rebuild its window? — can only be asked
+            // if the process id was written down beforehand.
+            if (_pidFor != _grindTarget) { _pidFor = _grindTarget; _gamePid = WindowFinder.OwnerPid(_grindTarget); }
+            return false;
+        }
+        // A SENTINEL, not zero. _gamePid is only filled in on a tick where the window was alive,
+        // so a window that dies within one heartbeat of being targeted leaves it at 0 — and the
+        // poll below would then silently skip a verdict the line above has already promised.
+        _diedPid = _gamePid > 0 ? _gamePid : -1;
+        _diedAt = DateTime.UtcNow;
         _grindTarget = IntPtr.Zero;
+        _pidFor = IntPtr.Zero;
+        _gamePid = 0;
         return true;
+    }
+
+    private IntPtr _pidFor = IntPtr.Zero;
+    private int _gamePid, _diedPid;
+    private DateTime _diedAt;
+
+    /// <summary>
+    /// Which of the two things just happened, in words — ASKED A FEW SECONDS LATE, on purpose.
+    ///
+    /// "The game window closed" is a symptom with two completely different causes and two
+    /// completely different fixes, and saying only the symptom sends someone hunting through logs
+    /// for an answer the app already has. If the PROCESS is gone the client exited or crashed. If
+    /// it is still running, nothing closed: the client destroyed and rebuilt its window, which EQ
+    /// does on a resolution change, a full-screen toggle, and the loading screen after a death.
+    ///
+    /// THE DELAY IS THE WHOLE POINT. Windows destroys a process's windows BEFORE the process
+    /// terminates, and the watchdog notices within one 300 ms tick — so a client that is crashing
+    /// right now still reports HasExited == false, and asking immediately gives the confident wrong
+    /// answer in exactly the case this was written for: "nothing crashed, I'll re-attach shortly",
+    /// about a game that is gone and a re-attach that will never come. Waiting past the teardown
+    /// costs one line arriving a few seconds later and turns a guess into an answer.
+    /// </summary>
+    private const int DeathVerdictMs = 3000;
+
+    private void PollGameDeathVerdict()
+    {
+        if (_diedPid == 0) return;
+        if ((DateTime.UtcNow - _diedAt).TotalMilliseconds < DeathVerdictMs) return;
+        int pid = _diedPid;
+        _diedPid = 0;                                  // once, and never with a stale id
+        if (pid < 0)
+        {
+            string lost = "That window closed before I'd noted which process owned it, so I can't tell you whether "
+                        + "the game itself is gone or only rebuilt its window.";
+            GrindLogLine(lost); LoginLogLine(lost);
+            return;
+        }
+        string note = WindowFinder.ProcessAlive(pid)
+            ? $"The game's process (pid {pid}) is still running, so the client did NOT close — it destroyed and "
+              + "rebuilt its window, which EQ does on a resolution or full-screen change and on the loading screen "
+              + "after a death. I'll re-attach on my own as soon as the new window appears."
+            : $"The game's process (pid {pid}) is gone as well, so the client itself exited or crashed. That was not "
+              + "this app — nothing in it ever closes the game. If it keeps happening while you're away, Windows' "
+              + "Event Viewer → Windows Logs → Application will have the entry, and it's worth noting whether it "
+              + "follows a death or a zone.";
+        GrindLogLine(note);
+        LoginLogLine(note);
     }
 
     private void AutoTargetEq()
     {
         if (GameWindowDied())
-            GrindLogLine("The game window closed — it'll be re-detected when it's back.");
+            GrindLogLine("The game window closed — it'll be re-detected when it's back. Checking in a moment "
+                       + "whether the game itself is gone or has only rebuilt its window.");
         if (_grindTarget != IntPtr.Zero)
         {
             if (GrindTargetLabel.Text is "—" or "") GrindTargetLabel.Text = "game targeted";

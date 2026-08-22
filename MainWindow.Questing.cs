@@ -719,6 +719,7 @@ public partial class MainWindow
                                     QstStatus.Foreground = Hex("#FFCB6B");
                                 }
                                 else if (captured.IconSig is not null)
+                                {
                                     QstStatus.Text = captured.HasPixels
                                         ? $"Saved — learned {captured.Item}'s icon as {captured.IconPixels!.W}×"
                                           + $"{captured.IconPixels.H} real pixels (search radius ±"
@@ -726,6 +727,59 @@ public partial class MainWindow
                                           + "rather than a colour average, which is what kept picking up the wrong item."
                                         : $"Saved — and learned {captured.Item}'s icon, so she'll find the "
                                           + "next copy wherever it sits in the bag area.";
+                                    QstStatus.Foreground = Hex("#9BE59B");
+                                    // HOW MUCH OF THIS REFERENCE IS ACTUALLY THE ITEM — said HERE, at the
+                                    // moment it can still be fixed in one gesture, rather than discovered
+                                    // three field runs later.
+                                    //
+                                    // This is the single most expensive thing this app has got wrong. A
+                                    // 40 px square dragged over a 27 px slot stored a totem that was 31%
+                                    // of its own reference; the other 69% was empty slot, slot frame, and
+                                    // slivers of the NEIGHBOURING slots. Correlation over that is mostly a
+                                    // correlation over furniture every slot shares — an empty slot scored
+                                    // 55% against it — and a real copy only matched while its neighbours
+                                    // also matched. The run worked for twenty-five cycles and then stopped,
+                                    // not because the item changed but because fifty reward items piled up
+                                    // around it. Nothing downstream can recover from that, and nothing on
+                                    // screen said a word.
+                                    if (captured.HasPixels
+                                        && QuestFind.ContentBox(captured.IconPixels!) is { } inner)
+                                    {
+                                        double area = inner.AreaFraction(captured.IconPixels!);
+                                        if (inner.LikelyNeighbours)
+                                        {
+                                            QstStatus.Text +=
+                                                $"  ⚠ But the picture in that square runs off {inner.Edges()}, and "
+                                              + $"only {inner.Ink * 100:0}% of the square is inked — so it is wider "
+                                              + "than one inventory slot and has caught part of what sits beside it. "
+                                              + "She'd match on that too: it works until the neighbouring items "
+                                              + "change, then stops. Re-pick with a smaller square (the wheel resizes "
+                                              + "it while you drag) so it fits inside one slot's frame.";
+                                            QstStatus.Foreground = Hex("#FFCB6B");
+                                        }
+                                        else if (inner.RunsOffEdge && area >= 0.55)
+                                        {
+                                            // Seen, but not diagnosable from pixels — see
+                                            // TooLooseWarning. Said in the neutral colour, because
+                                            // it may be a perfectly good tight pick.
+                                            QstStatus.Text +=
+                                                $"  Note: the picture reaches {inner.Edges()} of that square. If the "
+                                              + "square is bigger than one inventory slot it will be matching on your "
+                                              + "neighbouring items too — hold it against one slot and check it fits "
+                                              + "inside the frame.";
+                                        }
+                                        else if (area < 0.55)
+                                        {
+                                            QstStatus.Text +=
+                                                $"  ⚠ But {captured.Item} only fills {inner.W}×{inner.H} of that "
+                                              + $"{captured.IconPixels!.W}×{captured.IconPixels.H} square — "
+                                              + $"{area * 100:0}% of it. The rest is empty slot, so most of what "
+                                              + $"she compares is furniture every slot shares. About "
+                                              + $"{Math.Max(inner.W, inner.H) + 6} px would be a tighter fit.";
+                                            QstStatus.Foreground = Hex("#FFCB6B");
+                                        }
+                                    }
+                                }
                             },
                             sh => captured.Shot = sh,
                             SwatchSize, rememberSize: true)) Persist(); RenderQuests(); },

@@ -138,6 +138,27 @@ public static class WindowFinder
         catch { return false; }
     }
 
+    /// <summary>The process id that owns a window, or 0. Kept so a DEAD window can still be asked
+    /// about: once the handle is gone there is no way back to the process, and "did the game crash
+    /// or did it just rebuild its window?" is unanswerable after the fact.</summary>
+    public static int OwnerPid(IntPtr hWnd)
+    {
+        if (hWnd == IntPtr.Zero) return 0;
+        GetWindowThreadProcessId(hWnd, out uint pid);
+        return (int)pid;
+    }
+
+    /// <summary>Is that process still running? The two answers mean completely different things
+    /// when a game window vanishes — the client crashed, or the client is fine and replaced its
+    /// window (a resolution change, a full-screen toggle, the loading screen after a death) — and
+    /// they have completely different fixes.</summary>
+    public static bool ProcessAlive(int pid)
+    {
+        if (pid <= 0) return false;
+        try { return !Process.GetProcessById(pid).HasExited; }
+        catch { return false; }
+    }
+
     [DllImport("user32.dll")]
     private static extern bool EnumChildWindows(IntPtr parent, EnumWindowsProc cb, IntPtr l);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]

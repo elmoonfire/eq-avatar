@@ -326,9 +326,14 @@ public partial class MainWindow : Window
         {
             GrindTargetLabel.Text = "game not found — launch EQ, then click ◎";
             LaunchStatus.Text = "The game window closed. Launch is ready whenever you are.";
-            GrindLogLine("The game window closed — it'll be re-detected when it's back.");
-            LoginLogLine("The game window closed. Launch is ready to run again.");
+            GrindLogLine("The game window closed — it'll be re-detected when it's back. Checking in a moment "
+                       + "whether the game itself is gone or has only rebuilt its window.");
+            LoginLogLine("The game window closed. Launch is ready to run again. Checking in a moment whether "
+                       + "the game itself is gone or has only rebuilt its window.");
         }
+        // The verdict on the line above, once the client has had time to finish whatever it was
+        // doing. See PollGameDeathVerdict for why it cannot be answered on the same tick.
+        PollGameDeathVerdict();
         UpdateChip();
         if (PanelHome.Visibility == Visibility.Visible) RefreshHome();
     }

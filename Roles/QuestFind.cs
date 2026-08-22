@@ -495,6 +495,237 @@ public static class QuestFind
     private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<IconPatch, IconPatch> _centres = new();
 
     /// <summary>
+    /// Where the ITEM is inside a reference, and how much of the reference it actually is.
+    ///
+    /// This exists because of a measurement, not a theory. A field reference for a Desecrated
+    /// Kejaar Totem was 40×40 px; the totem's own pixels were a 13×38 box inside it — 31% of the
+    /// area. The other 69% was flat empty slot, plus the slot's frame, plus slivers of whatever
+    /// happened to be in the neighbouring slots, because the picking square (40 px) was half as
+    /// wide again as the game's actual slot pitch (27 px).
+    ///
+    /// Correlation over that reference is therefore mostly a correlation over furniture that is
+    /// IDENTICAL IN EVERY SLOT. An empty slot scored 55% against it. A real copy only scored well
+    /// while its NEIGHBOURS also matched — so the run worked for twenty-five cycles and then
+    /// stopped, not because the item changed but because fifty reward items piled up around it.
+    /// That is a failure no threshold can fix and no amount of the item being right can survive.
+    ///
+    /// Returns null when the patch is unusable or when the answer would be "all of it" — there is
+    /// nothing to say about a reference that is already tight.
+    /// </summary>
+    public readonly record struct Content(int X, int Y, int W, int H, double Ink,
+                                          bool Top, bool Bottom, bool Left, bool Right)
+    {
+        /// <summary>The inked box as a fraction of the whole reference's area.</summary>
+        public double AreaFraction(IconPatch p) => (double)W * H / Math.Max(1, p.W * p.H);
+
+        public bool RunsOffEdge => Top || Bottom || Left || Right;
+
+        /// <summary>
+        /// Which edges, in words — the sentence that names the geometry.
+        ///
+        /// Worth its own method because the FOUR facts say more than their disjunction does. "Off
+        /// the top and bottom but not the sides" is a column; "off the sides but not the top and
+        /// bottom" is a row; and a person who reads either of those knows immediately which of
+        /// their own slots is being eaten. Collapsing them to one bool threw away the single most
+        /// diagnostic thing this measurement produces.
+        /// </summary>
+        public string Edges()
+        {
+            if (Top && Bottom && !Left && !Right) return "the top and bottom edges but not the sides";
+            if (Left && Right && !Top && !Bottom) return "both side edges but not the top or bottom";
+            if (Top && Bottom && Left && Right) return "every edge";
+            var parts = new List<string>();
+            if (Top) parts.Add("top");
+            if (Bottom) parts.Add("bottom");
+            if (Left) parts.Add("left");
+            if (Right) parts.Add("right");
+            if (parts.Count == 0) return "no edge";
+            string joined = parts.Count == 1 ? parts[0]
+                          : string.Join(", ", parts.GetRange(0, parts.Count - 1)) + " and " + parts[^1];
+            return "the " + joined + (parts.Count > 1 ? " edges" : " edge");
+        }
+
+        /// <summary>
+        /// Is the picture reaching the edge because the square caught the NEIGHBOURING slots,
+        /// rather than because the icon simply fills its square?
+        ///
+        /// No test over these pixels alone can separate those two — three totems stacked in a
+        /// column with no gap between them and one tall totem are the same picture. What CAN
+        /// separate them is how much of the square is inked at all. A tightly picked icon that
+        /// touches its edges fills most of its square; a square that has swallowed its neighbours
+        /// is mostly empty slot with ink at the far ends. So: ink at an edge AND a sparse square.
+        /// One without the other is not evidence, and warning on it would fire at a good pick and
+        /// then give advice that only makes it worse.
+        /// </summary>
+        public bool LikelyNeighbours => RunsOffEdge && Ink < 0.45;
+    }
+
+    /// <summary>How different from the background a pixel must be to count as the item. Generous:
+    /// the cost of counting a background pixel as ink is a slightly loose box, and the cost of
+    /// missing a dark part of an item is cutting the item in half.</summary>
+    private const int ContentTol = 26;
+
+    /// <summary>The smallest side, and (squared) the smallest sample count, a content crop may have.
+    /// Twelve is the point below which the numbers this file is calibrated on stop meaning much.</summary>
+    private const int MinCropSide = 12;
+
+    private static bool Bg(byte[] px, int i, int[] bg)
+        => Math.Abs(px[i] - bg[0]) <= ContentTol && Math.Abs(px[i + 1] - bg[1]) <= ContentTol
+           && Math.Abs(px[i + 2] - bg[2]) <= ContentTol;
+
+    public static Content? ContentBox(IconPatch p)
+    {
+        if (p is not { Ok: true } || p.W < 8 || p.H < 8) return null;
+        byte[] px = p.Pixels;
+
+        // THE BACKGROUND IS THE MEDIAN OF THE INTERIOR, not of a ring around the edge.
+        //
+        // The ring was the obvious choice and it is wrong, provably. Measured on the field
+        // reference: a two-pixel ring is half slot-frame and half slot-fill, so its median lands
+        // between the two at a colour that is NEITHER, matches almost nothing, and the whole method
+        // refuses. The interior is ~75% background on any reference worth cropping, so its median
+        // IS the background — and when it isn't, the item fills the patch, every pixel reads as
+        // ink, the box comes out full-size, and ContentOf correctly answers "nothing to crop to".
+        // The failure mode is a no-op rather than a wrong box.
+        const int Inset = 2;
+        int iw = p.W - Inset * 2, ih = p.H - Inset * 2;
+        if (iw < 4 || ih < 4) return null;
+        var ch = new int[3][];
+        for (int c = 0; c < 3; c++) ch[c] = new int[iw * ih];
+        int n = 0;
+        for (int y = Inset; y < p.H - Inset; y++)
+            for (int x = Inset; x < p.W - Inset; x++)
+            {
+                int i = (y * p.W + x) * 3;
+                ch[0][n] = px[i]; ch[1][n] = px[i + 1]; ch[2][n] = px[i + 2];
+                n++;
+            }
+        var bg = new int[3];
+        for (int c = 0; c < 3; c++) { Array.Sort(ch[c], 0, n); bg[c] = ch[c][n / 2]; }
+
+        // How much of the interior actually agrees with that median. Under a quarter and there is
+        // no coherent background to measure an item against — a busy picture, or a box laid across
+        // several different things — and a bounding box taken from it would be noise wearing a
+        // number.
+        int agree = 0;
+        for (int y = Inset; y < p.H - Inset; y++)
+            for (int x = Inset; x < p.W - Inset; x++)
+            {
+                int i = (y * p.W + x) * 3;
+                if (Math.Abs(px[i] - bg[0]) <= ContentTol && Math.Abs(px[i + 1] - bg[1]) <= ContentTol
+                    && Math.Abs(px[i + 2] - bg[2]) <= ContentTol) agree++;
+            }
+        if (agree < n * 0.25) return null;
+
+        int x0 = p.W, y0 = p.H, x1 = -1, y1 = -1, ink = 0;
+        // The 1 px frame on each side is skipped: it is the SLOT's, not the item's, and counting it
+        // makes every box the full width of the patch — which is exactly the answer that would hide
+        // the problem this method exists to find.
+        for (int y = 1; y < p.H - 1; y++)
+            for (int x = 1; x < p.W - 1; x++)
+            {
+                int i = (y * p.W + x) * 3;
+                if (Math.Abs(px[i] - bg[0]) <= ContentTol && Math.Abs(px[i + 1] - bg[1]) <= ContentTol
+                    && Math.Abs(px[i + 2] - bg[2]) <= ContentTol) continue;
+                ink++;
+                if (x < x0) x0 = x;
+                if (x > x1) x1 = x;
+                if (y < y0) y0 = y;
+                if (y > y1) y1 = y;
+            }
+        if (x1 < 0 || ink < 12) return null;                     // an empty slot has no item in it
+        // DOES THE INK RUN OFF THE EDGE? This is the honest test for "the square is not confined to
+        // one slot", and it is the one that cannot be talked out of firing.
+        //
+        // A bounding box can be quietly wrong: it measures where ink IS, not what the ink belongs
+        // to, and on a square that overlaps its neighbours the box grows to cover them and then
+        // reports a healthy-looking fraction. The field reference is the proof — a 13×38 inked box
+        // in a 40×40 pick, which is impossible for a single icon in a 27 px slot. Those 38 rows are
+        // an unbroken column: the totems sat stacked vertically, so the square held the BOTTOM of
+        // the one above and the TOP of the one below as well. Three items in a reference for one.
+        //
+        // Ink reaching the border means something was cut through. A square that really does sit
+        // inside one slot has that slot's frame and the gap to the next one around it, which is
+        // background, so its ink cannot reach the edge. And unlike the area fraction, a fuller bag
+        // makes this MORE likely to fire, not less — which is the right direction, because a fuller
+        // bag is exactly when an oversized square starts failing.
+        // A RUN, NOT A PIXEL. One inked pixel in the border ring is a frame corner or an
+        // anti-aliased edge; a quarter of a side is something the square cut through. The first
+        // draft tested a single pixel and would have fired on the very reference the new advice
+        // tells people to produce — an icon filling its square touches its own border by
+        // construction — and then told them to shrink it further, which is unsatisfiable.
+        bool Run(int n, int len) => n * 4 >= len;
+        int topN = 0, botN = 0, leftN = 0, rightN = 0;
+        for (int x = 1; x < p.W - 1; x++)
+        {
+            if (!Bg(px, (1 * p.W + x) * 3, bg)) topN++;
+            if (!Bg(px, ((p.H - 2) * p.W + x) * 3, bg)) botN++;
+        }
+        for (int y = 1; y < p.H - 1; y++)
+        {
+            if (!Bg(px, (y * p.W + 1) * 3, bg)) leftN++;
+            if (!Bg(px, (y * p.W + p.W - 2) * 3, bg)) rightN++;
+        }
+        return new Content(x0, y0, x1 - x0 + 1, y1 - y0 + 1,
+                           (double)ink / Math.Max(1, (p.W - 2) * (p.H - 2)),
+                           Run(topN, p.W - 2), Run(botN, p.W - 2),
+                           Run(leftN, p.H - 2), Run(rightN, p.H - 2));
+    }
+
+    /// <summary>
+    /// The patch cropped down to the item it contains — CONCENTRIC with the patch, deliberately.
+    ///
+    /// A crop centred on the ITEM rather than on the patch would be tighter, and would be a bug.
+    /// <see cref="BestNcc"/> lays a reference over the frame centred on the point it is given and
+    /// reports the offset it liked; a crop whose own centre had moved would need that offset
+    /// carried back out and undone by every caller, and the day someone forgot, the runner would
+    /// click a few pixels off the item with nothing on screen to say why. Growing the box
+    /// symmetrically instead costs a little margin and keeps every coordinate in this file meaning
+    /// exactly one thing.
+    ///
+    /// On the field reference that prompted this — a 13×38 totem inside a 40×40 pick — the
+    /// symmetric box is 19 wide, which takes the item from 32% of the width to 68%. The tight box
+    /// would have reached 100%; the difference is not worth a coordinate system with a trap in it.
+    ///
+    /// Returns the patch ITSELF when there is nothing worth cropping to, which callers test by
+    /// reference. Null only for an unusable patch.
+    /// </summary>
+    public static IconPatch? ContentOf(IconPatch p)
+    {
+        if (p is not { Ok: true }) return null;
+        return _contents.GetValue(p, static k =>
+        {
+            if (ContentBox(k) is not { } box) return k;
+            const int Pad = 2;
+            // Half-extents measured from the PATCH's centre to the furthest edge of the item, so
+            // the result contains all of the item wherever inside the patch it sits.
+            double cx = (k.W - 1) / 2.0, cy = (k.H - 1) / 2.0;
+            int hx = (int)Math.Ceiling(Math.Max(cx - box.X, box.X + box.W - 1 - cx)) + Pad;
+            int hy = (int)Math.Ceiling(Math.Max(cy - box.Y, box.Y + box.H - 1 - cy)) + Pad;
+            int w = Math.Min(k.W, hx * 2 + 1), h = Math.Min(k.H, hy * 2 + 1);
+            // Floors, because a background read that went wrong must not be able to shrink a
+            // reference to a speck — and a speck correlates with almost anything.
+            w = Math.Max(w, Math.Max(MinCropSide, k.W / 3));
+            h = Math.Max(h, Math.Max(MinCropSide, k.H / 3));
+            // And a floor on SAMPLES, not just on sides. Every calibration number in this file was
+            // measured on a full-sized patch; correlation noise grows as 1/sqrt(n) and BestNcc's
+            // max-over-offsets biases a non-copy upward as n shrinks, so a tiny crop quietly raises
+            // what a DIFFERENT item can reach against an unchanged 0.70 floor. Below this, hand the
+            // patch back and let the fixed geometric crop answer instead.
+            if (w * h < MinCropSide * MinCropSide) return k;
+            // Not worth a second alignment search to shave a pixel off each edge.
+            if (w >= k.W - 1 && h >= k.H - 1) return k;
+            int x0 = (k.W - w) / 2, y0 = (k.H - h) / 2;
+            byte[] src = k.Pixels, dst = new byte[w * h * 3];
+            for (int y = 0; y < h; y++)
+                Buffer.BlockCopy(src, ((y0 + y) * k.W + x0) * 3, dst, y * w * 3, w * 3);
+            return IconPatch.InMemory(dst, w, h, k.FrameW, k.FrameH);
+        });
+    }
+
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<IconPatch, IconPatch> _contents = new();
+
+    /// <summary>
     /// The middle of a patch, with the outer border thrown away.
     ///
     /// An inventory slot is not just an icon: it has a frame, a background that differs between
@@ -599,11 +830,32 @@ public static class QuestFind
         // below CropTryFrom, so it returns untouched and the caller narrates it as its own outcome
         // rather than having it quietly overwritten by a crop score of nothing.
         if (full >= PixelAccept || full < CropTryFrom) return (full, dx, dy, false, full, -1, false);
-        IconPatch? mid = CentreOf(reference);
+        // THE ITEM'S OWN BOX FIRST, the fixed geometric middle only as a fallback.
+        //
+        // A fixed 76% crop assumes the item roughly fills the square it was picked from. When it
+        // doesn't — a 13 px totem inside a 40 px pick — the middle is still 55% empty slot, which
+        // is why the geometric crop barely moved a score it should have rescued outright. Cropping
+        // to where the item ACTUALLY is makes the comparison about the item. Falling back matters
+        // just as much: a busy or unreadable background gives ContentOf no honest answer, and it
+        // says so by handing the patch back rather than inventing a box.
+        IconPatch? mid = ContentOf(reference);
+        if (mid is null || ReferenceEquals(mid, reference)) mid = CentreOf(reference);
         if (mid is null || ReferenceEquals(mid, reference)) return (full, dx, dy, false, full, -1, false);
         int mw = Math.Max(4, (int)Math.Round(wantW * (double)mid.W / Math.Max(1, reference.W)));
         int mh = Math.Max(4, (int)Math.Round(wantH * (double)mid.H / Math.Max(1, reference.H)));
-        (double centre, int cdx, int cdy) = BestNcc(frame, cx, cy, mid, mw, mh);
+        // THE PAD COMES FROM THE FULL WINDOW, NOT FROM THE CROP.
+        //
+        // SearchPadFor derives a radius from the size it is handed, and it is right to — for the
+        // whole patch. But the radius has to cover half a PROPOSAL STEP, and ProposeIcons steps in
+        // thirds of the FULL icon: for a 40 px icon the nearest proposal can be 6.7 px out, while a
+        // 19 px crop would ask for only ±6 and a 13 px one for ±5. Letting the crop pick its own
+        // radius reintroduces this file's most expensive bug — the field run that found 5 of 14
+        // copies with a fixed ±4 search, where every copy it did align with scored over 99.6%. It
+        // would fail silently here, too: a misaligned crop just scores low, loses to the full patch,
+        // and the rescue never fires with nothing in the log to say why.
+        (double centre, int cdx, int cdy) = BestNcc(frame, cx, cy, mid, mw, mh,
+                                                    SearchPadFor(Math.Max(4, wantW)),
+                                                    SearchPadFor(Math.Max(4, wantH)));
         if (centre <= full) return (full, dx, dy, false, full, centre, true);
         // Maps centre ∈ (full, 1.0] onto (full, CropCeiling], monotonically. A perfect middle
         // reports exactly the ceiling; everything else reports proportionally less, so two crop
@@ -722,8 +974,14 @@ public static class QuestFind
     /// the sliding scan — but a caller asking "is the icon anywhere NEAR here?" (the held-item
     /// check, whose icon rides the cursor at an offset the game chooses) needs to name its own
     /// radius, because its uncertainty has nothing to do with any stride.</param>
+    /// <param name="padYOverride">A separate vertical radius. Zero means "use padOverride", which
+    /// keeps every existing caller correct. It exists because a NON-SQUARE reference has two
+    /// different proposal strides, and forcing one radius on both axes over-searches the short one
+    /// — which costs time, and worse, hands one comparison more chances to find a high correlation
+    /// than the comparison it is being judged against.</param>
     public static (double Best, int Dx, int Dy) BestNcc(Bitmap frame, double cx, double cy, IconPatch reference,
-                                                        int wantW = 0, int wantH = 0, int padOverride = 0)
+                                                        int wantW = 0, int wantH = 0, int padOverride = 0,
+                                                        int padYOverride = 0)
     {
 
         if (!reference.Ok) return (-1, 0, 0);
@@ -739,7 +997,7 @@ public static class QuestFind
         int py = (int)Math.Round(cy * frame.Height) - h / 2;
         // Sized to the step the proposals actually came in on, per axis.
         int padX = padOverride > 0 ? padOverride : SearchPadFor(w);
-        int padY = padOverride > 0 ? padOverride : SearchPadFor(h);
+        int padY = padYOverride > 0 ? padYOverride : padOverride > 0 ? padOverride : SearchPadFor(h);
 
         // CLAMPED to the frame rather than abandoned at it. Returning "no match" for anything near
         // the window edge would blind the sweep to whole rows of the bag — the bottom row of an
