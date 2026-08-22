@@ -63,6 +63,23 @@ public sealed class TurnInStep
     /// </summary>
     public QuestFind.IconPatch? IconPixels { get; set; }
 
+    /// <summary>
+    /// Further appearances of the SAME item, each one proved right by a hand-in the server
+    /// confirmed.
+    ///
+    /// One reference is one photograph, and an inventory icon is not one picture. A stack draws its
+    /// quantity over the sprite and that number changes every time you spend one; a slot under the
+    /// cursor, or the one the game has highlighted, is drawn differently again. Hayden's totem went
+    /// from matching perfectly to 76.4% — nowhere near the ~44% a DIFFERENT icon scores, so plainly
+    /// still a totem, just not the photograph we had.
+    ///
+    /// Rather than loosen the bar — which is what lets a Bone-clasped Girdle through — the runner
+    /// collects photographs. When a square it wasn't sure about turns out to hold the right item,
+    /// the SERVER says so by accepting the hand-in, and only then is that appearance remembered.
+    /// Evidence, not assumption: the same rule the rest of this file runs on.
+    /// </summary>
+    public List<QuestFind.IconPatch> IconLooks { get; set; } = new();
+
     /// <summary>The picture the signature was learned from, so you can SEE what she matches
     /// against instead of trusting 108 numbers in a file.</summary>
     public PickShot? Shot { get; set; }
@@ -74,7 +91,7 @@ public sealed class TurnInStep
     public TurnInStep Clone() => new()
     { Item = Item, Qty = Qty, Quest = Quest, Slot = new ScreenPoint { X = Slot.X, Y = Slot.Y },
       IconSig = IconSig?.ToArray(), IconW = IconW, IconH = IconH, Shot = Shot,
-      IconPixels = IconPixels };
+      IconPixels = IconPixels, IconLooks = new List<QuestFind.IconPatch>(IconLooks) };
 }
 
 /// <summary>
@@ -284,7 +301,8 @@ public sealed class QuestScript
         Item = null;
         PerTurnIn = null;
         Layout.ItemSlot = null;
-        foreach (TurnInStep s in Steps) { s.Item ??= ""; s.Quest ??= ""; s.Slot ??= new ScreenPoint(); }
+        foreach (TurnInStep s in Steps)
+        { s.Item ??= ""; s.Quest ??= ""; s.Slot ??= new ScreenPoint(); s.IconLooks ??= new List<QuestFind.IconPatch>(); }
         if (string.IsNullOrWhiteSpace(HailKey)) HailKey = "h";
         // ONE-TIME move to the say-only flow. A script that already knows the words does not need
         // the hail that taught them, and the /target existed to give the hail something to act on.
@@ -446,9 +464,23 @@ public sealed class QuestScriptStore
         Save();
     }
 
+    /// <summary>
+    /// Read something out of the store under its lock, WITHOUT saving. See Edit for the mutation
+    /// counterpart.
+    ///
+    /// Edit() persists, which is right for a mutation and ruinous for a read — the runner scans the
+    /// bag several times a second and each save rewrites the whole file. But an unlocked read is
+    /// not an option either: List&lt;T&gt;'s enumerator throws the moment another thread mutates,
+    /// and the icon-pick tile can clear a step's learned looks from the UI thread mid-run.
+    /// </summary>
+    public T Read<T>(Func<T> get)
+    {
+        lock (_gate) return get();
+    }
+
     /// <summary>Run a mutation of a script under the store's lock, then persist. The runner thread
-    /// serializes the whole store when it finishes, so a Steps list edited from the UI thread at
-    /// that moment throws inside Serialize — and that throw is swallowed, so the save just silently
+    /// serializes the whole store when it finishes, so a list edited from the UI thread at that
+    /// moment throws inside Serialize — and that throw is swallowed, so the save just silently
     /// doesn't happen.</summary>
     public void Edit(Action change)
     {

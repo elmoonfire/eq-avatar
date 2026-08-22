@@ -702,6 +702,12 @@ public partial class MainWindow
                                 // At a slot-sized square it is under 3 KB; a big free drag could
                                 // put a quarter of a megabyte into a file paid for on every edit.
                                 captured.IconPixels = patch is { Ok: true } && patch.Data.Length <= 120_000 ? patch : null;
+                                // The learned appearances go with it. They were photographs taken
+                                // against the OLD reference, and re-picking is what the app tells
+                                // people to do when matching has gone wrong — leaving six stale
+                                // ones behind, still winning the best-of comparison, would make
+                                // that advice do nothing and there is no other way to clear them.
+                                QuestScriptStore.Current.Edit(() => captured.IconLooks.Clear());
                                 captured.IconW = box.W;              // the box's own size drives the sliding
                                 captured.IconH = box.H;              // search — no columns, no rows, no questions
                                 if (patch is { Ok: true } && patch.Data.Length > 120_000)
@@ -1341,6 +1347,8 @@ public partial class MainWindow
         if (frame is null) return (new ScreenPoint(), -1, false, false, 999);
         int wantW = (int)Math.Round(st.IconW * frame.Width), wantH = (int)Math.Round(st.IconH * frame.Height);
         double bestN = -1; double bx = 0, by = 0; bool any = false;
+        QuestFind.IconPatch[] looksArr = QuestScriptStore.Current.Read(() => st.IconLooks.ToArray());
+        var shortlist = new List<(QuestFind.IconHit H, double Ncc)>();
         int looked = 0;
         foreach (QuestFind.IconHit h in QuestFind.ProposeIcons(
                      frame, script.BagX, script.BagY, script.BagW, script.BagH,
@@ -1351,7 +1359,40 @@ public partial class MainWindow
             if (!any || ncc > bestN)
             { bestN = ncc; bx = h.X + (double)dx / frame.Width; by = h.Y + (double)dy / frame.Height; any = true; }
             if (ncc >= QuestFind.PixelAccept) break;
+            if (looksArr.Length > 0 && ncc > 0)
+            {
+                int at = shortlist.FindIndex(k => Math.Abs(k.H.X - h.X) < st.IconW * 0.5
+                                               && Math.Abs(k.H.Y - h.Y) < st.IconH * 0.5);
+                if (at >= 0) { if (ncc > shortlist[at].Ncc) shortlist[at] = (h, ncc); }
+                else shortlist.Add((h, ncc));
+                shortlist.Sort((a, b) => b.Ncc.CompareTo(a.Ncc));
+                if (shortlist.Count > QuestFind.LookShortlist) shortlist.RemoveAt(shortlist.Count - 1);
+            }
         }
+        // The learned appearances, on the likeliest squares — the same two-phase shape and the
+        // same shortlist the run uses, so the test cannot report "NO match, 22%" for a square the
+        // run picks up. Showing them to the single best square only would have been a narrower
+        // version of the same divergence.
+        if (any && bestN < QuestFind.PixelAccept && looksArr.Length > 0)
+        {
+            int lw = (int)Math.Round(st.IconW * frame.Width), lh = (int)Math.Round(st.IconH * frame.Height);
+            foreach ((QuestFind.IconHit h, double _) in shortlist)
+            {
+                foreach (QuestFind.IconPatch look in looksArr)
+                {
+                    if (look is not { Ok: true }) continue;
+                    // Centred on the PROPOSAL every time. Accumulating into bx/by walked the search
+                    // centre across the slot as each look won, so the next look was correlated
+                    // against a moved target — and bx/by is where the cursor gets parked.
+                    (double n2, int x2, int y2) = QuestFind.BestNcc(frame, h.X, h.Y, look, lw, lh);
+                    if (n2 > bestN)
+                    { bestN = n2; bx = h.X + (double)x2 / frame.Width; by = h.Y + (double)y2 / frame.Height; }
+                    if (bestN >= QuestFind.PixelAccept) break;
+                }
+                if (bestN >= QuestFind.PixelAccept) break;
+            }
+        }
+
         // The closest COLOUR distance when nothing was proposed — the number that separates "the
         // bag rect is pointing at the wrong part of the screen" from "the item is genuinely gone".
         double colour = 999;
@@ -1437,8 +1478,13 @@ public partial class MainWindow
                         label += ncc < 0
                             ? " — found a candidate but couldn't read its pixels (too close to the window edge). "
                               + "The cursor is on it."
-                            : $" — NO match: closest square is {ncc * 100:0.0}% and a copy needs "
-                              + $"{QuestFind.PixelAccept * 100:0}%. The cursor is on it — look at what's there.";
+                            : ncc >= QuestFind.ProbableAccept
+                              ? $" — PROVISIONAL: {ncc * 100:0.0}%, under the {QuestFind.PixelAccept * 100:0}% bar "
+                                + $"but above the {QuestFind.ProbableAccept * 100:0}% floor, so the run would offer "
+                                + "it and learn this look if he takes it. The cursor is on it."
+                              : $" — NO match: closest square is {ncc * 100:0.0}% and a copy needs "
+                                + $"{QuestFind.PixelAccept * 100:0}% (or {QuestFind.ProbableAccept * 100:0}% to be "
+                                + "offered provisionally). The cursor is on it — look at what's there.";
                     }
                 }
                 else if (script.SmartFind && script.BagSet && st.HasIcon)
@@ -1599,9 +1645,16 @@ public partial class MainWindow
             ? "No icon signature on this step — she will click the fixed slot and hope. Re-pick it."
             : step.HasPixels
                 ? $"She matches this item's REAL PIXELS ({step.IconPixels!.W}×{step.IconPixels.H}), aligning the "
-                + $"reference over each candidate square and requiring 85% correlation. A different icon in the "
-                + "same colours scores about 44%, so there is no threshold to tune here — either it is the item or "
-                + "it isn't."
+                + "reference over each candidate square and requiring 85% correlation. A different icon in the same "
+                + "colours scores about 44% and no non-copy has been measured above 51%, so there is no threshold "
+                + "to tune here.\n\n"
+                + $"Between {QuestFind.ProbableAccept * 100:0}% and {QuestFind.PixelAccept * 100:0}% she offers it "
+                + "anyway and keeps the picture if he takes it, so an appearance she hasn't seen — a changed stack "
+                + "count, a highlighted slot — teaches her instead of stopping her.\n\n"
+                + (step.IconLooks.Count > 0
+                    ? $"She knows {step.IconLooks.Count} other appearance(s) of this item so far, each photographed "
+                    + "either side of a hand-in the server then confirmed. Re-picking this slot clears them."
+                    : "No other appearances learned yet.")
                 : step.HasIconSize
                 ? "She slides a window of exactly this size across the bag area and clicks the closest match "
                 + "(needs a score of " + Math.Clamp(tolerance, 8, 60).ToString("0") + " or better, "

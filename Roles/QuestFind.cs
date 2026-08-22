@@ -503,6 +503,25 @@ public static class QuestFind
     public const int MaxProposals = 220;
 
     /// <summary>
+    /// The floor for a PROVISIONAL match — the item wearing a face we haven't photographed.
+    ///
+    /// Set against the MEASURED tail, not the mean. "About 0.44" is the average for a different
+    /// icon in the same palette; the field measurement is the one that binds — every non-copy
+    /// scored under 0.51 — and BestNcc returns the maximum over hundreds of alignment offsets,
+    /// which biases every non-copy upward. 0.70 clears that ceiling while still catching the 0.764
+    /// a real totem scored after its appearance drifted.
+    /// </summary>
+    public const double ProbableAccept = 0.70;
+
+    /// <summary>How many of the likeliest squares the alternate appearances are shown to. Small
+    /// because each one costs a full alignment search per appearance — and shared, because the
+    /// card's hover test exists to mirror the run and a different number here would silently stop
+    /// it doing that. Stated rather than hidden: a real copy outside the top of this list is the
+    /// one thing this cannot find.</summary>
+    public const int LookShortlist = 16;
+
+
+    /// <summary>
     /// The best correlation obtainable near a point, and where it was found.
     ///
     /// The search window is the whole point. The coarse scan steps in thirds of an icon, so its idea

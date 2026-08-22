@@ -153,6 +153,9 @@ public sealed class QuestRole
     private bool _handedBack;
     /// <summary>Items already warned about for a borderline icon match. Once each, per run.</summary>
     private readonly HashSet<string> _marginalSaid = new(StringComparer.OrdinalIgnoreCase);
+    /// <summary>Items already explained as a provisional match. Once each, per run — this fires on
+    /// every hand-in otherwise, and each line is a blocking hop to the UI thread.</summary>
+    private readonly HashSet<string> _provisionalSaid = new(StringComparer.OrdinalIgnoreCase);
     /// <summary>The last scan's score, carried so a miss can QUOTE it. The "found …" line is hushed
     /// after the first pass, so telling someone to "check the match score above" pointed at a line
     /// that no longer existed — and the advice matters most when the score was unremarkable, which
@@ -200,6 +203,35 @@ public sealed class QuestRole
     private const double NccAccept = QuestFind.PixelAccept;
     private const double CoarsePropose = QuestFind.CoarseProposeAt;
     private const int MaxProposals = QuestFind.MaxProposals;
+    private const double ProbableAccept = QuestFind.ProbableAccept;
+    /// <summary>Appearances kept per item. A stack has few faces and each is a few kilobytes in a
+    /// file rewritten in full on every edit.</summary>
+    private const int MaxLooks = 4;
+
+    /// <summary>Where a provisional match was taken from, so its appearance can be photographed and
+    /// kept once the server confirms the hand-in. Null when the match was certain.</summary>
+    private QuestFind.IconPatch? _pendingLook;
+    /// <summary>Where that photograph was taken, so the same square can be looked at again AFTER
+    /// the hand-in — the face that remains is the one the next scan has to recognise.</summary>
+    private ScreenPoint _pendingLookAt = new();
+    private readonly Dictionary<string, int> _learnsPerItem = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _learnCapSaid = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _learnSaid = new(StringComparer.OrdinalIgnoreCase);
+    /// <summary>Appearances written down per RUN. Provisional matching keeps the run going on its
+    /// own; this only caps how often the settings file is rewritten chasing a shrinking stack.</summary>
+    private const int MaxLearnsPerRun = 6;
+    private const int LookShortlist = QuestFind.LookShortlist;
+    /// <summary>
+    /// How well the AFTER shot has to still resemble the BEFORE shot to be kept.
+    ///
+    /// A different question from ProbableAccept, and it needs its own number. That one asks "is
+    /// this square a different ITEM", and errs permissive so a drifted face is still offered. This
+    /// one asks "did the square keep the item, one fewer of it, or did it EMPTY" — and erring
+    /// permissive here is the bug that nearly shipped, because an empty-slot photograph matches
+    /// every empty slot in the bag. A single count step changes a couple of glyphs on a small
+    /// sprite; losing the sprite entirely changes everything. 0.80 sits between those.
+    /// </summary>
+    private const double AfterShotKeep = 0.80;
 
     private const int MaxStepMisses = 1;
     private int _finished;
@@ -620,6 +652,7 @@ public sealed class QuestRole
         _lastMatch = "";
         _lastPos = "";
         _lastColour = -1;
+        _pendingLook = null;
         _pixelUnreadable = "";
         _usedPixels = false;
 
@@ -657,6 +690,13 @@ public sealed class QuestRole
                 int wantH = (int)Math.Round(step.IconH * frame.Height);
                 QuestFind.CopyHit? best = null;
                 int looked = 0;
+                // Snapshotted under the store's lock. The icon-pick tile can clear this list from
+                // the UI thread while a run is going, and List<T>'s enumerator throws the instant
+                // that happens — from inside a scan that runs several times a second.
+                QuestFind.IconPatch[] looks = QuestScriptStore.Current.Read(() => step.IconLooks.ToArray());
+                // PHASE TWO's shortlist: the squares that already look most like the item, which
+                // are the only ones worth showing its other photographs to.
+                var shortlist = new List<(QuestFind.IconHit H, double Ncc)>();
                 foreach (QuestFind.IconHit h in QuestFind.ProposeIcons(
                              frame, _script.BagX, _script.BagY, _script.BagW, _script.BagH,
                              step.IconSig!, step.IconW, step.IconH, CoarsePropose))
@@ -672,7 +712,47 @@ public sealed class QuestRole
                         best = new QuestFind.CopyHit(h.X + (double)dx / frame.Width,
                                                      h.Y + (double)dy / frame.Height, ncc, h.Dist);
                     if (ncc >= NccAccept) break;          // that's a copy — nothing to gain by looking further
+                    if (looks.Length > 0 && ncc > 0)
+                    {
+                        // SPATIALLY deduped before trimming. The coarse pass steps in thirds of an
+                        // icon and its own suppressor is narrower than that stride, so every real
+                        // icon arrives as a 3×3 cluster of overlapping proposals — sixteen raw
+                        // entries is under two actual squares, and phase two would be shown the
+                        // same slot nine times. Half an icon is the distance FindAllCopies uses for
+                        // the same reason: two distinct slots can never violate it.
+                        int at = shortlist.FindIndex(k => Math.Abs(k.H.X - h.X) < step.IconW * 0.5
+                                                       && Math.Abs(k.H.Y - h.Y) < step.IconH * 0.5);
+                        if (at >= 0) { if (ncc > shortlist[at].Ncc) shortlist[at] = (h, ncc); }
+                        else shortlist.Add((h, ncc));
+                        shortlist.Sort((a, b) => b.Ncc.CompareTo(a.Ncc));
+                        if (shortlist.Count > LookShortlist) shortlist.RemoveAt(shortlist.Count - 1);
+                    }
                 }
+
+                // PHASE TWO: the learned appearances, against the likeliest squares only. Each look
+                // is compared to the square DIRECTLY — they are alternative photographs, not a
+                // chain — so a face the original reference barely recognises can still match its
+                // own photograph outright. The previous shape ran every look against every one of
+                // 220 candidates, and gated that on the reference's score, which was both the
+                // expensive way round and a cap on what the collection could ever reach.
+                if (best is not null && best.Ncc < NccAccept)
+                    foreach ((QuestFind.IconHit h, double _) in shortlist)
+                    {
+                        foreach (QuestFind.IconPatch look in looks)
+                        {
+                            if (look is not { Ok: true }) continue;
+                            (double n2, int x2, int y2) = QuestFind.BestNcc(frame, h.X, h.Y, look, wantW, wantH);
+                            // h.Dist is still the COLOUR distance the record's contract promises —
+                            // the running correlation rides alongside in the tuple rather than
+                            // overwriting a field whose name means something else.
+                            if (n2 > best!.Ncc)
+                                best = new QuestFind.CopyHit(h.X + (double)x2 / frame.Width,
+                                                             h.Y + (double)y2 / frame.Height, n2, h.Dist);
+                            if (best!.Ncc >= NccAccept) break;
+                        }
+                        if (best!.Ncc >= NccAccept) break;
+                    }
+
                 if (best is not null) return (true, best, best.Coarse);
                 QuestFind.IconHit? closest = QuestFind.FindIconInRect(
                     frame, _script.BagX, _script.BagY, _script.BagW, _script.BagH,
@@ -681,7 +761,11 @@ public sealed class QuestRole
             }
 
             (bool looked, QuestFind.CopyHit? pick, double closest) = Judge();
-            if ((pick is null || pick.Ncc < NccAccept) && (_script.OpenBagsKey ?? "").Trim().Length > 0)
+            // ProbableAccept, not NccAccept: a provisional match is going ahead either way, so
+            // pressing the open-bags key would toggle the bags SHUT and then click into the 3D
+            // world at the remembered coordinates — on every hand-in, in exactly the state this
+            // whole feature exists to rescue.
+            if ((pick is null || pick.Ncc < ProbableAccept) && (_script.OpenBagsKey ?? "").Trim().Length > 0)
             {
                 if (OpenBags($"nothing matched {step.Item} — checking the bags are open"))
                 {
@@ -705,6 +789,41 @@ public sealed class QuestRole
             if (!looked)
             {
                 Log?.Invoke($"⚠ couldn't scan the bag area for {step.Item} — using the picked slot.");
+            }
+            else if (pick is { } prov && prov.Ncc < NccAccept && prov.Ncc >= ProbableAccept)
+            {
+                // PROVISIONAL. Nothing met the strict bar, but this square is far too close a match
+                // to be a different item — a different icon in the same palette scores about 0.44,
+                // and this is well above that. It is the item wearing a face we haven't photographed
+                // yet: a changed stack count, a highlighted slot, a redraw.
+                //
+                // So it is offered, and the SERVER decides. A hand-in the server confirms proves
+                // the square held the right item, and only then is this appearance remembered —
+                // after which it matches at ~1.00 for the rest of the run and every run after. A
+                // hand-in that is refused or goes unanswered teaches nothing and stops the run, so
+                // the worst this can cost is one item, once. The alternative is lowering the bar
+                // for everything, which is what let a Bone-clasped Girdle through.
+                slot = new ScreenPoint { X = prov.X, Y = prov.Y };
+                _lastMatch = $"{prov.Ncc * 100:0.0}% pixel match (provisional)";
+                _lastPos = $"{prov.X * 100:0.0}%, {prov.Y * 100:0.0}%";
+                _usedPixels = true;
+                // PHOTOGRAPHED NOW, while the item is still in the square — not after the hand-in.
+                // I wrote it the other way round first and it is the worst bug in this file's
+                // history: by then the pick-up click has emptied the slot, so what gets stored as
+                // "this is what the item looks like" is a picture of an EMPTY SLOT — which then
+                // matches every other empty slot in the bag at ~1.00. Judge takes the best score
+                // across references, so that one photograph would have made every empty square in
+                // the bag a confident match, at the STRICT bar, for ever.
+                //
+                // Held, not saved. It only reaches the script if the server accepts the hand-in.
+                _pendingLook = SnapAt(step, slot);
+                _pendingLookAt = slot;
+                if (_narrate || _provisionalSaid.Add(step.Item))
+                Log?.Invoke($"· {step.Item} at {prov.X * 100:0.0}%, {prov.Y * 100:0.0}% matches {prov.Ncc * 100:0.0}% "
+                          + $"— under the {NccAccept * 100:0}% bar but far above the {ProbableAccept * 100:0}% a "
+                          + "different item could reach, so this is almost certainly one wearing a face I haven't "
+                          + "seen (a stack's count changes as it shrinks). Offering it: if he takes it, that proves "
+                          + "it and I'll remember this look.");
             }
             else if (pick is { } p && p.Ncc >= NccAccept)
             {
@@ -745,10 +864,10 @@ public sealed class QuestRole
                     ? $"✖ no {step.Item} in the bag area — nothing in it even looks the right colour "
                       + $"(closest square is {closest:0} away, and a candidate has to be within {CoarsePropose:0})."
                     : $"✖ no {step.Item} in the bag area — the closest square, at {_lastPos} of the window, matches "
-                      + $"{pick.Ncc * 100:0.0}% of its pixels and a real copy matches over {NccAccept * 100:0}%. "
-                      + "LOOK AT THAT SPOT: if one is sitting there, the reference has stopped matching it — a "
-                      + "stack's quantity number changes as the stack shrinks, and a highlighted or hovered slot is "
-                      + "drawn differently — so re-pick this item's slot from a plain, un-hovered copy.");
+                      + $"only {pick.Ncc * 100:0.0}% of its pixels. That is below the {ProbableAccept * 100:0}% floor "
+                      + "I'll take a chance on, and a different icon in the same colours scores about 44%, so this "
+                      + "looks like a different item rather than one wearing a face I haven't seen. If you can see a "
+                      + "copy at that spot, re-pick this item's slot from it.");
                 _emptyBagMiss = true;
                 return false;
             }
@@ -1024,6 +1143,116 @@ public sealed class QuestRole
     }
 
     private bool _warnedHeld;
+
+    /// <summary>Photograph one square, right now, at the icon's own size.</summary>
+    private QuestFind.IconPatch? SnapAt(TurnInStep step, ScreenPoint at)
+    {
+        try
+        {
+            using System.Drawing.Bitmap? frame = QuestFind.Capture(_hwnd());
+            if (frame is null) return null;
+            QuestFind.IconPatch? patch = QuestFind.PatchFromRegion(
+                frame, at.X - step.IconW / 2, at.Y - step.IconH / 2, step.IconW, step.IconH);
+            return patch is { Ok: true } && patch.Data.Length <= 120_000 ? patch : null;
+        }
+        catch { return null; }
+    }
+
+    /// <summary>
+    /// The server accepted a hand-in from a square we were not sure about. Keep what that proved.
+    ///
+    /// TWO photographs, because a stack has two faces that matter and only one of them is the one
+    /// we matched. The BEFORE shot (taken in the provisional branch, while the item was still in
+    /// the square) is the face that got us here. The AFTER shot is the face the NEXT scan has to
+    /// recognise — a stack of three is a stack of two now, and the two is what remains.
+    ///
+    /// Learning only the before shot cannot converge on a stack: the hand-in it proves is the very
+    /// thing that destroys that face. Learning only the after shot is the bug that nearly shipped:
+    /// for a non-stacking item the square is EMPTY afterwards, and an empty-slot reference matches
+    /// every empty slot in the bag at ~1.00.
+    ///
+    /// So the after shot has to earn its place. It is admitted only if it still correlates with the
+    /// before shot above the provisional floor — which is exactly the question "is this the same
+    /// item wearing a different face, or is it nothing?" An empty slot fails it outright.
+    ///
+    /// The gate on both is `_offered` and nothing weaker. `_advanced` — the reward line, the
+    /// quest's own success phrases — does not name the item, so a provisional pick that grabbed
+    /// something else the NPC happens to want would teach the runner that the wrong item IS this
+    /// one, permanently and invisibly.
+    /// </summary>
+    private void LearnLookIfProved(TurnInStep step)
+    {
+        QuestFind.IconPatch? before = _pendingLook;
+        _pendingLook = null;
+        if (before is not { Ok: true } || _assumedThisStep || !_offered) return;
+
+        // BOUNDED PER RUN. Every admission rewrites questscripts.json in full — every step's
+        // base64 snapshot and reference with it — and a shrinking stack presents a new face on
+        // every single hand-in, so an uncapped learner would write that file a thousand times a
+        // night to chase a number it can never catch. It does not need to: PROVISIONAL MATCHING
+        // ALONE KEEPS THE RUN GOING. Learning is the optimisation that turns a 76% guess into a
+        // 100% certainty for the faces that recur; once enough are known, stop paying for it.
+        // PER ITEM. A run-wide counter let step 1 spend the whole allowance and lock step 2 out
+        // for the night, while naming whichever step happened to hit the wall.
+        string key = step.Item.Length > 0 ? step.Item : "item";
+        int done = _learnsPerItem.TryGetValue(key, out int d) ? d : 0;
+        if (done >= MaxLearnsPerRun)
+        {
+            if (!_learnCapSaid.Add(key)) return;
+            Log?.Invoke($"· that's {MaxLearnsPerRun} appearances of {step.Item} learned this run — enough. She'll "
+                      + "keep offering the ones she's less sure about (that is what keeps the run going); she just "
+                      + "won't write any more of them down.");
+            return;
+        }
+
+        var keep = new List<QuestFind.IconPatch> { before };
+        QuestFind.IconPatch? after = SnapAt(step, _pendingLookAt);
+        // Dimensions checked as well as the correlation: Ncc truncates to the shorter array, so
+        // two patches taken either side of a window resize would be compared row-major at different
+        // strides and return a number that means nothing.
+        if (after is { Ok: true } && after.W == before.W && after.H == before.H
+            && QuestFind.Ncc(before.Pixels, after.Pixels) >= AfterShotKeep)
+            keep.Add(after);                       // still the same item, one fewer of it
+
+        int added = 0;
+        foreach (QuestFind.IconPatch look in keep)
+        {
+            // A zero-variance patch — a flat dark square, from bags shut or a click that landed on
+            // the 3D world — scores 0 against everything INCLUDING an identical copy of itself, so
+            // it defeats the dedupe below and would fill the ring with junk. Refuse it outright.
+            if (QuestFind.Ncc(look.Pixels, look.Pixels) < 0.5) continue;
+            try
+            {
+                // The read is inside the try AND under the lock. Enumerating this list unprotected
+                // races the icon-pick tile clearing it from the UI thread, and the throw would have
+                // escaped past the catch below — killing the run, which is the one thing the
+                // comment there promises never happens.
+                bool known = QuestScriptStore.Current.Read(() =>
+                {
+                    foreach (QuestFind.IconPatch had in step.IconLooks)
+                        if (had is { Ok: true } && had.W == look.W && had.H == look.H
+                            && QuestFind.Ncc(had.Pixels, look.Pixels) > 0.995) return true;
+                    return false;
+                });
+                if (known) continue;
+                // Under the store's lock. The runner serializes the whole store when it saves, and
+                // a list appended to from this thread while the UI thread is mid-Serialize throws —
+                // into a catch that swallows it, so the user's edit silently doesn't happen.
+                QuestScriptStore.Current.Edit(() =>
+                {
+                    step.IconLooks.Add(look);
+                    while (step.IconLooks.Count > MaxLooks) step.IconLooks.RemoveAt(0);
+                });
+                added++;
+            }
+            catch { /* never let learning break a run */ }
+        }
+        if (added == 0) return;
+        _learnsPerItem[key] = done + added;
+        if (_narrate || _learnSaid.Add(step.Item))
+            Log?.Invoke($"· learned {added} more of what {step.Item} looks like — he took it, so that square really "
+                      + $"was one. {step.IconLooks.Count} of {MaxLooks} appearances known.");
+    }
 
     /// <summary>
     /// Say what the server actually said while we were waiting.
@@ -1448,6 +1677,7 @@ public sealed class QuestRole
                                           + "and this GIVE committed the lot. Counting it as ONE hand-in, but "
                                           + $"{burst} left your bag. If this keeps happening, re-pick the GIVE "
                                           + "button — a GIVE press that doesn't land is what leaves items waiting.");
+                            LearnLookIfProved(step);
                             if (_assumedThisStep) _assumedAnyThisPass = true;
                             // Only a REAL acknowledgement proves the cursor is clear. Clearing it on
                             // an assumed hand-in put the stuck-cursor warning permanently out of
