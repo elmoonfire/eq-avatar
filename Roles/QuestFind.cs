@@ -583,8 +583,14 @@ public static class QuestFind
     /// "did the crop nudge the number up". Full — the whole-patch score, carried out so the log can
     /// say what actually happened rather than quoting a guarantee that was measured on a different
     /// picture. Five rounds of review have turned on that distinction; it should be printable.
+    /// CropTried — whether the middle was correlated at all, and Centre — what it scored. THREE
+    /// outcomes, not two, and they are separate fields because -1 cannot carry both: the crop can be
+    /// skipped (too far off to bother), or run and beaten, or run and come back UNMEASURABLE — which
+    /// happens when the middle of the square is a single flat colour, i.e. it is an empty slot. That
+    /// last one is not a gap in the evidence, it is the most positive identification of an empty
+    /// slot this code can make, and it answers the question a stopped run is actually asking.
     /// </returns>
-    public static (double Ncc, int Dx, int Dy, bool Cropped, double Full) Score(
+    public static (double Ncc, int Dx, int Dy, bool Cropped, double Full, double Centre, bool CropTried) Score(
         Bitmap frame, double cx, double cy, IconPatch reference, int wantW, int wantH)
     {
         (double full, int dx, int dy) = BestNcc(frame, cx, cy, reference, wantW, wantH);
@@ -592,13 +598,13 @@ public static class QuestFind
         // case rides in on the same test: BestNcc's "I could not measure that" is -1, which is
         // below CropTryFrom, so it returns untouched and the caller narrates it as its own outcome
         // rather than having it quietly overwritten by a crop score of nothing.
-        if (full >= PixelAccept || full < CropTryFrom) return (full, dx, dy, false, full);
+        if (full >= PixelAccept || full < CropTryFrom) return (full, dx, dy, false, full, -1, false);
         IconPatch? mid = CentreOf(reference);
-        if (mid is null || ReferenceEquals(mid, reference)) return (full, dx, dy, false, full);
+        if (mid is null || ReferenceEquals(mid, reference)) return (full, dx, dy, false, full, -1, false);
         int mw = Math.Max(4, (int)Math.Round(wantW * (double)mid.W / Math.Max(1, reference.W)));
         int mh = Math.Max(4, (int)Math.Round(wantH * (double)mid.H / Math.Max(1, reference.H)));
         (double centre, int cdx, int cdy) = BestNcc(frame, cx, cy, mid, mw, mh);
-        if (centre <= full) return (full, dx, dy, false, full);
+        if (centre <= full) return (full, dx, dy, false, full, centre, true);
         // Maps centre ∈ (full, 1.0] onto (full, CropCeiling], monotonically. A perfect middle
         // reports exactly the ceiling; everything else reports proportionally less, so two crop
         // wins can still be told apart and the better one still wins.
@@ -610,7 +616,8 @@ public static class QuestFind
         // measured on exactly that full patch. Reporting `true` there closed the learning gate on
         // almost every real copy it exists to learn from — the same dead switch as `!_offered`,
         // reintroduced through a different door.
-        return capped > full ? (capped, cdx, cdy, full < ProbableAccept, full) : (full, dx, dy, false, full);
+        return capped > full ? (capped, cdx, cdy, full < ProbableAccept, full, centre, true)
+                            : (full, dx, dy, false, full, centre, true);
     }
 
     /// <summary>
