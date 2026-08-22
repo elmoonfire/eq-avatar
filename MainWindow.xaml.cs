@@ -393,8 +393,22 @@ public partial class MainWindow : Window
 
     /// <summary>Float above other apps (browser, etc.) but step aside for the game: when EverQuest is
     /// the foreground window we drop Topmost so it can cover us; otherwise we stay on top.</summary>
+    /// <summary>
+    /// True while the launch splash is covering the app.
+    ///
+    /// This is the reason the splash "sometimes wasn't there at all". Setting Topmost to true does
+    /// not merely mark a window always-on-top, it RAISES it to the front of the topmost band — and
+    /// UpdateTopmost runs from the 300 ms UI tick, so on any install with always-on-top enabled the
+    /// main window jumped over the splash about a third of a second in, every launch. The splash is
+    /// topmost too; it just showed first, and first loses.
+    /// </summary>
+    internal bool SplashUp { get; set; }
+
     private void UpdateTopmost()
     {
+        // Not while the splash is up. Whatever the setting says, the answer for the next second and
+        // a half is "stay where you are".
+        if (SplashUp) return;
         // On top of everything (Hayden's two-monitor preference). Only step aside DURING an auto-login
         // so the app can't cover the launcher and read its own window with OCR.
         bool launching = _login is { Running: true };

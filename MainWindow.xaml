@@ -663,11 +663,11 @@
                             </Grid.ColumnDefinitions>
                             <Button Grid.Column="0" Click="StartGrind_Click" Padding="0" Margin="0,0,8,0" Cursor="Hand"
                                     BorderBrush="#2C8C55" BorderThickness="1.6" Background="#0B121E"
-                                    ToolTip="Start the selected hunting mode. EQL must be the focused window.">
+                                    ToolTip="Start the selected hunting mode. Shift+F12 does the same from anywhere, even with the game focused. EverQuest must be running.">
                                 <Grid ClipToBounds="True">
                                     <Image x:Name="ArtStart" Stretch="UniformToFill" Height="132"/>
                                     <Border VerticalAlignment="Bottom" Background="#C8060B10" Padding="8,4">
-                                        <TextBlock Text="▶  START" FontWeight="Bold" FontSize="13.5" Foreground="#7CE38B" HorizontalAlignment="Center"/>
+                                        <TextBlock Text="▶  START  (Shift+F12)" FontWeight="Bold" FontSize="12.5" Foreground="#7CE38B" HorizontalAlignment="Center"/>
                                     </Border>
                                 </Grid>
                             </Button>

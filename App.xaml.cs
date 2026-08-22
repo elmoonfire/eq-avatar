@@ -29,26 +29,52 @@ public partial class App : Application
         // Because the splash matches the app's rectangle exactly, nothing behind (desktop or
         // the game) ever peeks around the icon during the fade — you only see splash → app.
         var main = new MainWindow();
+        main.SplashUp = true;          // hold off the always-on-top raise until the splash is done
         main.Show();
         MainWindow = main;
 
-        var splash = new SplashWindow { WindowStartupLocation = WindowStartupLocation.Manual };
-        if (main.WindowState == WindowState.Maximized)
+        // WRAPPED, because the flag it sets is a promise to turn something back on. Anything that
+        // throws in here — a missing splash resource, a shutdown race on Show — would otherwise
+        // leave SplashUp true for the rest of the session, silently disabling always-on-top. And
+        // the app would keep running: the unhandled-exception handler swallows anything raised once
+        // the main window is loaded, which main.Show() above has already guaranteed. No splash, no
+        // crash, no message — which is precisely the report this whole change set started from.
+        try
         {
-            // Restored-as-maximized (0.9.21 window memory): Left/Width describe the restore
-            // bounds, not the maximized rectangle — cover the work area instead.
-            var wa = SystemParameters.WorkArea;
-            splash.Left = wa.Left; splash.Top = wa.Top;
-            splash.Width = wa.Width; splash.Height = wa.Height;
+            var splash = new SplashWindow { WindowStartupLocation = WindowStartupLocation.Manual };
+            if (main.WindowState == WindowState.Maximized)
+            {
+                // Restored-as-maximized (0.9.21 window memory): Left/Width describe the restore
+                // bounds, not the maximized rectangle — cover the work area instead.
+                var wa = SystemParameters.WorkArea;
+                splash.Left = wa.Left; splash.Top = wa.Top;
+                splash.Width = wa.Width; splash.Height = wa.Height;
+            }
+            else
+            {
+                splash.Left = main.Left; splash.Top = main.Top;
+                splash.Width = main.ActualWidth > 0 ? main.ActualWidth : main.Width;
+                splash.Height = main.ActualHeight > 0 ? main.ActualHeight : main.Height;
+            }
+            splash.Show();
+            splash.Activate();             // front of the topmost band, ahead of the window it covers
+            splash.PlayThen(() =>
+            {
+                main.SplashUp = false;
+                main.Activate();
+            });
         }
-        else
+        catch (Exception ex)
         {
-            splash.Left = main.Left; splash.Top = main.Top;
-            splash.Width = main.ActualWidth > 0 ? main.ActualWidth : main.Width;
-            splash.Height = main.ActualHeight > 0 ? main.ActualHeight : main.Height;
+            main.SplashUp = false;
+            // NOT WriteCrash. That one shows a modal "fatal error" box — untrue here, since the app
+            // is entirely usable without its splash — and worse, it fires only for the FIRST crash
+            // of a session, so spending it on a missing decoration would leave a genuinely fatal
+            // error later writing a file and saying nothing on screen. That silent death is the one
+            // thing this class was written to prevent.
+            try { Diag.BotLog.Log("app", $"the launch splash failed, carrying on without it: {ex}"); }
+            catch { /* logging a logging failure helps nobody */ }
         }
-        splash.Show();
-        splash.PlayThen(() => main.Activate());
     }
 
     private static int _crashes;

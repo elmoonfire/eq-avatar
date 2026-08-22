@@ -97,6 +97,32 @@ public static class LogEventParser
     private static readonly Regex Zone = new(
         @"You have entered\s+(?<zone>.+?)\.?$", RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
+    /// <summary>
+    /// Could this line be the CLIENT telling us where our own character is?
+    ///
+    /// A position is not like the other things read out of this log. Everything else the parser
+    /// produces is advisory — a con, a zone, a tell — and being wrong about one costs a wasted
+    /// pass. Being wrong about a POSITION inverts the bot: a camped character told it is a thousand
+    /// units from its anchor walks a thousand units to "come back", and in the field it did exactly
+    /// that, into water, and drowned while nobody was watching. Whatever anyone types anywhere in
+    /// the game must be incapable of moving this character. That is the rule, and it is enforced
+    /// HERE, once, rather than in each of the five places that consume a position.
+    ///
+    /// Three independent tests, and a line has to pass all of them:
+    ///
+    ///  1. NOTHING BEFORE THE KEYWORD. Enforced by the `^` in both patterns. Once the timestamp is
+    ///     stripped the client always prints its position at the start of the line, and anything a
+    ///     person produced starts with a speaker — a name, or "You". This one test is what an
+    ///     emote cannot get round, and an emote carries no chat verb for a blacklist to find.
+    ///  2. NOBODY IS SPEAKING. The chat verbs below. Redundant with (1) for every format known
+    ///     today, which is the point: two independent reasons to refuse means one of them can be
+    ///     wrong about a client this app has never seen.
+    ///  3. NO QUOTE MARKS. Every channel in this game wraps what was said in quotes, and no line
+    ///     the client prints about your own position contains one.
+    /// </summary>
+    public static bool CouldBeOurOwnPosition(string msg)
+        => !Chatter.IsMatch(msg) && msg.IndexOf('\'') < 0 && msg.IndexOf('"') < 0;
+
     public static LogEvent Parse(string rawLine)
     {
         string msg = rawLine;
@@ -110,12 +136,7 @@ public static class LogEventParser
                 stamp = dt;
         }
 
-        // BOTH paths, not just the loose one. The first version guarded only the fallback on the
-        // reasoning that "Your Location is" is the client's own phrasing and could not be forged —
-        // which is wrong: `Soandso says, 'Your Location is 100, 200, 300'` is one paste away, and
-        // someone pasting their loc into a channel to ask for a corpse drag is not a griefer, it is
-        // Tuesday.
-        bool spoken = Chatter.IsMatch(msg);
+        bool spoken = !CouldBeOurOwnPosition(msg);
         Match loc = spoken ? Match.Empty : Loc.Match(msg);
         if (loc.Success &&
             double.TryParse(loc.Groups["a"].Value, out double a) &&
@@ -126,9 +147,6 @@ public static class LogEventParser
             return new LogEvent(stamp, LogEventKind.Location, msg, X: b, Y: a, Z: c);
         }
 
-        // The loose pattern is only ever tried on lines nobody SAID. The strict "Your Location is"
-        // above needs no such guard — it is the client's own words and a player cannot forge the
-        // whole phrase into a chat line without the chat markers this catches.
         Match locLoose = spoken ? Match.Empty : LocLoose.Match(msg);
         if (locLoose.Success &&
             double.TryParse(locLoose.Groups["a"].Value, out double la) &&

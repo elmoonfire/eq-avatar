@@ -76,6 +76,12 @@ public sealed class HuntRole
     private int _wildLocs;
     /// <summary>A zone line just landed, so the next big jump is real.</summary>
     private bool _justZoned;
+    /// <summary>How long after pressing the /loc key a position line still counts as OUR answer.
+    /// The heartbeat fires every 2–3 seconds at its tightest, so this has to be comfortably wider
+    /// than a round trip and still narrow enough that a stranger's line rarely lands inside it.</summary>
+    private const double LocAnswerWindow = 3.5;
+    /// <summary>When the refusal was last narrated. See the rate limit at its call site.</summary>
+    private DateTime _wildSaid = DateTime.MinValue;
     private long _prevSegTicks;
 
     // facing + bard state fed from the log
@@ -226,23 +232,62 @@ public sealed class HuntRole
                     // second, so 260 plus a floor for jitter is generous by a factor of two and
                     // still refuses everything a chat line can invent. Zoning legitimately
                     // teleports, so a zone line disarms this for a moment.
+                    // DID WE ASK FOR THIS ONE?
+                    //
+                    // The parser refuses anything a player SAID, but no test over the text alone can
+                    // catch every forgery: an emote is printed as "<name> <text>", so a character
+                    // actually named "Your" typing `/em Location is 1, 2, 3` produces a line that is
+                    // byte-identical to the client's own. This is the test that needs no text at all.
+                    // We fire the /loc key ourselves every couple of seconds and stamp when; an
+                    // answer arriving in that window is ours, and one arriving outside it is
+                    // somebody else's line landing between our asks. A forger would have to hit a
+                    // window they cannot see.
+                    //
+                    // Only when a /loc KEY is configured. Users who instead keep a repeating macro
+                    // running in game have no asks to correlate with, and this file promises that
+                    // setup works — so for them the test is skipped rather than quietly breaking it.
+                    // DERIVED FROM THE HEARTBEAT, not a constant. 3.5s is right when the key fires
+                    // every 2-3 seconds (camp, waypoints, a tight tether) — but the default interval
+                    // is 6, and a flat 3.5 would drop every reading from a user's own repeating
+                    // in-game macro into the dead zone between our asks, cap it at 60 units, and
+                    // throw away three quarters of the extra resolution they set it up for.
+                    double window = Math.Max(LocAnswerWindow, Math.Max(2, _s.HuntLocEverySeconds) + 1.0);
+                    bool solicited = _loc.IsNone || (DateTime.Now - _lastLoc).TotalSeconds <= window;
                     if (_x is double px && _y is double py && !_justZoned)
                     {
                         double gap = Math.Sqrt((nx - px) * (nx - px) + (ny - py) * (ny - py));
                         double secs = Math.Max(0.25, (now - Interlocked.Read(ref _locTicks)) / (double)TimeSpan.TicksPerSecond);
-                        double could = 260 * secs + 60;
+                        // An unsolicited line may report a small drift and nothing more. That is not
+                        // a claim it is fake — a heartbeat can land a moment late — it is a refusal
+                        // to let a line we did not ask for MOVE the character any distance worth
+                        // walking. The three-strike escape below still overrules it.
+                        double could = solicited ? 260 * secs + 60 : 60;
                         if (gap > could)
                         {
                             // NOT silently. A reading refused is a fact about the log, and the raw
                             // line is the only thing that identifies what is producing them.
-                            if (++_wildLocs <= 3)
-                                Log?.Invoke($"Ignoring a position that can't be real — it jumped {gap:0} units in "
-                                          + $"{secs:0.0}s, and nothing moves that fast. The line was: {ev.Text}");
+                            // SAID, but not on a loop. The reason does not change between repeats,
+                            // and the three-strike counter re-arms — so without a rate limit this
+                            // writes a line for every reading, for ever, and buries the run it is
+                            // trying to explain.
+                            bool fresh = (DateTime.Now - _wildSaid).TotalSeconds > 30;
+                            if (++_wildLocs <= 3 && fresh)
+                            {
+                                _wildSaid = DateTime.Now;
+                                Log?.Invoke(solicited
+                                    ? $"Ignoring a position that can't be real — it jumped {gap:0} units in "
+                                      + $"{secs:0.0}s, and nothing moves that fast. The line was: {ev.Text}"
+                                    : $"Ignoring a position I didn't ask for that moves me {gap:0} units — I last "
+                                      + $"pressed the /loc key {(DateTime.Now - _lastLoc).TotalSeconds:0.0}s ago, so "
+                                      + "this isn't an answer to it. Anything a player types is refused; this is the "
+                                      + $"line: {ev.Text}");
+                            }
                             // …but not for ever. Three in a row means the refusal is now the thing
                             // that is wrong — a real teleport, a zone I missed — so take it and say so.
                             if (_wildLocs < 4) break;
-                            Log?.Invoke($"That's {_wildLocs} impossible positions in a row, so I'll believe this one "
-                                      + "and carry on from here.");
+                            if (fresh)
+                                Log?.Invoke($"That's {_wildLocs} positions in a row I couldn't accept, so I'll "
+                                          + "believe this one and carry on from here.");
                             // RE-ARMED. Leaving the counter above the threshold meant every later
                             // reading sailed through too — the guard would have switched itself off
                             // for the rest of the run and printed "that's 47 in a row" while doing it.
