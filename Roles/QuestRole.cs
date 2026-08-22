@@ -844,8 +844,10 @@ public sealed class QuestRole
             //   Probe   the actual square the score was measured on, lifted out of THIS frame
             //           while it is still alive. Carried out rather than re-grabbed later because
             //           the very next thing this method's caller may do is press the open-bags key
-            //           — a toggle — and a diagnostic photograph taken after that is a picture of
-            //           the 3D world captioned with a number measured against a bag.
+            //           and a photograph taken hundreds of milliseconds later is a different
+            //           moment — and if the user bound a TOGGLE rather than an OPEN (nothing here
+            //           can verify which), a picture of the 3D world captioned with a number that
+            //           was measured against a bag.
             //   Ref/RefLabel  WHICH stored picture produced the score — the original reference or
             //           one of the learned appearances. The diagnostic draws this one, because
             //           drawing the original beside a probe scored against a learned look would
@@ -981,10 +983,11 @@ public sealed class QuestRole
             ParkCursor();
             Look best1 = Judge();
             bool looked = best1.Looked;
-            // ProbableAccept, not NccAccept: a provisional match is going ahead either way, so
-            // pressing the open-bags key would toggle the bags SHUT and then click into the 3D
-            // world at the remembered coordinates — on every hand-in, in exactly the state this
-            // whole feature exists to rescue.
+            // ProbableAccept, not NccAccept: a provisional match is going ahead either way, and
+            // pressing the open-bags key for it buys nothing. It can also COST: nothing here can
+            // verify that the user bound an OPEN rather than a TOGGLE, and a toggle press would
+            // shut the bags and then click into the 3D world at the remembered coordinates — on
+            // every hand-in, in exactly the state this whole feature exists to rescue.
             if ((best1.Best is null || best1.Best.Ncc < ProbableAccept) && (_script.OpenBagsKey ?? "").Trim().Length > 0)
             {
                 if (OpenBags($"nothing matched {step.Item} — checking the bags are open"))
@@ -1008,7 +1011,7 @@ public sealed class QuestRole
                         // describes one square judged on one frame — the score, the photograph, the
                         // picture that produced it, how many candidates there were — and mixing two
                         // looks captions one square's number with another square's evidence. The
-                        // second look is the one taken AFTER the open-bags toggle, so it is exactly
+                        // second look is the one taken AFTER the open-bags press, so it is exactly
                         // the wrong thing to inherit piecemeal.
                         if (look2.Best is not null && (best1.Best is null || look2.Best.Ncc > best1.Best.Ncc))
                             best1 = look2;
@@ -1500,7 +1503,8 @@ public sealed class QuestRole
     ///
     /// The probe is HANDED IN, taken from the frame the score was measured on. Grabbing a fresh
     /// screenshot here looked simpler and was wrong: the caller presses the open-bags key when
-    /// nothing matched, that key is a TOGGLE, and so by the time this runs the bags are shut. The
+    /// nothing matched, so by the time this runs the frame has moved on — and if the user bound a
+    /// TOGGLE rather than an OPEN, the bags are shut as well. The
     /// picture would have been of the 3D world, captioned with a number measured against a bag —
     /// a diagnostic that manufactures its own false evidence, which is worse than none.
     /// </summary>
@@ -1674,17 +1678,18 @@ public sealed class QuestRole
     }
 
     /// <summary>
-    /// "This square isn't one slot", with the numbers, or nothing at all.
+    /// "Most of this reference isn't the item" — as a FACT, with no instruction attached.
     ///
-    /// Two signals, and the ORDER matters. Ink running off the edge of the reference is the strong
-    /// one: a square that really sits inside a slot has that slot's frame and the gap to the next
-    /// one around it, all background, so its ink cannot reach the border. Ink that does reach it
-    /// means the square cut through something — and a fuller bag makes that MORE likely, which is
-    /// the right direction, since a fuller bag is exactly when an oversized square starts failing.
-    /// The area fraction is the weaker one and is kept only as a second chance, because a bounding
-    /// box inflated by the neighbours it accidentally contains reports a healthy number.
+    /// The first version of this told people to shrink their picking square, and that advice was
+    /// wrong for the person it was written for. A square the size of an inventory SLOT is the right
+    /// pick and should stay the right pick: it has to work for a fat item as well as a skinny one,
+    /// and the user should not have to re-tune it per item. A tall thin totem in a correctly sized
+    /// 40×40 slot is simply a tall thin totem — nothing is misconfigured.
     ///
-    /// Said once per item per run: it is advice, not news.
+    /// What IS worth saying is what that means for the comparison, because it is not obvious: when
+    /// the item is a narrow sliver of its slot, most of the square being compared is background and
+    /// whatever the neighbouring slots happen to show through the gaps. So the app says the number,
+    /// says what it does about it, and leaves the decision alone.
     /// </summary>
     private string TooLooseWarning(TurnInStep step)
     {
@@ -1692,41 +1697,15 @@ public sealed class QuestRole
         if (QuestFind.ContentBox(r) is not { } inner) return "";
         double area = inner.AreaFraction(r);
         if (!inner.RunsOffEdge && area >= 0.55) return "";
-        // The token is spent LAST, after everything that could decline. Checking it first meant a
-        // reference that had nothing to report still burned the one chance to report.
         if (!_looseSaid.Add(DumpKey(step))) return "";
 
-        // THREE STRENGTHS OF CLAIM, because the evidence comes in three strengths.
-        //
-        // The density test is the confident one, and it has a blind spot that runs the wrong way: a
-        // FULL bag inks every slot, so a square straddling four of them reads as dense and the
-        // accusation goes quiet — in exactly the state that causes the failure ("fifty reward items
-        // piled up around it"). So ink reaching the edge still gets said, just not as an accusation:
-        // no pixel test can tell "the square caught its neighbours" from "the icon fills its
-        // square", and asserting the first at a good pick is how the previous draft ended up giving
-        // advice that could never be satisfied. State what was seen, give both readings, and let
-        // the person holding the screen decide — they can see their own bag.
-        return $"And this may well be why: what I stored as {step.Item} is a {r.W}×{r.H} px square, and "
-             + (inner.LikelyNeighbours
-                 ? $"the picture in it runs off {inner.Edges()} while only {inner.Ink * 100:0}% of the square is "
-                   + "inked at all. That combination means the square is wider than one inventory slot and has "
-                   + "caught part of what sits beside it"
-                   + (inner.Top && inner.Bottom && !inner.Left && !inner.Right
-                       ? " — above and below, so if your copies are stacked in a column, this reference is partly "
-                         + "made of the OTHER copies. The last one in a column has an empty slot above it, which is "
-                         + "not what the reference says should be there, and that is when it stops matching. "
-                       : ". It works while the neighbours stay put and stops the moment they change. ")
-                 : area < 0.55
-                   ? $"{step.Item} only fills {inner.W}×{inner.H} of it — {area * 100:0}%. The rest is empty slot, "
-                     + "so most of what I'm comparing is furniture that every slot shares. "
-                   // Ink at the edge on a square that is otherwise densely inked. Could be either
-                   // thing, and I cannot tell which — so I say so rather than picking one.
-                   : $"the picture in it reaches {inner.Edges()}. I can't tell from the pixels alone whether that "
-                     + "is because the square is bigger than one slot and has caught what's beside it, or simply "
-                     + "because the icon fills its square — but you can: hold that square against one slot in your "
-                     + "bag and see whether it fits inside the slot's frame. ")
-             + "If it doesn't, re-pick this item's icon with a smaller square (the wheel resizes it while you drag, "
-             + "or set the default in Account → Settings → OCR & picking) so it fits INSIDE one slot's frame.";
+        string what = $"{step.Item} fills {inner.W}×{inner.H} of its {r.W}×{r.H} reference"
+                    + (inner.RunsOffEdge ? $", and reaches {inner.Edges()} of it" : $" — {area * 100:0}% of it");
+        return $"For what it's worth: {what}. A skinny item in a slot-sized square is normal and the square is "
+             + "the right size to keep — I already compare the middle of it, where the item actually is, rather "
+             + "than the whole thing. But it does mean a smaller part of that square is the item than usual, so "
+             + "if the copies you can see are somewhere the bag rectangle doesn't reach, that is the more likely "
+             + "explanation than the picture having changed. ";
     }
 
     private readonly HashSet<string> _looseSaid = new(StringComparer.OrdinalIgnoreCase);

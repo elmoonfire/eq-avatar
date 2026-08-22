@@ -71,6 +71,11 @@ public sealed class HuntRole
     private double _fwdMsSinceLoc, _sideMsSinceLoc;          // motion mix between locs (heading quality gate)
     private double _speed = 50;                              // measured run speed, units/sec (closed-loop)
     private long _locTicks;                                  // last /loc line time (for FreshLoc waits)
+    /// <summary>Consecutive position readings refused as physically impossible. Bounded, because a
+    /// guard that can never be overruled is its own failure mode.</summary>
+    private int _wildLocs;
+    /// <summary>A zone line just landed, so the next big jump is real.</summary>
+    private bool _justZoned;
     private long _prevSegTicks;
 
     // facing + bard state fed from the log
@@ -209,6 +214,43 @@ public sealed class HuntRole
                 if (ev.X is double nx && ev.Y is double ny)
                 {
                     long now = DateTime.Now.Ticks;
+                    // COULD THE CHARACTER ACTUALLY HAVE GOT THERE?
+                    //
+                    // Belt and braces behind the parser's chat guard, and the braces matter: a
+                    // position is the one input where a single wrong number does not degrade the
+                    // run, it INVERTS it. A camped character that is told it is a thousand units
+                    // from its anchor walks a thousand units to "come back" — and in the field it
+                    // walked into water and drowned while nobody was watching.
+                    //
+                    // The bound is this class's own speed model: _speed is clamped to 130 units a
+                    // second, so 260 plus a floor for jitter is generous by a factor of two and
+                    // still refuses everything a chat line can invent. Zoning legitimately
+                    // teleports, so a zone line disarms this for a moment.
+                    if (_x is double px && _y is double py && !_justZoned)
+                    {
+                        double gap = Math.Sqrt((nx - px) * (nx - px) + (ny - py) * (ny - py));
+                        double secs = Math.Max(0.25, (now - Interlocked.Read(ref _locTicks)) / (double)TimeSpan.TicksPerSecond);
+                        double could = 260 * secs + 60;
+                        if (gap > could)
+                        {
+                            // NOT silently. A reading refused is a fact about the log, and the raw
+                            // line is the only thing that identifies what is producing them.
+                            if (++_wildLocs <= 3)
+                                Log?.Invoke($"Ignoring a position that can't be real — it jumped {gap:0} units in "
+                                          + $"{secs:0.0}s, and nothing moves that fast. The line was: {ev.Text}");
+                            // …but not for ever. Three in a row means the refusal is now the thing
+                            // that is wrong — a real teleport, a zone I missed — so take it and say so.
+                            if (_wildLocs < 4) break;
+                            Log?.Invoke($"That's {_wildLocs} impossible positions in a row, so I'll believe this one "
+                                      + "and carry on from here.");
+                            // RE-ARMED. Leaving the counter above the threshold meant every later
+                            // reading sailed through too — the guard would have switched itself off
+                            // for the rest of the run and printed "that's 47 in a row" while doing it.
+                            _wildLocs = 0;
+                        }
+                        else _wildLocs = 0;
+                    }
+                    _justZoned = false;
                     // Heading = direction of the last movement segment, but only when the motion
                     // between the two locs was forward-dominant (strafes/backsteps corrupt it).
                     if (_x is double ox && _y is double oy
@@ -249,6 +291,13 @@ public sealed class HuntRole
                         }
                     }
                 }
+                break;
+            case LogEventKind.Zone:
+                // A zone really does teleport you, so the impossible-jump guard has to stand aside
+                // for exactly one reading — otherwise it would spend three refusals and a warning
+                // on the one movement in the game that is genuinely instant.
+                _justZoned = true;
+                _wildLocs = 0;
                 break;
             case LogEventKind.Consider:
                 _lastCon = LogEventParser.ConsiderReading(ev.Text);

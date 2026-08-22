@@ -746,37 +746,23 @@ public partial class MainWindow
                                         && QuestFind.ContentBox(captured.IconPixels!) is { } inner)
                                     {
                                         double area = inner.AreaFraction(captured.IconPixels!);
-                                        if (inner.LikelyNeighbours)
+                                        if (inner.RunsOffEdge || area < 0.55)
                                         {
+                                            // A FACT, not an instruction. The earlier version told
+                                            // people to shrink a square that was already exactly one
+                                            // inventory slot — which is the right pick and has to
+                                            // stay the right pick, because it must work for a fat
+                                            // item as well as a skinny one. A narrow item in a
+                                            // slot-sized square is not a mistake; it just means
+                                            // less of the square is the item, and the matcher
+                                            // already crops to where the item is.
                                             QstStatus.Text +=
-                                                $"  ⚠ But the picture in that square runs off {inner.Edges()}, and "
-                                              + $"only {inner.Ink * 100:0}% of the square is inked — so it is wider "
-                                              + "than one inventory slot and has caught part of what sits beside it. "
-                                              + "She'd match on that too: it works until the neighbouring items "
-                                              + "change, then stops. Re-pick with a smaller square (the wheel resizes "
-                                              + "it while you drag) so it fits inside one slot's frame.";
-                                            QstStatus.Foreground = Hex("#FFCB6B");
-                                        }
-                                        else if (inner.RunsOffEdge && area >= 0.55)
-                                        {
-                                            // Seen, but not diagnosable from pixels — see
-                                            // TooLooseWarning. Said in the neutral colour, because
-                                            // it may be a perfectly good tight pick.
-                                            QstStatus.Text +=
-                                                $"  Note: the picture reaches {inner.Edges()} of that square. If the "
-                                              + "square is bigger than one inventory slot it will be matching on your "
-                                              + "neighbouring items too — hold it against one slot and check it fits "
-                                              + "inside the frame.";
-                                        }
-                                        else if (area < 0.55)
-                                        {
-                                            QstStatus.Text +=
-                                                $"  ⚠ But {captured.Item} only fills {inner.W}×{inner.H} of that "
-                                              + $"{captured.IconPixels!.W}×{captured.IconPixels.H} square — "
-                                              + $"{area * 100:0}% of it. The rest is empty slot, so most of what "
-                                              + $"she compares is furniture every slot shares. About "
-                                              + $"{Math.Max(inner.W, inner.H) + 6} px would be a tighter fit.";
-                                            QstStatus.Foreground = Hex("#FFCB6B");
+                                                $"  Note: {captured.Item} fills {inner.W}×{inner.H} of that "
+                                              + $"{captured.IconPixels!.W}×{captured.IconPixels.H} square"
+                                              + (inner.RunsOffEdge ? $" and reaches {inner.Edges()} of it" : "")
+                                              + ". That's fine for a narrow item — she compares the middle of the "
+                                              + "square, where the item is, not the whole slot. Keep the square the "
+                                              + "size of one inventory slot.";
                                         }
                                     }
                                 }

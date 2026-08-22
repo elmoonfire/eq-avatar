@@ -176,6 +176,12 @@ public partial class MainWindow
     private IntPtr _pidFor = IntPtr.Zero;
     private int _gamePid, _diedPid;
     private DateTime _diedAt;
+    /// <summary>When the current grind/hunt started, or null. Only for the close-time pattern.</summary>
+    private DateTime? _runStartedAt;
+    /// <summary>The last moment the GAME was the foreground window. Hayden's theory is that the
+    /// client is being closed by something that happens while it is not focused and the character
+    /// is therefore idle — this is the measurement that tests it, and it costs one tick check.</summary>
+    private DateTime _gameFocusedAt = DateTime.UtcNow;
 
     /// <summary>
     /// Which of the two things just happened, in words — ASKED A FEW SECONDS LATE, on purpose.
@@ -208,16 +214,76 @@ public partial class MainWindow
             GrindLogLine(lost); LoginLogLine(lost);
             return;
         }
-        string note = WindowFinder.ProcessAlive(pid)
+        bool alive = WindowFinder.ProcessAlive(pid);
+        string note = CloseTimingNote(alive) + " " + (alive
             ? $"The game's process (pid {pid}) is still running, so the client did NOT close — it destroyed and "
               + "rebuilt its window, which EQ does on a resolution or full-screen change and on the loading screen "
               + "after a death. I'll re-attach on my own as soon as the new window appears."
             : $"The game's process (pid {pid}) is gone as well, so the client itself exited or crashed. That was not "
               + "this app — nothing in it ever closes the game. If it keeps happening while you're away, Windows' "
               + "Event Viewer → Windows Logs → Application will have the entry, and it's worth noting whether it "
-              + "follows a death or a zone.";
-        GrindLogLine(note);
-        LoginLogLine(note);
+              + "follows a death or a zone.");
+        GrindLogLine(note.Trim());
+        LoginLogLine(note.Trim());
+    }
+
+    /// <summary>
+    /// How long the run had been going, how long the game had been unfocused, and whether this
+    /// close looks like a TIMER or like a crash.
+    ///
+    /// A person cannot hold a week of overnight run-lengths in their head, and the app is the only
+    /// thing awake for all of them. Three closes within a few minutes of each other is a schedule —
+    /// a sleep setting, an idle kick, an instance expiring — and closes scattered across an hour
+    /// are a crash. Those two have nothing in common except the symptom, so guessing between them
+    /// is exactly the wrong thing to do when the numbers are free.
+    /// </summary>
+    private string CloseTimingNote(bool stillAlive)
+    {
+        // Belt and braces: the clock AND a run that is genuinely still going. The clock alone has
+        // several ways to be stale, and each new one would be discovered as a nonsense number in
+        // the very dataset this exists to keep clean.
+        if (_runStartedAt is not DateTime started
+            || !(_grind is { Running: true } || _hunt is { Running: true })) return "";
+        double mins = (DateTime.UtcNow - started).TotalMinutes;
+        double idle = (DateTime.UtcNow - _gameFocusedAt).TotalMinutes;
+
+        // A REBUILT window is not a close, and must not go in the history. The very next sentence
+        // this method's caller prints tells the user a rebuild is nothing to worry about; recording
+        // it as a close would poison the one dataset that answers whether the real closes follow a
+        // schedule. The narrative half still prints — "that was 40 minutes in" is true either way.
+        if (stillAlive)
+            // The clock is deliberately LEFT RUNNING here. A rebuild is not the end of anything —
+            // the grind is still going and the real close, when it comes, is the one worth timing.
+            // Clearing it above the return meant a resolution change or a death loading screen
+            // silently swallowed the measurement for that whole run.
+            return $"That was {mins:0} minutes into the grind"
+                 + (idle > 1 ? $", and the game had not been the focused window for {idle:0} of them." : ".");
+
+        _runStartedAt = null;
+        List<double> hist = _settings.GameCloseMinutes;
+        hist.Add(Math.Round(mins, 1));
+        if (hist.Count > 12) hist.RemoveRange(0, hist.Count - 12);
+        try { _settings.Save(); } catch { /* a diagnostic must never break a run */ }
+
+        string s = $"That was {mins:0} minutes into the grind";
+        if (idle > 1) s += $", and the game had not been the focused window for {idle:0} of them";
+        s += ".";
+        if (hist.Count >= 3)
+        {
+            double lo = double.MaxValue, hi = 0, sum = 0;
+            foreach (double v in hist) { lo = Math.Min(lo, v); hi = Math.Max(hi, v); sum += v; }
+            double avg = sum / hist.Count;
+            s += $" The last {hist.Count} closes came at {string.Join(", ", hist.ConvertAll(v => $"{v:0}"))} minutes"
+               + (hi - lo <= Math.Max(3, avg * 0.15)
+                   // A tight spread is the interesting answer, and it points somewhere a crash does
+                   // not: nothing crashes on a schedule.
+                   ? $" — that is CONSISTENT, around {avg:0} minutes every time, which is a timer rather than a "
+                     + "crash. Worth checking Windows' sleep and USB-suspend settings, and whether the zone or "
+                     + "instance has a lifetime."
+                   : ", which is scattered rather than regular — more like a crash than a timer.");
+        }
+        else s += $" I'll keep the times; after {3 - hist.Count} more I can say whether they're regular.";
+        return s;
     }
 
     private void AutoTargetEq()

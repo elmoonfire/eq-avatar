@@ -204,6 +204,11 @@ public partial class MainWindow
 
     private void EndRoleSession()
     {
+        // The close-time clock belongs to a RUNNING grind, and it is cleared HERE rather than in
+        // StopGrind_Click because a role can finish on its own — a repeat count reached, stop-on-
+        // death — and never pass through the Stop button. Left set, a grind that ended at 22:30 and
+        // a game quit at 06:00 would record a 450-minute "close" and wreck the spread test.
+        _runStartedAt = null;
         if (!Recorder.Active) return;
         int actions = Recorder.ActiveRole switch
         {

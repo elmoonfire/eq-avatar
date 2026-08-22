@@ -83,6 +83,17 @@ public sealed class AppSettings
     /// console and remembered here, so it doesn't collapse back on the next render.</summary>
     public double ConsoleHeight { get; set; } = 96;
 
+    /// <summary>
+    /// How many minutes a grind had been running each time the game window vanished under it.
+    ///
+    /// Hayden's idea, and a good one: a game that closes after a CONSISTENT interval is a timer —
+    /// a power setting, an idle kick, an instance expiring — and one that closes at random is a
+    /// crash. Nobody can hold those numbers in their head across a week of overnight runs, and the
+    /// app is the only thing present for all of them. Kept to the last dozen; the pattern is in the
+    /// spread, not in the history.
+    /// </summary>
+    public List<double> GameCloseMinutes { get; set; } = new();
+
     /// <summary>Make the roles narrate the numbers behind their decisions — match distances, click
     /// coordinates, the raw text an OCR read before anything parsed it. Off by default: these lines
     /// are voluminous enough to push the real narration out of the buffer, and they are only worth
@@ -325,6 +336,11 @@ public sealed class AppSettings
     /// migration that can't reach disk beats one that throws on startup.</summary>
     private void Migrate()
     {
+        // A collection property initialised at construction is still NULL if the file on disk names
+        // it with a null — a hand edit, a truncated write — because the deserialiser assigns over
+        // the initializer. The list is appended to from a UI timer, outside any try, so that would
+        // be a null reference on the dispatcher thread rather than a lost setting.
+        GameCloseMinutes ??= new List<double>();
         if (SwatchRev < 1)
         {
             if (IconSwatchPx == 32) IconSwatchPx = DefaultIconSwatchPx;   // 32 fitted no slot

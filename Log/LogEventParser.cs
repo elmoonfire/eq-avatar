@@ -50,13 +50,48 @@ public static class LogEventParser
         @"^\[(?<ts>[A-Za-z]{3}\s+[A-Za-z]{3}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\d{4})\]\s?(?<msg>.*)$",
         RegexOptions.Compiled);
 
+    /// <summary>The client's own position line. ANCHORED, like the loose one below and for the same
+    /// reason: the chat guard catches anything anyone SAYS, but an emote carries no verb at all, and
+    /// `/em Your Location is -1200, 400, 12` is one command. Once the timestamp is stripped, the
+    /// client always prints this at the start of the line and a person never can.</summary>
     private static readonly Regex Loc = new(
-        @"Your Location is\s+(?<a>-?\d+(?:\.\d+)?),\s*(?<b>-?\d+(?:\.\d+)?),\s*(?<c>-?\d+(?:\.\d+)?)",
+        @"^\s*Your Location is\s+(?<a>-?\d+(?:\.\d+)?),\s*(?<b>-?\d+(?:\.\d+)?),\s*(?<c>-?\d+(?:\.\d+)?)",
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
-    // Fallback: any three comma-separated signed decimals near the word "loc"/"position".
+    /// <summary>
+    /// Fallback for clients that word /loc differently: three signed decimals near the word.
+    ///
+    /// ANCHORED ON WORD BOUNDARIES, and the reason is a field failure that cost a character its
+    /// life. The first version was `(?:loc|location|position|coords?)` with no boundaries, so "loc"
+    /// matched inside **block**, **clock**, **locate**, **allocation** — and it was applied to every
+    /// line of a log that carries the whole server's chat. Anyone typing three numbers in General
+    /// gave this bot a new opinion about where its character was standing.
+    ///
+    /// ANCHORED AT THE START of the message too, which is the structural half of the fix. The
+    /// timestamp has already been stripped by then, so the CLIENT's own output begins with the
+    /// keyword while every line a person produced begins with a speaker's name. A blacklist of chat
+    /// verbs can always be got round — an emote carries no verb at all — and this cannot.
+    /// </summary>
     private static readonly Regex LocLoose = new(
-        @"(?:loc|location|position|coords?)\D{0,12}(?<a>-?\d+(?:\.\d+)?)[,\s]+(?<b>-?\d+(?:\.\d+)?)[,\s]+(?<c>-?\d+(?:\.\d+)?)",
+        @"^\s*(?:your\s+)?(?:loc|location|position|coords?)\b\D{0,12}(?<a>-?\d+(?:\.\d+)?)[,\s]+(?<b>-?\d+(?:\.\d+)?)[,\s]+(?<c>-?\d+(?:\.\d+)?)",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    /// <summary>
+    /// Somebody TALKING, as opposed to the client reporting a fact.
+    ///
+    /// This is the guard that matters. A position is a statement the client makes about your
+    /// character; every one of these lines is a statement a PERSON made, and a person may type
+    /// anything at all — including three numbers after the word "loc", which is in fact the single
+    /// most common thing anyone types in an EverQuest chat channel.
+    ///
+    /// The field evidence: a character parked in CAMP mode, which never moves, reported itself 42,
+    /// then 1215, then 1030, then 883 units from its own anchor, walked "home" each time, fell in
+    /// the water and drowned — on a server whose General channel is in the same log file. No amount
+    /// of navigation logic survives being told the wrong place; this is where it has to stop.
+    /// </summary>
+    private static readonly Regex Chatter = new(
+        @"(?:\btells\b|\btell\b|\bsays\b|\bsay\b|\bshouts\b|\bshout\b|\bauctions\b|\bauction\b"
+        + @"|\btold\b|\bwhispers\b|\bOOC\b|\bout of character\b)",
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
     private static readonly Regex Zone = new(
@@ -75,7 +110,13 @@ public static class LogEventParser
                 stamp = dt;
         }
 
-        Match loc = Loc.Match(msg);
+        // BOTH paths, not just the loose one. The first version guarded only the fallback on the
+        // reasoning that "Your Location is" is the client's own phrasing and could not be forged —
+        // which is wrong: `Soandso says, 'Your Location is 100, 200, 300'` is one paste away, and
+        // someone pasting their loc into a channel to ask for a corpse drag is not a griefer, it is
+        // Tuesday.
+        bool spoken = Chatter.IsMatch(msg);
+        Match loc = spoken ? Match.Empty : Loc.Match(msg);
         if (loc.Success &&
             double.TryParse(loc.Groups["a"].Value, out double a) &&
             double.TryParse(loc.Groups["b"].Value, out double b) &&
@@ -85,7 +126,10 @@ public static class LogEventParser
             return new LogEvent(stamp, LogEventKind.Location, msg, X: b, Y: a, Z: c);
         }
 
-        Match locLoose = LocLoose.Match(msg);
+        // The loose pattern is only ever tried on lines nobody SAID. The strict "Your Location is"
+        // above needs no such guard — it is the client's own words and a player cannot forge the
+        // whole phrase into a chat line without the chat markers this catches.
+        Match locLoose = spoken ? Match.Empty : LocLoose.Match(msg);
         if (locLoose.Success &&
             double.TryParse(locLoose.Groups["a"].Value, out double la) &&
             double.TryParse(locLoose.Groups["b"].Value, out double lb) &&
