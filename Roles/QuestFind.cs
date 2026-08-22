@@ -490,6 +490,18 @@ public static class QuestFind
     /// every icon up to 228 px, which is past any sane inventory slot on any display.</summary>
     public const int SearchPadCap = 40;
 
+    /// <summary>How well the real pixels have to correlate before a square IS the item. 0.85 sits
+    /// in the middle of a gap half the scale wide — a real copy scores over 0.97 even brighter or
+    /// highlighted, a different icon in the same palette about 0.44.</summary>
+    public const double PixelAccept = 0.85;
+    /// <summary>The colour signature's bar when it is only PROPOSING candidates for the pixels to
+    /// judge. Deliberately loose: a false candidate costs a fraction of a millisecond, a missed one
+    /// costs a cycle.</summary>
+    public const double CoarseProposeAt = 60;
+    /// <summary>Candidates correlated before giving up. Each is an alignment search, and a hand-in
+    /// needs ONE copy, not a census.</summary>
+    public const int MaxProposals = 220;
+
     /// <summary>
     /// The best correlation obtainable near a point, and where it was found.
     ///

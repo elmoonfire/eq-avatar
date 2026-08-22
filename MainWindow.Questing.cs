@@ -1327,6 +1327,45 @@ public partial class MainWindow
 
     private bool _hoverTestBusy;
 
+
+    /// <summary>
+    /// The best pixel match for a step, exactly as the runner finds it: colour proposes, pixels
+    /// judge. Returns where the best square sits, how well it matched, and whether the screen was
+    /// readable at all — so the hover test can put the cursor on the closest thing even when it
+    /// FAILS, which is the case someone is actually trying to look at.
+    /// </summary>
+    private (ScreenPoint At, double Ncc, bool Looked, bool Proposed, double Colour) BestPixelMatch(
+        QuestScript script, TurnInStep st)
+    {
+        using System.Drawing.Bitmap? frame = QuestFind.Capture(_grindTarget);
+        if (frame is null) return (new ScreenPoint(), -1, false, false, 999);
+        int wantW = (int)Math.Round(st.IconW * frame.Width), wantH = (int)Math.Round(st.IconH * frame.Height);
+        double bestN = -1; double bx = 0, by = 0; bool any = false;
+        int looked = 0;
+        foreach (QuestFind.IconHit h in QuestFind.ProposeIcons(
+                     frame, script.BagX, script.BagY, script.BagW, script.BagH,
+                     st.IconSig!, st.IconW, st.IconH, QuestFind.CoarseProposeAt))
+        {
+            if (++looked > QuestFind.MaxProposals) break;
+            (double ncc, int dx, int dy) = QuestFind.BestNcc(frame, h.X, h.Y, st.IconPixels!, wantW, wantH);
+            if (!any || ncc > bestN)
+            { bestN = ncc; bx = h.X + (double)dx / frame.Width; by = h.Y + (double)dy / frame.Height; any = true; }
+            if (ncc >= QuestFind.PixelAccept) break;
+        }
+        // The closest COLOUR distance when nothing was proposed — the number that separates "the
+        // bag rect is pointing at the wrong part of the screen" from "the item is genuinely gone".
+        double colour = 999;
+        if (!any)
+        {
+            QuestFind.IconHit? closest = QuestFind.FindIconInRect(
+                frame, script.BagX, script.BagY, script.BagW, script.BagH,
+                st.IconSig!, st.IconW, st.IconH);
+            colour = closest?.Dist ?? 999;
+        }
+        return any ? (new ScreenPoint { X = bx, Y = by }, bestN, true, true, colour)
+                   : (new ScreenPoint(), -1, true, false, colour);
+    }
+
     /// <summary>
     /// Walk the cursor through every picked point without clicking anything.
     ///
@@ -1369,7 +1408,40 @@ public partial class MainWindow
             {
                 string label = $"bag slot: {(st.Item.Length > 0 ? st.Item : "item")}";
                 ScreenPoint p = st.Slot;
-                if (script.SmartFind && script.BagSet && st.HasIcon)
+                // THE PIXEL PATH FIRST, because that is what the run does. This test existed to
+                // answer "are the coordinates right?" and was still answering it with the colour
+                // matcher after the run had moved on — so it would happily report FOUND for a
+                // square the run then rejects, on the one screen people come to when the run says
+                // it can't find things.
+                if (script.SmartFind && script.BagSet && st.HasPixels && st.HasIconSize && st.HasIcon)
+                {
+                    (ScreenPoint at, double ncc, bool looked, bool proposed, double colour) =
+                        BestPixelMatch(script, st);
+                    if (!looked) label += " — couldn't grab the screen, showing the fixed pick";
+                    else if (ncc >= QuestFind.PixelAccept)
+                    {
+                        p = at;
+                        label += $" — FOUND, pixels match {ncc * 100:0.0}%";
+                    }
+                    else if (!proposed)
+                    {
+                        // Nothing in the bag area even looked the right colour. The distance says
+                        // which kind of nothing: a big number means the dragged rect may not be
+                        // over your bags at all.
+                        label += $" — NOTHING like it in the bag area (closest colour {colour:0}, "
+                               + $"candidates need {QuestFind.CoarseProposeAt:0}), showing the fixed pick";
+                    }
+                    else
+                    {
+                        p = at;                 // hover the closest square, so you can SEE what it is
+                        label += ncc < 0
+                            ? " — found a candidate but couldn't read its pixels (too close to the window edge). "
+                              + "The cursor is on it."
+                            : $" — NO match: closest square is {ncc * 100:0.0}% and a copy needs "
+                              + $"{QuestFind.PixelAccept * 100:0}%. The cursor is on it — look at what's there.";
+                    }
+                }
+                else if (script.SmartFind && script.BagSet && st.HasIcon)
                 {
                     bool sliding = st.HasIconSize;
                     QuestFind.IconHit? hit = sliding
@@ -1383,7 +1455,7 @@ public partial class MainWindow
                     {
                         p = new ScreenPoint { X = hit.X, Y = hit.Y };
                         label += sliding
-                            ? $" — FOUND (match {hit.Dist:0})"
+                            ? $" — FOUND (colour match {hit.Dist:0}) — re-pick this slot to use the pixel matcher"
                             : $" — FOUND in cell {hit.Row + 1},{hit.Col + 1} (match {hit.Dist:0})";
                     }
                     else

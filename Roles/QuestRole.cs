@@ -158,6 +158,17 @@ public sealed class QuestRole
     /// that no longer existed — and the advice matters most when the score was unremarkable, which
     /// is exactly when the once-per-run ⚠ never fired.</summary>
     private string _lastMatch = "";
+    /// <summary>Where the closest square sat, as a percentage of the window — so "I can't find it"
+    /// can be checked against the screen instead of taken on trust.</summary>
+    private string _lastPos = "";
+    /// <summary>When NOTHING was even proposed, how far the closest square was on the colour
+    /// measure. A big number is the strongest evidence there is that the dragged bag rectangle
+    /// isn't over the bags at all.</summary>
+    private double _lastColour = -1;
+    /// <summary>Set when the pixels could not be READ at all. Deterministic — the same square fails
+    /// identically every attempt — so it stops the run at once instead of burning eight retries on
+    /// a geometry fault that no amount of trying can move.</summary>
+    private string _pixelUnreadable = "";
     /// <summary>The last scan went through the PIXEL matcher, so advice about the colour tolerance
     /// would be pointing at a dial that step never reads.</summary>
     private bool _usedPixels;
@@ -184,17 +195,11 @@ public sealed class QuestRole
     /// actually picked up and handed to the npc does work" — matches every confirmed hand-in in
     /// every log. If it doesn't confirm, the answer is the NEXT ITEM, not the same one again.
     /// </summary>
-    /// <summary>How well the real pixels have to match. 0.85 sits in the middle of a gap half the
-    /// scale wide — a real copy scores over 0.97 even brighter or highlighted, a different icon in
-    /// the same palette about 0.44 — so it is a threshold rather than a guess.</summary>
-    private const double NccAccept = 0.85;
-    /// <summary>The colour signature's bar, as a PROPOSER. Deliberately loose: a false candidate
-    /// costs a fraction of a millisecond and the pixels throw it out, while a missed one costs a
-    /// whole cycle.</summary>
-    private const double CoarsePropose = 60;
-    /// <summary>Candidate squares correlated before giving up. Each one is an alignment search —
-    /// hundreds of thousands of operations — and a hand-in needs ONE copy, not a census.</summary>
-    private const int MaxProposals = 220;
+    /// <summary>Both live on QuestFind, so the hover test and the run read the same numbers and
+    /// cannot drift apart — a test that answers a different question from the run proves nothing.</summary>
+    private const double NccAccept = QuestFind.PixelAccept;
+    private const double CoarsePropose = QuestFind.CoarseProposeAt;
+    private const int MaxProposals = QuestFind.MaxProposals;
 
     private const int MaxStepMisses = 1;
     private int _finished;
@@ -613,6 +618,9 @@ public sealed class QuestRole
         // signature, or one whose screen grab failed, skips the scan entirely, and a stale value
         // here would be quoted back as though it described the item just handed over.
         _lastMatch = "";
+        _lastPos = "";
+        _lastColour = -1;
+        _pixelUnreadable = "";
         _usedPixels = false;
 
         // Where the item ACTUALLY is right now. The picked slot is only the fallback: totems
@@ -711,20 +719,36 @@ public sealed class QuestRole
             else
             {
                 _usedPixels = true;
+                if (pick is not null && pick.Ncc < 0)
+                {
+                    // "I could not measure that" — a candidate clipped by the window edge, a failed
+                    // pixel lock, an unusable reference. It is NOT "the item isn't there", and it
+                    // must not be allowed to end a run as "you're out of them". Treated as a
+                    // gesture failure: narrated, retried, never used to conclude anything.
+                    _pixelUnreadable = $"couldn't compare {step.Item}'s pixels: the closest candidate, at "
+                                     + $"{pick.X * 100:0.0}%, {pick.Y * 100:0.0}% of the window, sits too near the "
+                                     + "edge of the game window for the reference to be laid over it. That is "
+                                     + "geometry, not luck — it will fail the same way every time. Drag the bag "
+                                     + "area in from the edge of the screen, or re-pick this item's icon with a "
+                                     + "smaller square.";
+                    return null;
+                }
                 // The three ways this ends are different facts and get different words. A negative
                 // correlation is BestNcc's "I couldn't read those pixels" sentinel, not a match of
                 // minus one hundred per cent.
                 _lastMatch = pick is null ? $"nothing proposed (closest colour {closest:0})"
                            : pick.Ncc < 0 ? "couldn't read the pixels"
                            : $"{pick.Ncc * 100:0.0}% pixel match";
+                if (pick is not null) _lastPos = $"{pick.X * 100:0.0}%, {pick.Y * 100:0.0}%";
+                else _lastColour = closest;
                 Log?.Invoke(pick is null
                     ? $"✖ no {step.Item} in the bag area — nothing in it even looks the right colour "
                       + $"(closest square is {closest:0} away, and a candidate has to be within {CoarsePropose:0})."
-                    : pick.Ncc < 0
-                      ? $"✖ couldn't compare {step.Item}'s pixels — the best candidate sits too close to the edge "
-                        + "of the game window to line the reference up against."
-                      : $"✖ no {step.Item} in the bag area — the closest square matches {pick.Ncc * 100:0.0}% "
-                        + $"of its pixels and a real copy matches over {NccAccept * 100:0}%.");
+                    : $"✖ no {step.Item} in the bag area — the closest square, at {_lastPos} of the window, matches "
+                      + $"{pick.Ncc * 100:0.0}% of its pixels and a real copy matches over {NccAccept * 100:0}%. "
+                      + "LOOK AT THAT SPOT: if one is sitting there, the reference has stopped matching it — a "
+                      + "stack's quantity number changes as the stack shrinks, and a highlighted or hovered slot is "
+                      + "drawn differently — so re-pick this item's slot from a plain, un-hovered copy.");
                 _emptyBagMiss = true;
                 return false;
             }
@@ -1192,6 +1216,9 @@ public sealed class QuestRole
             // offers to conclude "nothing gets through" and this would have needed two, which is
             // ~24 seconds. Two fruitless passes is the same standard of proof at the new cadence.
             int fruitlessPasses = 0;
+            // Consecutive passes that ran out of an item. Reset by any complete cycle, so a run
+            // that is working keeps its second chance for the pass that finally hits the wall.
+            int blockedPasses = 0;
             // Items offered toward a step's Qty since its last recorded completion.
             var offersToward = new Dictionary<TurnInStep, int>();
 
@@ -1316,11 +1343,16 @@ public sealed class QuestRole
                 int stepsDone = 0, stepsSkipped = 0;
                 // True while every step that gave up did so because the SCAN found nothing — the
                 // ordinary "you're out of items" ending, where no click ever happened.
-                bool scanFoundNothing = true;
                 int refusedSteps = 0;
+                // The item a scan couldn't find this pass, and whether it was the colour matcher
+                // that failed to find it. Drives the ending, which is where the advice belongs.
+                string? blockedItem = null;
+                bool blockedByColour = false, blockedHasRest = false, blockedOut = false;
+                string blockedPos = "";
+                double blockedColour = -1;
                 _assumedAnyThisPass = false;
                 List<TurnInStep> steps = _script.Steps.ToList();
-                for (int i = 0; i < steps.Count && !abort; i++)
+                for (int i = 0; i < steps.Count && !abort && !blockedOut; i++)
                 {
                     TurnInStep step = steps[i];
                     // Per STEP, not per miss: refusedSteps is compared against stepsSkipped, and
@@ -1340,8 +1372,17 @@ public sealed class QuestRole
                             // (WaitFocus above blocks until the game is back); a missing pick or a
                             // vanished window is not, and looping on those is just being quiet
                             // about being broken.
+                            if (_pixelUnreadable.Length > 0)
+                            {
+                                // NOT a gesture failure — no click was attempted. And not worth
+                                // retrying: a candidate clipped by the window edge is clipped by it
+                                // every time, so eight rounds of 600ms and a full bag scan each
+                                // would prove exactly what the first one did.
+                                Finish("Stopped: " + _pixelUnreadable);
+                                HumanizedMouse.MoveInstant(home.x, home.y);
+                                return;
+                            }
                             gestureFails++;
-                            scanFoundNothing = false;     // clicks happened; this was not an empty bag
                             Log?.Invoke($"⚠ couldn't complete the {step.Item} gesture: {_clickFailWhy} "
                                       + $"(attempt {gestureFails}).");
                             if (_clickFailWhy.Contains("isn't set") || _clickFailWhy.Contains("gone away")
@@ -1420,8 +1461,8 @@ public sealed class QuestRole
                         int misses = stepMisses.TryGetValue(step, out int m) ? m + 1 : 1;
                         stepMisses[step] = misses;
                         Stats.Misses++;
-                        if (!_emptyBagMiss) scanFoundNothing = false;
-                        if (_emptyBagMiss)
+                        bool scanEmpty = _emptyBagMiss;      // captured: the next attempt resets it
+                        if (scanEmpty)
                         {
                             Log?.Invoke($"✖ {step.Item}: bag scan found none.");
                             // "None in the bag" does not mean "none anywhere" while an item may be
@@ -1429,11 +1470,6 @@ public sealed class QuestRole
                             // GIVE button, not the bags. So this is not the ordinary "you're out of
                             // items" ending, whatever the scan says, and the ending must not claim
                             // it is.
-                            // Only while the server has never acknowledged anything. If hand-overs
-                            // HAVE registered, the items really are going somewhere and "you're out
-                            // of them" is the accurate half — suppressing it would send someone to
-                            // re-pick an NPC that was working.
-                            if (_maybeHolding && !_sawAnyOffer && Stats.HandIns == 0) scanFoundNothing = false;
                             WarnPossiblyHeld();
                         }
                         else
@@ -1487,11 +1523,51 @@ public sealed class QuestRole
                             if (refusedThisStep) refusedSteps++;
                             cycleComplete = false;
                             stepMisses[step] = 0;             // next pass gets its own attempts
-                            Log?.Invoke(i + 1 < steps.Count
-                                ? $"↷ giving up on {step.Item} for now and trying {steps[i + 1].Item} — the NPC "
-                                  + "only takes the item his current quest stage asks for, so if this stage is "
-                                  + "already done, the next item is the one he wants."
-                                : $"↷ {step.Item} went unanswered and it's the last item in the cycle.");
+
+                            // OUT OF THIS ITEM — stop the cycle here, don't walk on to the next
+                            // step. Hayden's rule, and it is right: the NPC takes one item per
+                            // quest STAGE, and a cycle is an ORDERED list, so with no totem there
+                            // is no stage two and offering the Orders can do nothing but get them
+                            // handed back. His log shows exactly that, twice, before this changed.
+                            //
+                            // I first scoped this to steps sharing the same Quest string and that
+                            // was backwards: the Kerra loop IS the chain, and its two steps belong
+                            // to two DIFFERENT quests — the Totem finishes "Something is Wrrrong",
+                            // which assigns "This Means Warrr", whose Orders re-open the first. So
+                            // quest identity is precisely the wrong key. The cycle's ORDER is the
+                            // relationship, and the order is what the user typed.
+                            //
+                            // "Can't find it" and "he won't take it" stay different facts: a step
+                            // that was found and REFUSED still moves on, because that is the case
+                            // where the stage really may already be past this item.
+                            if (scanEmpty)
+                            {
+                                blockedItem = step.Item.Length > 0 ? step.Item : "that item";
+                                blockedByColour = !_usedPixels;
+                                blockedHasRest = i + 1 < steps.Count;
+                                // SNAPSHOT the evidence here. Every one of these is reset at the
+                                // top of the next HandOverAsync, so reading them at the pass end
+                                // would read the LAST step's scan — and in a two-step cycle, which
+                                // is every real script, that silently drops the one thing worth
+                                // saying: where the closest square actually was.
+                                blockedPos = _lastPos;
+                                blockedColour = _lastColour;
+                                // And leave the loop. The break below only ends the RETRY loop —
+                                // its own comment says "next STEP" — so without this the runner
+                                // walked straight on and offered the next item anyway, which is
+                                // precisely what Hayden asked it to stop doing.
+                                blockedOut = true;
+                                Log?.Invoke(blockedHasRest
+                                    ? $"↷ out of {step.Item} — and nothing later in the cycle is reachable without "
+                                      + "it, so I'm not offering the rest."
+                                    : $"↷ out of {step.Item}.");
+                            }
+                            else
+                                Log?.Invoke(i + 1 < steps.Count
+                                    ? $"↷ giving up on {step.Item} for now and trying {steps[i + 1].Item} — the NPC "
+                                      + "only takes the item his current quest stage asks for, so if this stage is "
+                                      + "already done, the next item is the one he wants."
+                                    : $"↷ {step.Item} went unanswered and it's the last item in the cycle.");
                             break;                            // next STEP, not the end of the run
                         }
                         await Task.Delay(1500, ct);           // retry THIS step
@@ -1514,6 +1590,68 @@ public sealed class QuestRole
                     await Task.Delay(1200, ct);
                     continue;
                 }
+                // OUT OF AN ITEM. Placed AFTER the fruitless-pass retry above, so a bag that
+                // flickered, a loot window that covered it for one frame, or a capture taken
+                // mid-redraw still gets the second look that block grants — and before the generic
+                // endings, because "you have run out of X" is more specific than any of them and it
+                // is the one the user asked for.
+                if (!abort && blockedItem is not null && ++blockedPasses < 2)
+                {
+                    // ONE more look before ending a night's grind on a single frame. The fruitless
+                    // -pass retry above can't cover this: it is gated on nothing having got
+                    // through, and in the steady state of a working run something always has — so
+                    // in Hayden's actual cycle (totem in, orders missing) it never fires. A loot
+                    // window over the bags, a capture taken mid-redraw or a bag flickering shut for
+                    // one frame all look exactly like an empty bag, and all three are gone a second
+                    // later. Two passes agreeing is cheap; one pass deciding is not.
+                    // A pass that got something through is not evidence of a fruitless run, and
+                    // this is the first `continue` that can skip that reset — the fruitless block
+                    // above is itself gated on stepsDone == 0, so it never could.
+                    if (stepsDone > 0) fruitlessPasses = 0;
+                    Log?.Invoke($"↷ couldn't find {blockedItem} that pass. Looking once more before calling it — "
+                              + "one empty scan can be a loot window or a redraw, and this is the answer that ends "
+                              + "the run.");
+                    await Task.Delay(1200, ct);
+                    continue;
+                }
+                if (!abort && blockedItem is not null)
+                {
+                    string why = $"out of {blockedItem}."
+                               + (blockedHasRest
+                                   ? " Nothing later in the cycle is reachable without it — he only takes the item "
+                                   + "the current stage asks for — so the rest wasn't offered."
+                                   : "");
+                    // Every other thing that looks exactly like an empty bag, in the order it is
+                    // worth checking. The generic ending used to carry these and it must not lose
+                    // them just because a more specific one now fires first.
+                    if ((_script.OpenBagsKey ?? "").Trim().Length == 0)
+                        why += " If your bags were SHUT, that looks identical to an empty one from here — set an "
+                             + "open-bags key on this card and she'll make sure before believing it.";
+                    if (blockedByColour)
+                        why += " This item is still matched by COLOUR AVERAGE, the measure that can't tell your item "
+                             + "from a look-alike. Re-pick its slot once and she'll match its actual pixels instead.";
+                    else if (blockedPos.Length > 0)
+                        why += $" If you can SEE more of them, look at {blockedPos} of the game window — that is the "
+                             + "closest thing to your reference in the bag area. If a copy is sitting right there, "
+                             + "the reference has stopped matching it (a stack's quantity number changes as the "
+                             + "stack shrinks, and a highlighted slot is drawn differently) and re-picking the slot "
+                             + "will fix it. If that spot is empty or holds something else, they really have run "
+                             + "out of the area you dragged.";
+                    else if (blockedColour >= 0)
+                        // NOTHING was even proposed. That is the strongest signal there is that the
+                        // dragged rectangle isn't over the bags — worth saying, because the advice
+                        // for it is completely different from "re-pick the icon".
+                        why += $" Nothing in the bag area came within {blockedColour:0} of the reference on colour, "
+                             + $"and a candidate only has to be within {CoarsePropose:0} — so if you can see copies "
+                             + "on screen, the BAG AREA is probably the pick that's wrong. Re-drag it around the "
+                             + "bags you actually have open.";
+                    if (_maybeHolding && _script.WaitForConfirm)
+                        why += " Also check the cursor: an item may be stuck to it, which the bag scan cannot see.";
+                    Finish($"Stopped after {Stats.Cycles} cycle(s) / {Stats.HandIns} hand-in(s): " + why);
+                    HumanizedMouse.MoveInstant(home.x, home.y);
+                    return;
+                }
+
                 if (!abort && stepsDone == 0 && stepsSkipped > 0)
                 {
                     // The advice is only worth printing if the branch matches what actually
@@ -1538,10 +1676,6 @@ public sealed class QuestRole
                                   ? "."
                                   : ", which is a COLOUR average — re-pick that item's slot and she'll match its "
                                   + "actual pixels instead, which is the change that stops the wrong item qualifying.");
-                    else if (scanFoundNothing)
-                        why = "Nothing was ever offered: the bag scan couldn't find these items to pick up. Either "
-                            + "you're out of them, or the bags aren't open (set an open-bags key on this card), or "
-                            + "the icon signatures need re-taking — re-pick each item's slot with a tight box.";
                     else if (!_sawAnyOffer && Stats.HandIns == 0)
                         why = "The log IS being read — chat and buffs came through — and in all that time it never "
                             + "printed a hand-over line, not even a wrong one. So no trade ever completed, which "
@@ -1577,6 +1711,7 @@ public sealed class QuestRole
                 if (cycleComplete)
                 {
                     partialRun = 0;
+                    blockedPasses = 0;                    // a complete cycle proves the bag is fine
                     Stats.Cycles++;
                     if (!_assumedAnyThisPass) _script.LifetimeCompleted++;
                     Log?.Invoke($"— cycle {Stats.Cycles} complete —");
