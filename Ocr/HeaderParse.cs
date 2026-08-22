@@ -105,6 +105,12 @@ public static class HeaderParse
         return i == f.Length && found.Count > 0 ? found : null;
     }
 
+    /// <summary>Is this token exactly one of the game's class codes? Exact, not fuzzy — the fuzzy
+    /// matcher exists to rescue an OCR read, and this exists to check what has already been
+    /// written down.</summary>
+    public static bool IsClassCode(string? token)
+        => token is not null && Array.IndexOf(ClassCodes, token.Trim().ToUpperInvariant()) >= 0;
+
     /// <summary>Edit distance, capped — we only ever care whether it is 0, 1, or more.</summary>
     private static int Distance(string a, string b)
     {
@@ -186,7 +192,15 @@ public static class HeaderParse
                 if (Segment(tokens[j], 3 - codes.Count) is { } many) { codes.AddRange(many); continue; }
                 break;
             }
-            if (codes.Count == 0) continue;
+            // ALL THREE, OR THIS WASN'T THE HEADER.
+            //
+            // A loadout in EQ Legends is three classes; the game never shows one. So a read that
+            // recovered a single code did not find a one-class loadout, it found two thirds of a
+            // three-class one and lost the rest to the OCR — and accepting it wrote a phantom
+            // "just a MAG" into the character's permanent loadout history, where it sat in the
+            // menu next to the real ones looking exactly as authoritative. Refusing costs a scan
+            // that has to be repeated; accepting costs a wrong answer that never goes away.
+            if (codes.Count < 3) continue;
 
             level = lv;
             classes = string.Join("/", codes);

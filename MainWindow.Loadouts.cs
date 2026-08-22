@@ -232,23 +232,59 @@ public partial class MainWindow
             FontSize = 10,
             Margin = new Thickness(0, 1, 0, 3),
         });
+        // ONE CHIP PER CLASS, because in this game a loadout does not have a level — three classes
+        // do, and the loadout plays at the lowest of them. A single "Lv 30" beside PAL/MNK/ENC
+        // hides the only thing worth knowing: whether the 30 is the Paladin or the Enchanter, and
+        // therefore whether swapping one class out would take the whole loadout back to 50.
+        //
+        // An exact number is shown plain; a bound is shown as "≥ n" and says so on hover. The
+        // difference is not pedantry — "ENC is 30" and "ENC is at least 30" lead to different
+        // decisions about what to play next, and the app only ever sees the effective level.
+        int playedAt = _loadouts.PlayedAt(l);          // once, not once per class
         var meta = new StackPanel { Orientation = Orientation.Horizontal };
-        meta.Children.Add(new Border
+        foreach (string cls in l.Classes)
         {
-            Background = B("#152033"),
-            BorderBrush = B("#2A3B55"),
-            BorderThickness = new Thickness(1),
-            CornerRadius = new CornerRadius(999),
-            Padding = new Thickness(8, 1, 8, 1),
-            Child = new TextBlock { Text = "Lv " + Math.Max(1, l.Level), Foreground = B("#B8C6D9"), FontSize = 11 },
+            (int lv, bool exact) = _loadouts.LevelOf(l, cls);
+            bool binding = exact && lv > 0 && lv == playedAt && l.Classes.Count > 1;
+            string full = ClassAnim.Canonical(cls) ?? cls;
+            meta.Children.Add(new Border
+            {
+                Background = B(binding ? "#2A1A16" : "#152033"),
+                BorderBrush = B(binding ? "#7A4A2A" : "#2A3B55"),
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(999),
+                Padding = new Thickness(7, 1, 7, 1),
+                Margin = new Thickness(0, 0, 5, 0),
+                ToolTip = lv <= 0
+                    ? $"{full} — no level read yet"
+                    : exact
+                      ? $"{full} is level {lv}" + (binding ? " — the lowest of the three, so the whole loadout plays at it" : "")
+                      : $"{full} is at LEAST {lv}: it has been in a loadout that played at {lv}, and a loadout plays "
+                        + "at its weakest class. Its real level could be higher — nothing on screen shows a class's "
+                        + "own level.",
+                Child = new TextBlock
+                {
+                    Text = lv <= 0 ? cls : $"{cls} {(exact ? "" : "≥")}{lv}",
+                    Foreground = B(binding ? "#FFCB6B" : "#B8C6D9"),
+                    FontSize = 11,
+                },
+            });
+        }
+        text.Children.Add(meta);
+
+        var foot = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 3, 0, 0) };
+        foot.Children.Add(new TextBlock
+        {
+            Text = playedAt > 0 ? $"plays at Lv {playedAt}" : "level not read yet",
+            Foreground = B("#7E8AA0"), FontSize = 10, VerticalAlignment = VerticalAlignment.Center,
         });
         if (!string.IsNullOrWhiteSpace(l.Race))
-            meta.Children.Add(new TextBlock
+            foot.Children.Add(new TextBlock
             {
-                Text = l.Race, Foreground = B("#7E8AA0"), FontSize = 11,
-                Margin = new Thickness(8, 0, 0, 0), VerticalAlignment = VerticalAlignment.Center,
+                Text = " · " + l.Race, Foreground = B("#7E8AA0"), FontSize = 10,
+                VerticalAlignment = VerticalAlignment.Center,
             });
-        text.Children.Add(meta);
+        text.Children.Add(foot);
         Grid.SetColumn(text, 1);
         row.Children.Add(text);
 
@@ -261,7 +297,9 @@ public partial class MainWindow
             Margin = new Thickness(0, 4, 0, 0),
             Cursor = Cursors.Hand,
             Child = row,
-            ToolTip = $"Last seen {l.LastSeen:d MMM HH:mm} — swap to it in game and read your inventory to make it current",
+            ToolTip = $"{l.Display} — last seen {l.LastSeen:d MMM HH:mm}. A loadout plays at its WEAKEST class's "
+                    + "level; the others keep their own and get them back when you swap the weak one out. Swap to "
+                    + "this loadout in game and read your inventory to make it current.",
         };
         card.MouseEnter += (_, _) => { card.Background = B("#162030"); card.BorderBrush = B("#3A4A66"); };
         card.MouseLeave += (_, _) => { card.Background = B("#111826"); card.BorderBrush = B("#243044"); };

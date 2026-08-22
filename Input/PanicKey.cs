@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 
@@ -28,16 +29,6 @@ public static class PanicKey
     private const int WH_KEYBOARD_LL = 13;
     private const int WM_KEYDOWN = 0x0100;
     private const int WM_SYSKEYDOWN = 0x0104;
-    private const int WM_KEYUP = 0x0101;
-    private const int WM_SYSKEYUP = 0x0105;
-    private const int VK_LSHIFT = 0xA0, VK_RSHIFT = 0xA1;
-    /// <summary>KBDLLHOOKSTRUCT.flags bit 4: this event was SYNTHESISED by SendInput rather than
-    /// pressed by a person. Offset 8 in the struct, after vkCode and scanCode.</summary>
-    private const int LLKHF_INJECTED = 0x10;
-    private const int FlagsOffset = 8;
-
-    /// <summary>Is a REAL shift key down — one a person is holding, not one this app injected?</summary>
-    private static bool _realShift;
 
     private delegate IntPtr HookProc(int code, IntPtr wParam, IntPtr lParam);
 
@@ -46,34 +37,6 @@ public static class PanicKey
     [DllImport("user32.dll")] private static extern bool UnhookWindowsHookEx(IntPtr hook);
     [DllImport("user32.dll")] private static extern IntPtr CallNextHookEx(IntPtr hook, int code, IntPtr wParam, IntPtr lParam);
     [DllImport("kernel32.dll")] private static extern IntPtr GetModuleHandle(string? name);
-    [DllImport("user32.dll")] private static extern short GetAsyncKeyState(int vKey);
-    private const int VK_SHIFT = 0x10;
-
-    /// <summary>
-    /// Let SHIFT + the panic key through untouched, because something else now owns that
-    /// combination.
-    ///
-    /// This hook is deliberately modifier-blind — it fires on the key itself, whoever else has
-    /// registered what — and that is exactly right for a panic key. But it means that the moment
-    /// any Shift+F12 binding exists, pressing it panics: RegisterHotKey would deliver the new
-    /// binding AND this hook would stop everything, in an order nobody controls.
-    ///
-    /// So the exception is narrow and it is COUPLED TO REALITY: it is only turned on when the
-    /// Shift+F12 registration actually succeeded. If that registration lost the race to another
-    /// app, this stays off and bare-modifier-blind behaviour is restored, because a panic key that
-    /// declines to fire in favour of a binding that does not exist is the worst of both.
-    ///
-    /// AND IT ONLY EVER STANDS ASIDE FOR A SHIFT A PERSON IS HOLDING. This app injects shift
-    /// constantly — ChatTyper holds it for every capital letter of every /say, and a bound chord
-    /// like alt+shift+B holds it too — and asking the SYSTEM whether shift is down cannot tell the
-    /// difference. That version had the panic key dying in the worst possible window: while the bot
-    /// is typing into the game is exactly when someone reaches for F12, and in that moment the
-    /// injected shift would suppress this hook AND stop RegisterHotKey's bare-F12 registration from
-    /// matching, so BOTH paths would fail together and Shift+F12's grind toggle would fire instead
-    /// — a partial stop, silently. The two paths have to stay independent, so this one tracks real
-    /// keystrokes and ignores injected ones.
-    /// </summary>
-    public static bool IgnoreWithShift { get; set; }
 
     // Static on purpose — see the class comment. Losing this delegate to the GC is a process crash.
     private static HookProc? _proc;
@@ -83,6 +46,39 @@ public static class PanicKey
     // re-seat. _onPanic is what the callback reads; this is what the intent remembers.
     private static Action? _onPanicKeep;
     private static uint _vk;
+
+    /// <summary>
+    /// Other keys to WATCH — observed as they pass, never taken away from the game.
+    ///
+    /// This is why they live here rather than in RegisterHotKey. Registering a bare key claims it
+    /// system-wide and SWALLOWS it: bind F7 to a hotbar slot in game, open this app, and that slot
+    /// silently stops working until the app closes — a symptom nobody would think to blame on a bot
+    /// launcher. The hook this class already runs sees every key without taking any, which is the
+    /// property the class comment above calls out as the reason it exists. It also removes the
+    /// "another app got there first" failure entirely, which is how the last start key was lost.
+    ///
+    /// The cost is that a hook sees keys everywhere, so the handler — not this class — decides
+    /// whether the press was meant for the game. Starting a grind because someone hit F7 in a text
+    /// editor would be worse than not having the key at all.
+    /// </summary>
+    /// COPY-ON-WRITE, so the callback never takes a lock. A low-level hook that overruns Windows'
+    /// LowLevelHooksTimeout has the whole chain SILENTLY REMOVED — panic key included, with no
+    /// error and no symptom — which is the exact death this class was built to prevent. Today the
+    /// only callers are on the hook's own thread and a lock would never contend; publishing a new
+    /// array instead means that stays true however this is called next year.
+    private static volatile (uint Vk, Action Act)[] _watch = Array.Empty<(uint, Action)>();
+    private static readonly object _watchGate = new();
+
+    public static void Watch(uint vk, Action onKey)
+    {
+        lock (_watchGate)
+        {
+            var next = new List<(uint, Action)>(_watch.Length + 1);
+            foreach ((uint w, Action a) in _watch) if (w != vk) next.Add((w, a));
+            next.Add((vk, onKey));
+            _watch = next.ToArray();
+        }
+    }
 
     /// <summary>Install the watcher. `onPanic` is invoked from inside the input pipeline — it must
     /// only POST (Dispatcher.BeginInvoke) and return. Safe to call once; re-calls are ignored.</summary>
@@ -130,6 +126,10 @@ public static class PanicKey
 
     public static void Uninstall()
     {
+        // The watched keys go with the hook. Refresh() deliberately does NOT clear them — the
+        // 30-second re-seat heartbeat runs through it, and dropping the grind keys every time the
+        // hook was re-seated would make them work for half a minute at a time.
+        _watch = Array.Empty<(uint, Action)>();
         _wanted = false;
         _onPanicKeep = null;
         if (_hook == IntPtr.Zero) return;
@@ -142,32 +142,31 @@ public static class PanicKey
     private static IntPtr Callback(int code, IntPtr wParam, IntPtr lParam)
     {
         // code < 0 must be passed straight through, per contract. And everything here is deliberately
-        // cheap: read two ints, compare, post. The actual stopping happens on the UI thread.
+        // cheap: read one int, compare, post. The actual stopping happens on the UI thread.
         if (code >= 0)
         {
             int msg = wParam.ToInt32();
-            try
+            if (msg is WM_KEYDOWN or WM_SYSKEYDOWN)
             {
-                uint vk = (uint)Marshal.ReadInt32(lParam);
-                bool injected = (Marshal.ReadInt32(lParam, FlagsOffset) & LLKHF_INJECTED) != 0;
-
-                // Track the real shift key. Injected presses are this app's own and are ignored —
-                // they must not be able to stand the panic key down.
-                if (!injected && vk is VK_SHIFT or VK_LSHIFT or VK_RSHIFT)
-                    _realShift = msg is WM_KEYDOWN or WM_SYSKEYDOWN;
-
-                if (msg is WM_KEYDOWN or WM_SYSKEYDOWN && vk == _vk)
+                try
                 {
-                    // BOTH have to agree before the panic stands aside, and they disagree in the
-                    // safe direction. A key-up this hook never saw (it was re-seated mid-press, or
-                    // the press happened during an alt-tab) would leave _realShift stuck true and
-                    // the panic key dead — so the system's own answer gets a veto. If either says
-                    // no shift, the panic fires.
-                    bool stepAside = IgnoreWithShift && _realShift && (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
-                    if (!stepAside) _onPanic?.Invoke();
+                    // MODIFIER-BLIND, and deliberately back to being so. A previous release shared
+                    // this key with Shift+F12 and had to teach the hook to stand aside for shift —
+                    // which meant reasoning about WHOSE shift it was, since this app holds shift
+                    // itself for every capital letter it types, and getting that wrong killed both
+                    // panic paths at once. The grind now has its own quiet function keys and this
+                    // watcher has its one job back.
+                    uint vk = (uint)Marshal.ReadInt32(lParam);
+                    // THE PANIC KEY FIRST, and on its own terms. Whatever else this hook has been
+                    // asked to watch, nothing may sit in front of the one key that has to work.
+                    if (vk == _vk) { _onPanic?.Invoke(); }
+                    else
+                    {
+                        foreach ((uint w, Action a) in _watch) if (w == vk) { a(); break; }
+                    }
                 }
+                catch { /* a panic key that crashes the input pipeline is worse than none */ }
             }
-            catch { /* a panic key that crashes the input pipeline is worse than none */ }
         }
         return CallNextHookEx(_hook, code, wParam, lParam);
     }

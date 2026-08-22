@@ -663,21 +663,21 @@
                             </Grid.ColumnDefinitions>
                             <Button Grid.Column="0" Click="StartGrind_Click" Padding="0" Margin="0,0,8,0" Cursor="Hand"
                                     BorderBrush="#2C8C55" BorderThickness="1.6" Background="#0B121E"
-                                    ToolTip="Start the selected hunting mode. Shift+F12 does the same from anywhere, even with the game focused. EverQuest must be running.">
+                                    ToolTip="Start the selected hunting mode. F7 does the same from anywhere, even with the game focused. EverQuest must be running.">
                                 <Grid ClipToBounds="True">
                                     <Image x:Name="ArtStart" Stretch="UniformToFill" Height="132"/>
                                     <Border VerticalAlignment="Bottom" Background="#C8060B10" Padding="8,4">
-                                        <TextBlock Text="▶  START  (Shift+F12)" FontWeight="Bold" FontSize="12.5" Foreground="#7CE38B" HorizontalAlignment="Center"/>
+                                        <TextBlock Text="▶  START  (F7)" FontWeight="Bold" FontSize="12.5" Foreground="#7CE38B" HorizontalAlignment="Center"/>
                                     </Border>
                                 </Grid>
                             </Button>
                             <Button Grid.Column="1" Click="StopGrind_Click" Padding="0" Margin="0,0,8,0" Cursor="Hand"
                                     BorderBrush="#7A6320" BorderThickness="1.6" Background="#0B121E"
-                                    ToolTip="Stop everything. F12 does the same from anywhere, even with the game focused.">
+                                    ToolTip="Stop everything. F8 stops the grind and F12 stops everything — both work from anywhere, even with the game focused.">
                                 <Grid ClipToBounds="True">
                                     <Image x:Name="ArtStop" Stretch="UniformToFill" Height="132"/>
                                     <Border VerticalAlignment="Bottom" Background="#C8060B10" Padding="8,4">
-                                        <TextBlock Text="■  STOP  (F12)" FontWeight="Bold" FontSize="13.5" Foreground="#FFCB6B" HorizontalAlignment="Center"/>
+                                        <TextBlock Text="■  STOP  (F8)" FontWeight="Bold" FontSize="13.5" Foreground="#FFCB6B" HorizontalAlignment="Center"/>
                                     </Border>
                                 </Grid>
                             </Button>

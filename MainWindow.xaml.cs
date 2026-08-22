@@ -99,11 +99,11 @@ public partial class MainWindow : Window
     private const int PANIC_HOTKEY_ID = 0x4551;   // 'EQ'
     private const int PROBE_HOTKEY_ID = 0x4552;   // repeat last Input-probe action while the game is focused
     private const int MERGE_HOTKEY_ID = 0x4553;   // Auto Merge: start/stop the bag sweep without leaving the game
-    private const int GRIND_HOTKEY_ID = 0x4554;   // Grind/Hunt: start/stop without leaving the game (Shift+F12)
     private const int WM_HOTKEY = 0x0312;
     private const uint VK_F12 = 0x7B;
     private const uint VK_F9 = 0x78;
-    private const uint MOD_ALT = 0x0001, MOD_CONTROL = 0x0002, MOD_SHIFT = 0x0004;
+    private const uint MOD_ALT = 0x0001, MOD_CONTROL = 0x0002;
+    private const uint VK_F7 = 0x76, VK_F8 = 0x77;
     private const uint VK_M = 0x4D;
     private Action? _lastProbe;                   // captured so Ctrl+Alt+F9 can re-fire it in-game
     private IntPtr _hwnd;
@@ -170,48 +170,53 @@ public partial class MainWindow : Window
         // would be swallowed out of the middle of anything the user typed in game.
         RegisterHotKey(_hwnd, MERGE_HOTKEY_ID, MOD_CONTROL | MOD_ALT, VK_M);
 
-        // SHIFT+F12 starts and stops the grind, so a run can be started from inside the game.
+        // F7 STARTS THE GRIND, F8 STOPS IT — watched, not claimed.
         //
-        // Sharing a key with the panic button is deliberate — one key, one place on the keyboard,
-        // shift for "go" and bare for "stop" — but it needs the low-level watcher's cooperation,
-        // because that watcher is modifier-BLIND on purpose and would otherwise panic on the very
-        // press meant to start a run. The exception is switched on only if this registration
-        // actually succeeded: if another app owns Shift+F12, the panic key keeps its full,
-        // unconditional coverage rather than standing aside for a binding that isn't there.
-        bool grindKey = RegisterHotKey(_hwnd, GRIND_HOTKEY_ID, MOD_SHIFT, VK_F12);
-        Input.PanicKey.IgnoreWithShift = grindKey;
-        if (grindKey)
-            Diag.BotLog.Log("app", "Shift+F12 starts and stops the grind; bare F12 still stops everything");
-        else
-        {
-            // NAMED, like every other hotkey failure in this method. A start key that silently
-            // isn't there is indistinguishable from a bot that ignores you.
-            const string why = "⚠ Shift+F12 couldn't be claimed — another app owns it, so starting the grind from "
-                             + "inside the game won't work. Use the Start button. (Bare F12 still stops everything.)";
-            ActivityLog.Record("Grind", why);
-        }
+        // They used to be one key, Shift+F12, sharing with the panic button. It did not work — the
+        // registration lost a race nobody could see — and making the sharing safe took three rounds
+        // of review findings on the one feature that is not allowed to regress. Two quiet function
+        // keys remove the question.
+        //
+        // And they go through the low-level WATCHER rather than RegisterHotKey, because a bare
+        // registration claims a key system-wide and SWALLOWS it: bind F7 to a hotbar slot in game,
+        // open this app, and that slot stops working until it closes — with nothing on screen to
+        // connect the two. The watcher observes without taking, and cannot lose a race to another
+        // app either. The price is that it sees keys everywhere, so each handler checks the press
+        // was aimed at the game before acting.
+        Input.PanicKey.Watch(VK_F7, () => Dispatcher.BeginInvoke(new Action(StartGrindFromHotkey)));
+        Input.PanicKey.Watch(VK_F8, () => Dispatcher.BeginInvoke(new Action(StopGrindFromHotkey)));
+        Diag.BotLog.Log("app", "F7 starts the grind and F8 stops it while EverQuest is in front; "
+                             + "F12 stops everything from anywhere. None of the three are taken away from the game.");
     }
 
-    /// <summary>Start or stop the grind/hunt. The Shift+F12 target, so it must be safe to call with
-    /// the Grind page never having been opened and with something else already running.</summary>
-    private void ToggleGrindRun()
+    /// <summary>Was that key press meant for us? The watcher sees every key in the system, so a
+    /// start key must not fire because someone hit F7 in a browser. The game being in front — or
+    /// this app, so the buttons and the keys agree — is the whole test.</summary>
+    private bool AimedAtGame()
     {
-        if (_grind is { Running: true } || _hunt is { Running: true })
-        {
-            StopGrind_Click(this, new RoutedEventArgs());
-            ShowToast("Grind stopped (Shift+F12)");
-            return;
-        }
+        IntPtr fg = GetForegroundWindow();
+        return fg != IntPtr.Zero && (fg == _grindTarget || fg == _hwnd);
+    }
+
+    private void StopGrindFromHotkey()
+    {
+        if (!AimedAtGame()) return;
+        if (_grind is not { Running: true } && _hunt is not { Running: true }) return;
+        StopGrind_Click(this, new RoutedEventArgs());
+        ShowToast("Grind stopped (F8)");
+    }
+
+    /// <summary>Start the grind/hunt from F7. Must be safe to call with the Grind page never having
+    /// been opened, and with something else already running.</summary>
+    private void StartGrindFromHotkey()
+    {
+        if (!AimedAtGame()) return;
+        // SILENTLY, like the stop key. A held key auto-repeats about thirty times a second, and
+        // every repeat after the first would land on "already running" — dozens of toasts, the
+        // first of them arriving milliseconds after the start and flatly contradicting it.
+        if (_grind is { Running: true } || _hunt is { Running: true }) return;
         if (_questRun is { Running: true } || _questStarting || _mergeRun is { Running: true })
-        { ShowToast("Something else is running — Stop (F12) first"); return; }
-        // NOT WITHIN A SECOND OF A PANIC. While this app is injecting shift — every capital letter
-        // of every /say — a BARE F12 press reaches the low-level hook (which correctly ignores the
-        // injected shift and panics) and ALSO matches the Shift+F12 registration, because the
-        // system's keyboard state does have shift down. Both arrive on this thread, panic first,
-        // and by then Stop() has already cancelled synchronously — so this would find nothing
-        // running and cheerfully start the grind again, seconds after the user hit the stop key.
-        if ((DateTime.Now - _lastPanic).TotalMilliseconds < 1000)
-        { ShowToast("F12 just stopped everything"); return; }
+        { ShowToast("Something else is running — F12 first"); return; }
         StartGrind_Click(this, new RoutedEventArgs());
     }
 
@@ -268,11 +273,7 @@ public partial class MainWindow : Window
                 ToggleMergeRun();       // the whole point is not having to leave the game to press it
                 handled = true;
             }
-            else if (id == GRIND_HOTKEY_ID)
-            {
-                ToggleGrindRun();       // same reason: start a night's grinding without alt-tabbing
-                handled = true;
-            }
+
         }
         return IntPtr.Zero;
     }
@@ -2417,10 +2418,6 @@ public partial class MainWindow : Window
             UnregisterHotKey(_hwnd, PANIC_HOTKEY_ID);
             UnregisterHotKey(_hwnd, PROBE_HOTKEY_ID);
             UnregisterHotKey(_hwnd, MERGE_HOTKEY_ID);
-            UnregisterHotKey(_hwnd, GRIND_HOTKEY_ID);
-            // The suppression goes with the binding it exists for. Leaving it on after the hotkey
-            // is torn down would have the panic key standing aside for nothing at all.
-            Input.PanicKey.IgnoreWithShift = false;
         }
         Input.PanicKey.Uninstall();
         StopWatch();
