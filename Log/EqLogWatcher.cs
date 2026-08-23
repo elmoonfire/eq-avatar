@@ -24,7 +24,18 @@ public sealed class EqLogWatcher : IDisposable
     public event Action<string>? LineRead;
     public event Action<string>? Info;
 
-    public EqLogWatcher(string path, int pollMs = 500)
+    /// <param name="pollMs">
+    /// How often the file is checked for new bytes — and therefore the floor on how quickly the app
+    /// can know ANYTHING. It was 500, which is most of a second before a line the game wrote is
+    /// seen, and that showed up in the field as engagements taking six to eight seconds: the hunt
+    /// loop asked for a con, waited, gave up before the answer had even been read off disk, roamed,
+    /// and asked again. The con had been sitting in the file the whole time.
+    ///
+    /// A poll is a seek and a read of whatever is new — a few microseconds against a file the OS has
+    /// in cache — so this is cheap enough to do properly. Everything downstream gets faster with it:
+    /// kills, deaths, hand-in confirmations, the lot.
+    /// </param>
+    public EqLogWatcher(string path, int pollMs = 150)
     {
         _path = path;
         _pollMs = pollMs;
@@ -48,7 +59,14 @@ public sealed class EqLogWatcher : IDisposable
             {
                 _offset = 0;
             }
-            _timer = new Timer(_ => Poll(), null, 0, _pollMs);
+            // ONE-SHOT, RE-ARMED AT THE END OF EACH POLL. A periodic Timer queues a fresh callback
+            // every period whether or not the last one has finished — and Poll is not fast: it
+            // raises LineRead synchronously and every subscriber marshals to the UI thread with a
+            // BLOCKING Dispatcher.Invoke, so a busy render or an OCR pass stalls it. Two overlapping
+            // polls both read the same offset and deliver every line TWICE, which at the far end is
+            // double-counted kills and hand-in credit written into permanent history. At 500 ms that
+            // was unlikely; at 150 it would be routine.
+            _timer = new Timer(_ => Poll(), null, 0, Timeout.Infinite);
             Info?.Invoke($"Tailing {_path} (poll {_pollMs} ms, from {(fromStart ? "start" : "end")}).");
         }
     }
@@ -63,7 +81,31 @@ public sealed class EqLogWatcher : IDisposable
         }
     }
 
+    /// <summary>Belt as well as braces: the one-shot timer above should make overlap impossible, but
+    /// a guard costs nothing and the consequence of being wrong is silent duplicate history.</summary>
+    private int _polling;
+
     private void Poll()
+    {
+        if (Interlocked.Exchange(ref _polling, 1) == 1) return;
+        // A TAILER MUST NEVER TAKE THE PROCESS WITH IT. PollCore has its own handler, but that
+        // handler reports through Info, which marshals to the UI thread with a blocking Invoke —
+        // so on shutdown it throws while handling a throw and escapes onto a thread-pool timer
+        // thread, where an unhandled exception ends the process. The user would see "EQ Avatar hit
+        // a fatal error" for the crime of closing the app, and it would spend the one-shot crash
+        // dialog that a real fault needs.
+        try { PollCore(); }
+        catch { /* nothing a log tailer can hit is worth a process for */ }
+        finally
+        {
+            Volatile.Write(ref _polling, 0);
+            // Re-arm only while still running. Stop() disposes the timer under the lock, so a
+            // Change() on a disposed one is caught rather than raced.
+            try { lock (_gate) _timer?.Change(_pollMs, Timeout.Infinite); } catch { /* stopped */ }
+        }
+    }
+
+    private void PollCore()
     {
         if (!_running) return;
         try

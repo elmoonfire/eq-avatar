@@ -175,4 +175,125 @@ public partial class MainWindow
         UpdateVitalsStatus(live: false);
         UpdateTargetStatus();
     }
+
+    // ---------------------------------------------------------------- the attack indicator
+
+    /// <summary>
+    /// Learn what the auto-attack indicator looks like while attack is OFF.
+    ///
+    /// OFF and not ON, because OFF is the state a person can reliably arrange while picking — stand
+    /// still, don't attack, drag a box — whereas holding attack on through a pick means being in a
+    /// fight while dragging a rectangle. At run time the question is then "does this still look like
+    /// off", and everything that could go wrong with it (the lamp lit, a tooltip across it, the
+    /// window moved) answers no, i.e. "assume attack is on", i.e. don't press a toggle. The safe
+    /// answer is the easy one to arrange.
+    /// </summary>
+    private void AttackLamp_Click(object sender, RoutedEventArgs e)
+    {
+        AutoTargetEq();
+        using System.Drawing.Bitmap? frame = VitalsSvc.CaptureFrame();
+        if (frame is null)
+        {
+            SetLampState("no game window to capture — launch EQ first", false);
+            return;
+        }
+        var dlg = new Ocr.CompassPickWindow(frame, "Pick the attack indicator",
+            "Make sure auto attack is OFF first. Drag a SMALL box around the little light that comes on when you "
+            + "are attacking — keep your health and mana bars OUT of it, or it will look different every second "
+            + "for reasons that have nothing to do with attack. Then press Enter.",
+            SwatchSize, loupeNX: _settings.LoupeNX, loupeNY: _settings.LoupeNY)
+        { Owner = this };
+        if (dlg.ShowDialog() != true) return;
+        AbsorbPickerPrefs(dlg, SwatchSize, rememberSize: false);
+
+        Roles.QuestFind.IconPatch? off = Roles.QuestFind.PatchFromRegion(frame, dlg.NX, dlg.NY, dlg.NW, dlg.NH);
+        if (off is not { Ok: true })
+        {
+            SetLampState("that box was too small or off-screen — try again", false);
+            return;
+        }
+        // Capped like the quest icon references, and for a sharper reason: this rides inside
+        // AppSettings, which is rewritten on a 450 ms debounce every time anything on any page
+        // changes — far more often than questscripts.json.
+        if (off.Data.Length > 120_000)
+        {
+            SetLampState($"that box is {off.W}×{off.H} — too big to store. Drag a small one around just the light.",
+                         false);
+            return;
+        }
+        _settings.AttackLampX = dlg.NX; _settings.AttackLampY = dlg.NY;
+        _settings.AttackLampW = dlg.NW; _settings.AttackLampH = dlg.NH;
+        _settings.AttackLampOff = off;
+        // A NEW PICK IS UNPROVEN AGAIN. The old proof was about the old box.
+        _settings.AttackLampProven = false;
+        _settings.AttackLampSawOn = false;
+        _settings.Save();
+        SetLampState($"learned ({off.W}×{off.H}) as ATTACK OFF. Now turn attack ON in game and click this text — "
+                   + "it has to see the difference before it will trust the reading.", true);
+    }
+
+    /// <summary>What the indicator reads RIGHT NOW, against what was learned. Shown so the pick can
+    /// be trusted before a run depends on it: a pick that silently learned the wrong thing looks
+    /// exactly like one that worked.</summary>
+    private void RefreshLampState()
+    {
+        if (AttackLampState is null) return;
+        if (!_settings.AttackLampSet) { SetLampState("not picked — she'll have to guess, at most 3 times a run", false); return; }
+        try
+        {
+            using System.Drawing.Bitmap? frame = VitalsSvc.CaptureFrame();
+            if (frame is null) { SetLampState("learned (game not on screen)", true); return; }
+            Roles.QuestFind.IconPatch? now = Roles.QuestFind.PatchFromRegion(
+                frame, _settings.AttackLampX, _settings.AttackLampY, _settings.AttackLampW, _settings.AttackLampH);
+            if (now is not { Ok: true } live || _settings.AttackLampOff is not { Ok: true } off
+                || live.W != off.W || live.H != off.H)
+            { SetLampState("learned — but that spot can't be read now; re-pick if the window moved", false); return; }
+            double ncc = Roles.QuestFind.Ncc(live.Pixels, off.Pixels);
+            // A TWO-STATE HANDSHAKE, because one reading proves nothing. "It stopped looking like
+            // the off picture" is produced by the lamp lighting — and equally by a tooltip drifting
+            // over that corner, or the window moving a pixel between the pick and the check. Only a
+            // region that changes and then changes BACK has demonstrated it is tracking a light
+            // rather than an accident, and it is this proof that unlocks the one answer ("off")
+            // which ends in the toggle being pressed.
+            if (ncc < 0.97)
+            {
+                if (!_settings.AttackLampSawOn) { _settings.AttackLampSawOn = true; _settings.Save(); }
+                SetLampState(_settings.AttackLampProven
+                    ? $"reads ATTACK ON ({ncc * 100:0}% like the off picture)"
+                    : $"reads ATTACK ON ({ncc * 100:0}% like the off picture) — good. Now turn attack OFF in game "
+                      + "and click here once more, and I'll know this box really is following the light.", true);
+            }
+            else if (_settings.AttackLampProven)
+                SetLampState($"reads attack off ({ncc * 100:0}% like the off picture)", true);
+            else if (_settings.AttackLampSawOn)
+            {
+                _settings.AttackLampProven = true;
+                _settings.Save();
+                SetLampState("reads attack off again — that's both states seen, so this box really is following "
+                           + "the light. She'll trust it from now on and stop guessing.", true);
+            }
+            else
+                SetLampState($"reads attack off ({ncc * 100:0}% like the off picture). Turn attack ON in game and "
+                           + "click here — until I've seen this box look different I won't trust it to tell me "
+                           + "attack is off.", false);
+        }
+        catch { SetLampState("learned", true); }
+    }
+
+    private bool _lampClickWired;
+
+    private void SetLampState(string text, bool good)
+    {
+        if (AttackLampState is null) return;
+        AttackLampState.Text = text;
+        AttackLampState.Foreground = Hex(good ? "#7CE38B" : "#FFCB6B");
+        // CLICKING THE READOUT RE-READS IT — the button must keep meaning "pick", because a second
+        // pick taken while attack is ON would learn the lit lamp as the picture of OFF and invert
+        // the whole test. Wired once: this method runs on every route in, and hooking the same
+        // handler each time would fire it as many times as the page had been visited.
+        if (_lampClickWired) return;
+        _lampClickWired = true;
+        AttackLampState.Cursor = System.Windows.Input.Cursors.Hand;
+        AttackLampState.MouseLeftButtonUp += (_, _) => RefreshLampState();
+    }
 }

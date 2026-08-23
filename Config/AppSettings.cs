@@ -202,6 +202,51 @@ public sealed class AppSettings
     /// walking away from one.
     /// </summary>
     public int HuntEngageMaxMs { get; set; } = 1200;
+
+    /// <summary>
+    /// A small picked region of the game UI that CHANGES when auto attack is running — the little
+    /// indicator beside the health and resource window.
+    ///
+    /// This exists because the log cannot answer the question. The client announces "Auto attack is
+    /// on" only when the key is pressed by hand; engaging it the way a bot does, through a song or
+    /// a spell at a hostile target, turns it on silently. And silence in the combat log is not
+    /// evidence it is off — a character facing the wrong way swings at nothing and prints nothing.
+    /// The indicator is the only place the state is actually shown, so it is the only place worth
+    /// reading it from.
+    ///
+    /// Not OCR. There is no text here, just a lamp that lights: the region is photographed once
+    /// while attack is OFF and afterwards compared pixel for pixel. "It stopped looking like the
+    /// picture of off" is a far easier question than "what does that say".
+    /// </summary>
+    public double AttackLampX { get; set; }
+    public double AttackLampY { get; set; }
+    public double AttackLampW { get; set; }
+    public double AttackLampH { get; set; }
+
+    /// <summary>What that region looks like with auto attack OFF. Base64 RGB, as the icon
+    /// references are stored.</summary>
+    public Roles.QuestFind.IconPatch? AttackLampOff { get; set; }
+
+    /// <summary>
+    /// Has this pick ever been SEEN to tell the two states apart?
+    ///
+    /// Correlation is variance-normalised, so a three-pixel light inside a forty-pixel box barely
+    /// moves the number — the box would read "off" while attack was running, and that is the single
+    /// direction that ends in the toggle being pressed. So the pick is not trusted for that answer
+    /// until its readout on the Grind page has actually shown the lit state at least once. Until
+    /// then it can still say "on" (which only ever cancels a press) and everything else falls back
+    /// to the guess, budgeted.
+    /// </summary>
+    public bool AttackLampProven { get; set; }
+
+    /// <summary>Half of the handshake: the readout has seen the region NOT look like the off
+    /// picture. On its own that proves nothing — a tooltip drifting over the corner or the window
+    /// moving a pixel does it too — so proof needs the other half, a return to looking like off
+    /// afterwards. Only a light that goes on and then off again can do both.</summary>
+    public bool AttackLampSawOn { get; set; }
+
+    [System.Text.Json.Serialization.JsonIgnore]
+    public bool AttackLampSet => AttackLampW > 0.0005 && AttackLampH > 0.0005 && AttackLampOff is { Ok: true };
     /// <summary>Hold right-mouse and pan the camera while running — human-like looking around.</summary>
     public bool HuntLookAround { get; set; } = true;
     public int HuntRunMsMin { get; set; } = 1200;            // forward-burst length range

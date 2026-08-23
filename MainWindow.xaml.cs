@@ -1046,6 +1046,7 @@ public partial class MainWindow : Window
         HuntLocKeyBox.Text = _settings.HuntLocKey;
         HuntAutoAttackKeyBox.Text = _settings.HuntAutoAttackKey;
         HuntEngageBox.Text = _settings.HuntEngageMaxMs.ToString();
+        RefreshLampState();
         HuntRestBox.Text = _settings.HuntRestSeconds.ToString();
         (_settings.GrindStance switch { "defensive" => StanceDef, "directive" => StanceDir, _ => StanceAggro }).IsChecked = true;
         HostileSelBox.SelectedIndex = _settings.HuntHostileOnly ? 1 : 0;

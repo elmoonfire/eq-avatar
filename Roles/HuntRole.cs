@@ -728,14 +728,24 @@ public sealed class HuntRole
                     _lastAttitude = ConsiderAttitude.Unknown;
                     _lastConText = "";
                     _sink.Send(_con);                       // /consider the target (key or mouse5)
-                    // WAIT FOR THE ANSWER, don't sleep through it. A fixed 750 ms was paid in full
-                    // on every engagement whether the con line arrived in 80 ms or not at all, and
-                    // it was most of the gap between seeing a mob and hitting it. Polling gives that
-                    // time back to the randomised pause below, where it buys something.
-                    for (int w = 0; w < 10; w++)
+                    // WAIT FOR THE ANSWER, don't sleep through it — and don't guess how long that
+                    // takes either. A fixed wait is wrong in both directions: too short and the
+                    // pass gives up on a con that was already sitting in the log file unread, roams,
+                    // and tries again — six to eight seconds to engage a mob that answered the first
+                    // time. Too long and every engagement pays for the worst case.
+                    //
+                    // So it is measured. The round trip is whatever this machine's game, disk and
+                    // log tailer add up to, the window is sized from what has actually been observed,
+                    // and a machine that answers in 90 ms never waits like one that answers in 800.
+                    DateTime asked = DateTime.Now;
+                    while ((DateTime.Now - asked).TotalMilliseconds < _conWaitMs)
                     {
-                        if (_lastCon != ConsiderDifficulty.Unknown || _lastAttitude != ConsiderAttitude.Unknown) break;
-                        await Task.Delay(60, ct);
+                        if (_lastCon != ConsiderDifficulty.Unknown || _lastAttitude != ConsiderAttitude.Unknown)
+                        {
+                            LearnConLatency((DateTime.Now - asked).TotalMilliseconds);
+                            break;
+                        }
+                        await Task.Delay(40, ct);
                     }
 
                     // No con line came back → nothing was targeted. Don't flail at empty air: roam again.
@@ -824,11 +834,39 @@ public sealed class HuntRole
                     // mob targeted at range and closed on over the first few seconds would
                     // otherwise trip this and toggle off an attack that was already engaged.
                     // Silence is only evidence once we have been in a position to swing.
+                    // "YOU CANNOT SEE YOUR TARGET" IS PROOF THAT SOMETHING IS SWINGING. The client
+                    // only prints it because an attack was attempted and couldn't land — so it says
+                    // auto attack is ON and the facing is wrong, which is the opposite of what
+                    // silence would have suggested. Same for out-of-range. Both restart the clock:
+                    // silence only means anything once we are in a position to actually swing.
                     if (_tooFar || _cantSee) meleeGraceFrom = DateTime.Now;
                     if (!_autoAttackTried && !castOnly && !_s.GrindBardMode && !_autoAtk.IsNone
                         && _meleeSwings == meleeAtStart && _autoAttackOn != true
                         && (DateTime.Now - meleeGraceFrom).TotalSeconds > AutoAttackGrace)
-                        NudgeAutoAttack();
+                    {
+                        // THE INDICATOR DECIDES WHEN IT CAN. Everything above is inference from an
+                        // absence; this is a look at the thing itself. A clear "it's on" cancels the
+                        // press outright — and cancels it for the rest of the fight, because the
+                        // reason won't have changed.
+                        // An UNPROVEN lamp is downgraded to no opinion. Ncc is variance-normalised,
+                        // so a small light inside a big box barely moves it — a lamp that has never
+                        // been SEEN to read differently between the two states cannot be trusted to
+                        // say "off", which is the one direction that ends in a press. The Grind page
+                        // marks it proven the first time its readout actually shows the lit state.
+                        bool? lamp = AttackLampOn();
+                        if (lamp == false && !_s.AttackLampProven) lamp = null;
+                        if (lamp == true)
+                        {
+                            _autoAttackTried = true;
+                            if (_narrateLamp)
+                            {
+                                _narrateLamp = false;
+                                Log?.Invoke("Nothing has swung, but the attack indicator says auto attack IS on — so "
+                                          + "this is facing or reach, not attack being off. Leaving your key alone.");
+                            }
+                        }
+                        else NudgeAutoAttack(lamp is false);
+                    }
 
                     if (castOnly)
                     {
@@ -1260,6 +1298,45 @@ public sealed class HuntRole
         catch { /* best effort */ }
     }
 
+    /// <summary>
+    /// Is auto attack running, read off the indicator the user picked? Null = no opinion.
+    ///
+    /// THE ONLY SOURCE THAT ACTUALLY KNOWS. The combat log cannot answer this: the client announces
+    /// "Auto attack is on" only when the key is pressed by hand, and engaging it the way this bot
+    /// does — a song or a spell at a hostile target — turns it on silently. Nor is silence evidence
+    /// of off, because a character facing the wrong way swings at nothing and prints nothing at all.
+    ///
+    /// The comparison is against the OFF photograph, not an ON one, because OFF is the state a
+    /// person can reliably arrange while picking: stand still, don't attack, drag a box. So the
+    /// question asked is "does this still look like off", and anything else — the lamp lit, a
+    /// tooltip across it, a window moved — answers no. Every one of those errs toward believing
+    /// attack is ON, which is the direction that declines to press a toggle.
+    /// </summary>
+    private bool? AttackLampOn()
+    {
+        // NOT WHILE SOMETHING ELSE IS IN FRONT. CaptureFrame blits screen pixels at the window's
+        // rectangle whatever is on top of it, so a browser over the corner would read as "changed",
+        // i.e. "attack is on" — safe, but it would spend this fight's one look on a screenshot of
+        // something else and then say so out loud.
+        if (!_s.AttackLampSet || _vitals is null || !_sink.Ready) return null;
+        try
+        {
+            using System.Drawing.Bitmap? frame = _vitals.CaptureFrame();
+            if (frame is null) return null;
+            QuestFind.IconPatch? now = QuestFind.PatchFromRegion(
+                frame, _s.AttackLampX, _s.AttackLampY, _s.AttackLampW, _s.AttackLampH);
+            if (now is not { Ok: true } live || _s.AttackLampOff is not { Ok: true } off) return null;
+            if (live.W != off.W || live.H != off.H) return null;      // window resized — re-pick needed
+            return QuestFind.Ncc(live.Pixels, off.Pixels) < LampSameAsOff;
+        }
+        catch { return null; }
+    }
+
+    /// <summary>How alike the indicator has to stay for "still off". A static piece of UI
+    /// photographed twice matches at essentially 1.0, so the bar sits high — and every way of being
+    /// wrong about it lands on "assume attack is on", which is the harmless answer.</summary>
+    private const double LampSameAsOff = 0.97;
+
     /// <summary>How long a fight has to go without a single melee line before the absence counts as
     /// evidence rather than as "it hasn't started yet". A melee round is a couple of seconds, so
     /// this is comfortably past one and still inside the first exchange.</summary>
@@ -1275,6 +1352,43 @@ public sealed class HuntRole
         @"(\bauto[- ]?attack\b[^.]{0,20}\boff\b|\byou are no longer attacking\b)",
         System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.Compiled);
 
+    /// <summary>
+    /// How long to wait for a con line, learned from how long they actually take.
+    ///
+    /// Starts generous, because being slow once costs a moment and being short costs a whole seek
+    /// cycle. Settles on roughly three times the observed round trip so an unlucky log poll still
+    /// lands inside it, and is floored and capped so neither a freak fast answer nor a freak slow
+    /// one can move it somewhere silly.
+    /// </summary>
+    private double _conWaitMs = 1100;
+    private bool _conLatencySaid;
+    private readonly Queue<double> _conSamples = new();
+
+    private void LearnConLatency(double ms)
+    {
+        // A sample of nearly nothing is a con line that was already in flight when we asked — it
+        // measures our own reset, not the game — and believing it would drag the window to the
+        // floor and announce "your con answers land about 0 ms after I ask".
+        if (ms < 20) return;
+        _conSamples.Enqueue(ms);
+        if (_conSamples.Count > 5) _conSamples.Dequeue();
+
+        // THE WORST OF THE LAST FEW, not the latest one. Sized from a single sample, any answer
+        // over about 780 ms pinned the window at its 2500 cap — and rise-fast/fall-slow then needed
+        // seventeen good cons to walk it back down, so one hiccup reinstated most of the delay this
+        // was written to remove. A running maximum is the same caution without the ratchet.
+        double worst = 0;
+        foreach (double v in _conSamples) if (v > worst) worst = v;
+        double want = Math.Clamp(worst * 2 + 150, 450, 2500);
+        _conWaitMs = want > _conWaitMs ? want : _conWaitMs * 0.8 + want * 0.2;
+        if (!_conLatencySaid)
+        {
+            _conLatencySaid = true;
+            Log?.Invoke($"Your con answers land about {ms:0} ms after I ask, so I'll wait up to "
+                      + $"{_conWaitMs:0} ms for one before giving up and roaming.");
+        }
+    }
+
     private int Vary(int ms) => _s.Vary(ms, _rng);
 
     /// <summary>
@@ -1286,15 +1400,58 @@ public sealed class HuntRole
     /// log to have gone silent rather than merely "not started yet", and why it never fires in
     /// cast-only or bard mode — where no melee swing is expected and its absence proves nothing.
     /// </summary>
-    private void NudgeAutoAttack()
+    private void NudgeAutoAttack(bool lampSaysOff)
     {
-        if (_autoAtk.IsNone || !_sink.Ready) return;
+        // The decision has been taken either way — a fight that couldn't send is not a fight that
+        // should try again three seconds later.
         _autoAttackTried = true;
+        if (_autoAtk.IsNone || !_sink.Ready) return;
+        if (!lampSaysOff && ++_blindNudges > MaxBlindNudges)
+        {
+            // SAID WHEN IT STOPS, like every other cap in this app. Going quiet is
+            // indistinguishable from the feature never having worked.
+            if (_blindCapSaid) return;
+            _blindCapSaid = true;
+            Log?.Invoke($"That's {MaxBlindNudges} guesses at auto attack this run, so I'll stop pressing "
+                      + $"{_autoAtk.Display}. It is a toggle and I can't see whether attack is on — " + LampAdvice());
+            return;
+        }
         _sink.Send(_autoAtk);
-        Log?.Invoke($"Nothing has swung since the rotation started, so auto attack looks like it isn't on — "
-                  + $"tapping {_autoAtk.Display} once. (That key is a toggle, so if you ever see attack stop "
-                  + "right after this line, it was already on and the mob was simply out of reach.)");
+        Log?.Invoke(lampSaysOff
+            ? $"The attack indicator says auto attack is OFF — tapping {_autoAtk.Display} to turn it on."
+            : $"Nothing has swung since the rotation started, so auto attack MIGHT not be on — tapping "
+              + $"{_autoAtk.Display} once. This is a guess: the combat log never says when a song or a spell "
+              + "engaged attack, and a character facing the wrong way swings at nothing and prints nothing. "
+              + LampAdvice());
     }
+
+    /// <summary>Say the "indicator says it's already on" line once a run, not once a fight.</summary>
+    private bool _narrateLamp = true;
+
+    /// <summary>
+    /// How many times a whole RUN may press the toggle on a guess rather than on the indicator.
+    ///
+    /// Proof gets a press per fight; a guess does not. Without the lamp picked — the default —
+    /// "nothing has swung" fires on every fight that meets the conditions, so a night's grinding is
+    /// hundreds of presses at a key that turns attack OFF as readily as on. A handful is enough to
+    /// correct a systemic "the rotation never engages attack"; anything beyond that is a recurring
+    /// facing quirk being answered with the wrong tool, over and over.
+    /// </summary>
+    private const int MaxBlindNudges = 3;
+    private int _blindNudges;
+    private bool _blindCapSaid;
+
+    /// <summary>The ONE thing worth doing about it, and which one depends on how far through the
+    /// setup they are. Telling somebody who has already picked the indicator to go and pick it is
+    /// how good advice gets ignored.</summary>
+    private string LampAdvice()
+        => !_s.AttackLampSet
+            ? "Pick the attack indicator on the Grind page and I'll read the answer instead of inferring it."
+            : !_s.AttackLampProven
+              ? "You have picked the indicator but I have never seen that box look any different, so I won't "
+                + "trust it to tell me attack is OFF. Turn auto attack on in game, click the readout beside the "
+                + "pick button, then turn it off and click once more — two clicks and I'll know."
+              : "The indicator couldn't be read just then — the game may not have been in front.";
 
     private bool _autoAttackTried;
 }
