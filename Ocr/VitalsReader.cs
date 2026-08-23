@@ -33,7 +33,68 @@ namespace EQAvatar.Spike.Ocr;
 public sealed class VitalsReader
 {
     [StructLayout(LayoutKind.Sequential)] private struct RECT { public int Left, Top, Right, Bottom; }
+    [StructLayout(LayoutKind.Sequential)] private struct POINT { public int X, Y; }
     [DllImport("user32.dll")] private static extern bool GetWindowRect(IntPtr h, out RECT r);
+    [DllImport("user32.dll")] private static extern bool IsIconic(IntPtr h);
+    [DllImport("user32.dll")] private static extern IntPtr WindowFromPoint(POINT p);
+    [DllImport("user32.dll")] private static extern IntPtr GetAncestor(IntPtr h, uint flags);
+    [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr h);
+    [DllImport("user32.dll")] private static extern bool EnumWindows(EnumWindowsProc cb, IntPtr p);
+    [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+    private delegate bool EnumWindowsProc(IntPtr h, IntPtr p);
+    private const uint GaRoot = 2;
+
+    /// <summary>
+    /// Is that screen point actually showing the game, right now?
+    ///
+    /// THE DIFFERENCE BETWEEN "STILL" AND "NOT LOOKING AT IT". Every screen grab in this class is a
+    /// blit of a screen rectangle, not of the window's own surface, so a minimized window blits
+    /// black from off-screen and a covered one blits whatever is on top — this app's own map
+    /// overlay, a Discord popup, a Windows toast. All of those are perfectly steady, which is
+    /// indistinguishable from a border that isn't flashing and is the one reading that makes the
+    /// bot press an auto-attack toggle. Asking Windows which window owns the pixel costs nothing
+    /// and turns that silence back into "I couldn't see it", which is the truth.
+    /// </summary>
+    private bool GameOwns(IntPtr h, int sx, int sy)
+    {
+        IntPtr top = WindowFromPoint(new POINT { X = sx, Y = sy });
+        if (top == IntPtr.Zero) return false;
+        IntPtr root = GetAncestor(top, GaRoot);
+        return (root == IntPtr.Zero ? top : root) == h;
+    }
+
+    /// <summary>
+    /// Is one of OUR OWN windows sitting ON TOP OF that rectangle?
+    ///
+    /// WindowFromPoint above cannot answer this. It is documented to skip windows marked
+    /// hit-test-transparent, and this app's map overlay is exactly that — topmost, click-through,
+    /// and mostly opaque, which is the whole point of it. So the ownership test would happily
+    /// report "the game owns this pixel" while the blit came back full of map. Rectangles, not
+    /// points, because our own windows are large and any overlap flattens part of the strip.
+    ///
+    /// Z-ORDER, NOT MERE OVERLAP. EnumWindows walks top to bottom, so anything of ours seen BEFORE
+    /// the game window is above it and anything after is behind. Testing overlap alone would be far
+    /// worse than not testing at all: the main window sits behind a maximised game on most setups,
+    /// overlaps everything, and would switch the whole feature off permanently on exactly the
+    /// machines it works best on.
+    /// </summary>
+    private static bool OwnWindowCovers(IntPtr game, int left, int top, int right, int bottom)
+    {
+        uint self = (uint)Environment.ProcessId;
+        bool hit = false;
+        EnumWindows((h, _) =>
+        {
+            if (h == game) return false;              // reached the game — everything below is behind it
+            if (!IsWindowVisible(h)) return true;
+            GetWindowThreadProcessId(h, out uint pid);
+            if (pid != self) return true;
+            if (!GetWindowRect(h, out RECT w)) return true;
+            if (w.Right <= w.Left || w.Bottom <= w.Top) return true;
+            if (w.Left < right && w.Right > left && w.Top < bottom && w.Bottom > top) { hit = true; return false; }
+            return true;
+        }, IntPtr.Zero);
+        return hit;
+    }
 
     /// <summary>One bar: where it is on screen and what a full one looks like.</summary>
     public sealed class Bar
@@ -109,11 +170,20 @@ public sealed class VitalsReader
     public (double R, double G, double B)? MeanOf(double nx, double ny, double nw, double nh)
     {
         IntPtr h = _hwnd();
-        if (h == IntPtr.Zero || nw <= 0 || nh <= 0 || !GetWindowRect(h, out RECT r)) return null;
+        if (h == IntPtr.Zero || nw <= 0 || nh <= 0 || IsIconic(h) || !GetWindowRect(h, out RECT r)) return null;
         int winW = r.Right - r.Left, winH = r.Bottom - r.Top;
         if (winW <= 0 || winH <= 0) return null;
         int cw = Math.Max(2, (int)(nw * winW)), ch = Math.Max(2, (int)(nh * winH));
         int cx = r.Left + (int)(nx * winW), cy = r.Top + (int)(ny * winH);
+
+        // THREE POINTS ALONG THE STRIP, not one. A strip is thin and long, and an overlay landing
+        // on half of it would leave a centre test happy while flattening half the signal. The two
+        // ends and the middle is enough to catch anything wide enough to matter, and a partial
+        // cover that passes all three still leaves live pixels for the edges to show up in.
+        if (!GameOwns(h, cx + cw / 2, cy + ch / 2)
+            || !GameOwns(h, cx + 1, cy + 1)
+            || !GameOwns(h, cx + cw - 2, cy + ch - 2)) return null;
+        if (OwnWindowCovers(h, cx, cy, cx + cw, cy + ch)) return null;
         try
         {
             using var bmp = new Bitmap(cw, ch, PixelFormat.Format32bppArgb);

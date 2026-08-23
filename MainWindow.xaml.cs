@@ -923,6 +923,11 @@ public partial class MainWindow : Window
         if (_grind is { Running: true } || _hunt is { Running: true }
             || _questRun is { Running: true } || _questStarting || _mergeRun is { Running: true })
         { ShowToast("Already running — Stop (F12) first"); return; }
+        // A BORDER CHECK IS A MEASUREMENT OF A CHARACTER STANDING STILL. Starting on top of one
+        // would have it record the fight instead, under the attack state the user declared ten
+        // seconds ago — and that measurement is what decides whether the bot may press their
+        // attack key.
+        if (_borderBusy) { ShowToast("Finishing the attack-border check — a moment"); return; }
         AutoTargetEq();   // also notices a game window that has CLOSED since it was detected     // the game may have launched after this page opened
         if (_grindTarget == IntPtr.Zero)
         {
@@ -1046,7 +1051,7 @@ public partial class MainWindow : Window
         HuntLocKeyBox.Text = _settings.HuntLocKey;
         HuntAutoAttackKeyBox.Text = _settings.HuntAutoAttackKey;
         HuntEngageBox.Text = _settings.HuntEngageMaxMs.ToString();
-        RefreshLampState();
+        ShowBorderState();
         HuntRestBox.Text = _settings.HuntRestSeconds.ToString();
         (_settings.GrindStance switch { "defensive" => StanceDef, "directive" => StanceDir, _ => StanceAggro }).IsChecked = true;
         HostileSelBox.SelectedIndex = _settings.HuntHostileOnly ? 1 : 0;

@@ -224,33 +224,63 @@ public sealed class AppSettings
     public double AttackFlashH { get; set; }
 
     /// <summary>
-    /// How much this strip actually moved when it was SEEN flashing, in average-colour distance.
+    /// How far the strip's REDNESS travelled when it was seen flashing — red minus the average of
+    /// the other two channels, because the border is drawn over the moving 3D world and only its
+    /// redness distinguishes it from the scenery behind it.
     ///
-    /// Both the proof and the threshold. Zero means nobody has ever watched this region flash, so
-    /// "it isn't flashing now" carries no weight — it could equally be a strip picked somewhere
-    /// nothing ever happens, and believing that would press a toggle on no evidence. Once a real
-    /// flash has been measured, the run-time bar is set from it rather than from a constant, so a
-    /// subtle border and a vivid one both work.
+    /// DISPLAY ONLY. It used to size the run-time jump bar, and that was wrong: an amplitude is a
+    /// RANGE across a whole window and the bar is a STEP between two consecutive looks, so a border
+    /// that fades rather than snaps had every one of its edges fall just under a bar derived from
+    /// its own brightness. Nothing decides anything from this now — it is shown on the Grind page
+    /// so a strip that barely moves can be told from one that moves a long way.
     /// </summary>
     public double AttackFlashSeen { get; set; }
 
     /// <summary>
-    /// What fraction of the time that border is actually LIT, measured while it was seen flashing.
+    /// What the LAST "check with attack ON" counted over a full window. Zero until one has run.
     ///
-    /// The one assumption in this design that nothing had measured. The spread is a trimmed range,
-    /// which needs two samples inside the lit phase to survive trimming — true for a symmetric
-    /// blink, false for a brief pulse, and simulation puts the miss rate at a quarter for a 25%
-    /// duty and over half for 5%. Every one of those misses reads as "not flashing" and presses the
-    /// toggle. So the proving click counts it, and the run trims only when it can afford to: a
-    /// border that merely winks is measured on its raw range instead, whose failure direction is a
-    /// false "it IS flashing" — which declines to press, and is the harmless way to be wrong.
+    /// The verdict that presses a key — "it isn't flashing" — is only sound for a border whose
+    /// edges land inside the watch, and a pulse slower than the window is long produces none at all.
+    /// Rather than assume the speed, the ON check counts them with attack definitely running.
+    ///
+    /// THE LAST ONE, not the best one. A running maximum records the luckiest look the strip ever
+    /// managed and can never be revised downwards, so a strip that has drifted off the unit frame
+    /// stays green for ever. Latest-wins means the readout describes what this strip did the last
+    /// time it was checked — a claim the user can re-test in either direction, and the way to
+    /// un-trust a stale strip without re-picking it.
     /// </summary>
-    public double AttackFlashDuty { get; set; }
+    public int AttackFlashJumps { get; set; }
+
+    /// <summary>
+    /// What the LAST "check with attack OFF" counted on this strip. −1 until one has run.
+    ///
+    /// The control measurement, and the thing that catches a strip which pulses whatever the
+    /// character is doing. Counting pulses with attack ON only ever asks "can this be seen"; it
+    /// never asks "does it go quiet". A strip over something that flickers red regardless — a
+    /// damage tint, a torch, an animated background — passes that question and then reads
+    /// "flashing" for ever, silently disabling the whole feature behind a green tick.
+    ///
+    /// It has to be exactly zero, and it is latest-wins for the same reason as the other half: a
+    /// running minimum would be the most permissive statistic available, so one lucky quiet moment
+    /// on a strip that flickers all day would grant this half for ever. Zero rather than "under
+    /// three" because the run's silent verdict is literal silence — what the control establishes is
+    /// that this strip CAN be literally silent, which is a different claim from "it wasn't flashing
+    /// much".
+    /// </summary>
+    public int AttackFlashQuiet { get; set; } = -1;
 
     [System.Text.Json.Serialization.JsonIgnore]
     public bool AttackFlashSet => AttackFlashW > 0.0005 && AttackFlashH > 0.0005;
+    /// <summary>Checked with attack ON and found to flash with room to spare, AND checked with
+    /// attack OFF and found completely still. Either half alone proves nothing: a strip that never
+    /// pulses cannot be read, and one that always pulses cannot be trusted to fall silent. Both
+    /// halves come from checks the USER declared the state for — nothing infers which state a look
+    /// was taken in from the look itself, because a weak ON look and a real OFF look are the same
+    /// reading and that is the whole problem.</summary>
     [System.Text.Json.Serialization.JsonIgnore]
-    public bool AttackFlashProven => AttackFlashSet && AttackFlashSeen > 0;
+    public bool AttackFlashProven => AttackFlashSet
+                                     && AttackFlashJumps >= Roles.HuntRole.SetupJumpsWanted
+                                     && AttackFlashQuiet == 0;
     /// <summary>Hold right-mouse and pan the camera while running — human-like looking around.</summary>
     public bool HuntLookAround { get; set; } = true;
     public int HuntRunMsMin { get; set; } = 1200;            // forward-burst length range

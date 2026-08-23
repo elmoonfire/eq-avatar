@@ -182,20 +182,31 @@ public partial class MainWindow
     /// Pick the strip of the unit frame that FLASHES while auto attack is running.
     ///
     /// Only the rectangle is stored — no photograph. The test at run time is not "does this look
-    /// like the picture" but "did this change while I watched", which is the only question a FLASH
-    /// can answer: catch a flashing border mid-blink and a single frame of it is indistinguishable
-    /// from a still one. Not storing a reference also means the pick survives the window moving,
-    /// the UI being rescaled, and the colours being different from the day it was taken.
+    /// like the picture" but "did red PULSE here while I watched", which is the only question a
+    /// flash can answer: catch a flashing border mid-blink and a single frame of it is
+    /// indistinguishable from a still one. Not storing a reference also means the pick survives the
+    /// window moving, the UI being rescaled, and the colours being different from the day it was
+    /// taken.
     /// </summary>
-    private void AttackLamp_Click(object sender, RoutedEventArgs e)
+    private void AttackBorder_Click(object sender, RoutedEventArgs e)
     {
+        // A CHECK MAY BE IN FLIGHT. ShowDialog pumps the dispatcher, so the sampler's Task.Delay
+        // continuations keep running behind the picker — and MeanOf re-reads the rectangle every
+        // sample, so a check started on the old strip would finish half on the new one and then
+        // write its verdict onto a rectangle that has proved nothing.
+        if (_borderBusy) { SetBorderState("still watching the last strip — one moment", false); return; }
+        // NOT MID-RUN either. Re-picking clears both checks, so a run in progress would silently
+        // drop to the three-guess blind path with nothing said — and the role thread reads these
+        // four fields while the sampler is running, so they must not be rewritten underneath it.
+        if (_hunt is { Running: true } || _grind is { Running: true })
+        { SetBorderState("stop the run first — re-picking clears both checks", false); return; }
         AutoTargetEq();
         using System.Drawing.Bitmap? frame = VitalsSvc.CaptureFrame();
-        if (frame is null) { SetLampState("no game window to capture — launch EQ first", false); return; }
+        if (frame is null) { SetBorderState("no game window to capture — launch EQ first", false); return; }
         var dlg = new Ocr.CompassPickWindow(frame, "Pick the flashing attack border",
             "Drag a THIN box over a piece of the border that flashes red while you are attacking — a strip along "
-            + "one edge of the unit frame is ideal. Keep your health and mana bars out of it, or they will look "
-            + "like a flash every time they move. Then press Enter.",
+            + "one edge of the unit frame is ideal. The game world showing through it is fine — she looks for "
+            + "RED PULSES, not for change. Keep your health and mana bars out of it. Then press Enter.",
             SwatchSize, loupeNX: _settings.LoupeNX, loupeNY: _settings.LoupeNY)
         { Owner = this };
         if (dlg.ShowDialog() != true) return;
@@ -205,102 +216,191 @@ public partial class MainWindow
         _settings.AttackFlashW = dlg.NW; _settings.AttackFlashH = dlg.NH;
         // A NEW STRIP HAS PROVED NOTHING. The old measurement was about the old rectangle.
         _settings.AttackFlashSeen = 0;
+        _settings.AttackFlashJumps = 0;
+        _settings.AttackFlashQuiet = -1;
         _settings.Save();
-        SetLampState("picked. Now turn auto attack ON in game and click this text — I'll watch that strip for a "
-                   + "second and see whether it really flashes.", true);
+        ShowBorderState();
+    }
+
+    // TWO BUTTONS, NOT ONE, and this is the whole point of the design.
+    //
+    // The app cannot tell which state a look was taken in, and it must not try: a weak look with
+    // attack ON and a real look with attack OFF are the SAME reading — a low pulse count — so
+    // inferring the state from the count lets one under-counted fight stand as the proof that this
+    // strip goes quiet, which is precisely the claim the quiet check exists to test. The user is
+    // the only thing in the system that knows whether attack is running, so the user says so, by
+    // pressing one button rather than the other.
+    private void AttackBorderOn_Click(object sender, RoutedEventArgs e) => CheckBorder(attackOn: true);
+    private void AttackBorderOff_Click(object sender, RoutedEventArgs e) => CheckBorder(attackOn: false);
+
+    /// <summary>
+    /// Say where the setup has got to, WITHOUT measuring anything.
+    ///
+    /// Read-only on purpose. This runs unattended when the Grind page is first built, and a check
+    /// that writes needs to know which state the character is in — which nobody has told it at
+    /// that moment. The old version sampled here, and starting the app mid-fight could therefore
+    /// file an attack-ON reading as the proof that the strip falls silent.
+    /// </summary>
+    private void ShowBorderState()
+    {
+        if (AttackBorderState is null) return;
+        if (!_settings.AttackFlashSet)
+        { SetBorderState("not picked — she'll have to guess, at most 3 times a run", false); return; }
+
+        int want = Roles.HuntRole.SetupJumpsWanted;
+        bool onOk = _settings.AttackFlashJumps >= want;
+        bool offRun = _settings.AttackFlashQuiet >= 0;
+        if (onOk && _settings.AttackFlashQuiet == 0)
+        {
+            SetBorderState($"checked both ways — {_settings.AttackFlashJumps} red changes with attack on, dead still "
+                       + "with it off. She'll trust this strip.", true);
+            return;
+        }
+        if (!onOk && !offRun)
+        { SetBorderState($"picked, not checked. Turn auto attack ON and press \u201Ccheck: attack ON\u201D, then turn it OFF "
+                     + "and press the other one.", false); return; }
+        if (onOk)
+        { SetBorderState($"attack-ON check passed ({_settings.AttackFlashJumps} red changes)"
+                     + (offRun ? $", but with attack off it still went red {_settings.AttackFlashQuiet} time(s) — that "
+                                 + "strip flickers red on its own. Move it and check both ways again."
+                               : ". Now turn auto attack OFF and press \u201Ccheck: attack OFF\u201D."), offRun == false); return; }
+        if (_settings.AttackFlashQuiet == 0)
+        { SetBorderState(_settings.AttackFlashJumps > 0
+              ? $"still with attack off, but the attack-ON check only counted {_settings.AttackFlashJumps} red changes "
+                + $"of the {want} needed. "
+                // THE SAME TWO FAULTS THE CHECK ITSELF DISTINGUISHES. Showing "try a thinner strip"
+                // for both means the useful advice is given once and the useless advice on every
+                // later visit to this page — and a slow border cannot be fixed by re-drawing.
+                + (_settings.AttackFlashSeen >= Roles.HuntRole.MinFlashSpread * 2
+                     ? "It is clear enough; it just blinks too slowly for me to be sure it has gone quiet rather than "
+                       + "been caught mid-blink. She'll still recognise it when it fires, which only ever cancels a press."
+                     : "Try a thinner strip right on the flashing edge.")
+              : $"still with attack off. Now turn auto attack ON and press \u201Ccheck: attack ON\u201D.",
+            _settings.AttackFlashJumps == 0); return; }
+        SetBorderState($"with attack off that strip went red {_settings.AttackFlashQuiet} time(s), so something there "
+                   + "flickers red whatever you are doing. She won't trust it — move the strip and check again.", false);
     }
 
     /// <summary>
-    /// Watch the picked strip for about a second and say what happened.
+    /// Watch the picked strip for the full window and record it against the state the user just
+    /// declared.
     ///
-    /// This is also where the pick earns its trust. "It isn't flashing" and "this is a piece of
-    /// screen where nothing ever happens" are the same reading, and only one of them justifies
-    /// pressing an auto-attack toggle — so until a real flash has been measured here, the run
-    /// declines to conclude anything from stillness.
+    /// This is where the pick earns its trust. "It isn't flashing" and "this is a piece of screen
+    /// where nothing ever happens" are the same reading, and only one of them justifies pressing an
+    /// auto-attack toggle — so the run declines to conclude anything from stillness until BOTH
+    /// checks have passed: flashing with room to spare while attack runs, and completely still
+    /// while it doesn't.
+    ///
+    /// Latest-wins on both numbers, deliberately. A running best-ever certified the luckiest look
+    /// the strip ever managed and could never be revised downwards, so a strip that had drifted off
+    /// the unit frame stayed green for ever. What the readout claims is what this strip did the
+    /// last time it was checked, which is a statement the user can re-test in either direction.
     /// </summary>
-    private async void RefreshLampState()
+    private async void CheckBorder(bool attackOn)
     {
-        if (AttackLampState is null) return;
-        if (!_settings.AttackFlashSet)
-        { SetLampState("not picked — she'll have to guess, at most 3 times a run", false); return; }
-        if (_lampBusy) return;
-        _lampBusy = true;
+        if (AttackBorderState is null) return;
+        if (!_settings.AttackFlashSet) { ShowBorderState(); return; }
+        if (_borderBusy) { SetBorderState("still watching — one moment", false); return; }
+        // NOT WHILE THE BOT IS PLAYING. A check taken mid-run records whatever the fight happened to
+        // be doing, under a label the user chose several seconds ago and may no longer be true.
+        if (_hunt is { Running: true } || _grind is { Running: true })
+        { SetBorderState("stop the run first — a check taken mid-fight would record the fight, not your answer", false); return; }
+        _borderBusy = true;
         try
         {
             AutoTargetEq();
             if (_grindTarget == IntPtr.Zero)
-            {
-                // NOT AN ALARM. This runs once at startup, and the game not being open yet is the
-                // ordinary case, not a fault with the pick.
-                SetLampState("picked — start the game and click here to check it", true);
-                return;
-            }
-            SetLampState("watching that strip…", true);
-            double bar = Math.Max(Roles.HuntRole.MinFlashSpread, _settings.AttackFlashSeen * 0.35);
-            Roles.HuntRole.FlashLook look = await Roles.HuntRole.SampleFlash(
-                VitalsSvc, _settings, bar, () => true, ms => Task.Delay(ms));
-            if (!look.Watched)
-            { SetLampState("couldn't read that strip — is it inside the game window?", false); return; }
-            double spread = look.Spread;
+            { SetBorderState("start the game first, then check — I can only read this strip inside the game window", false); return; }
 
-            if (spread >= bar && spread >= Roles.HuntRole.MinFlashSpread)
+            // GIVE THEM TIME TO GET BACK TO THE GAME, and say so.
+            //
+            // To press this button they must be looking at THIS window, which means this window is
+            // in front of the game — and the strip is read by blitting the screen, so whatever is
+            // in front of it is what gets read. Without a lead-in every check would either fail
+            // outright or, worse, quietly measure the EQ Avatar window and call it still.
+            for (int left = LeadInSeconds; left > 0; left--)
             {
-                // The strongest flash seen wins: the bar is derived from it, and a weak sample later
-                // must not be able to talk the threshold down to where noise clears it.
-                bool changed = false;
-                if (spread > _settings.AttackFlashSeen) { _settings.AttackFlashSeen = spread; changed = true; }
-                // THE DUTY IS THE MEASUREMENT THAT MATTERS MOST, because the run's trimmed range
-                // needs two lit samples to survive trimming and a border that merely winks gives
-                // it one. The smallest duty seen wins — it is the one the run has to cope with.
-                if (look.Duty > 0 && (_settings.AttackFlashDuty <= 0 || look.Duty < _settings.AttackFlashDuty))
-                { _settings.AttackFlashDuty = look.Duty; changed = true; }
-                if (changed) _settings.Save();
-                // AND SAY WHEN IT IS ONLY JUST A FLASH. MeanOf averages the whole strip, so a two
-                // pixel border inside a generous box is diluted to within a unit or two of the noise
-                // floor — it works today and misreads mid-fight on the first frame that lands badly.
-                // The number to judge that by is already in hand; it just has to be said.
-                bool faint = spread < Roles.HuntRole.MinFlashSpread * 2;
-                bool brief = look.Duty > 0 && look.Duty < Roles.HuntRole.MinTrustedDuty;
-                SetLampState(
-                    faint
-                      ? $"flashing, but only just (moved {spread:0}, floor is {Roles.HuntRole.MinFlashSpread:0}). "
-                        + "Re-pick a narrower strip right on the border — a wide box averages the flash away and "
-                        + "she may misread it mid-fight."
-                    : brief
-                      ? $"FLASHING (moved {spread:0}), but lit only {look.Duty * 100:0}% of the time — a wink rather "
-                        + "than a blink. I can spot it when it fires, but I can't safely tell 'not flashing' from "
-                        + "'I looked between flashes', so I won't press your attack key on that reading. A strip "
-                        + "closer to the part that stays lit longest would fix it."
-                      : $"FLASHING (moved {spread:0}, lit {look.Duty * 100:0}% of the time) — that's auto attack on, "
-                        + "and it's what she'll watch for.",
-                    !faint && !brief);
+                SetBorderState($"switch to EverQuest now \u2014 watching in {left}\u2026 (auto attack should be "
+                           + (attackOn ? "ON)" : "OFF)"), true);
+                await Task.Delay(1000);
             }
-            else if (_settings.AttackFlashProven)
-                SetLampState($"not flashing (moved {spread:0}, needs {bar:0}) — that reads as auto attack off.", true);
+            SetBorderState(attackOn
+                ? $"watching that strip with attack ON for about {Roles.HuntRole.SetupWindowSeconds:0} seconds\u2026"
+                : $"watching that strip with attack OFF for about {Roles.HuntRole.SetupWindowSeconds:0} seconds\u2026", true);
+            // stopEarly: false. The run stops at the third edge because three answers its question;
+            // this check has to measure how much HEADROOM the border has over a whole window, and a
+            // count stopped at three can only ever report three.
+            Roles.HuntRole.FlashLook look = await Roles.HuntRole.SampleFlash(
+                VitalsSvc, _settings, Roles.HuntRole.FlashBar(), () => true, ms => Task.Delay(ms), stopEarly: false);
+            if (!look.Watched || !look.Full)
+            { SetBorderState("couldn't see that strip for long enough — the game needs to be in front and nothing "
+                         + "covering the unit frame, including this window and the map overlay. Nothing recorded.",
+                         false); return; }
+            // THE WORLD MOVED WHILE WE WERE LOOKING. Ten seconds is long enough for the user to
+            // have started the run — F7 works from inside the game, which is exactly where this
+            // check just sent them — and the answer they typed a moment ago is about a character
+            // who is now fighting. Writing it would overwrite a good proof with fight data.
+            if (_hunt is { Running: true } || _grind is { Running: true })
+            { SetBorderState("a run started while I was watching, so I've thrown that check away — stop the run and "
+                         + "check again.", false); return; }
+
+            int want = Roles.HuntRole.SetupJumpsWanted;
+            if (attackOn) { _settings.AttackFlashJumps = look.Jumps; _settings.AttackFlashSeen = look.Amplitude; }
+            else _settings.AttackFlashQuiet = look.Jumps;
+            _settings.Save();
+
+            if (attackOn)
+            {
+                if (look.Jumps == 0)
+                    SetBorderState($"nothing went red in about {Roles.HuntRole.SetupWindowSeconds:0} seconds. If auto attack "
+                               + "really was on, that strip isn't catching the border — re-pick a thinner one right on "
+                               + "the edge that flashes.", false);
+                else if (look.Jumps < want)
+                    // TWO DIFFERENT FAULTS, and the same advice fixes only one of them. A strip that
+                    // barely moves is a geometry problem and a thinner strip fixes it. A strip that
+                    // moves a long way but only a few times is a border that blinks too slowly for
+                    // this to be safe, and no amount of re-drawing will change that — telling that
+                    // user to try a thinner strip sends them round a circle they cannot win.
+                    SetBorderState(look.Amplitude >= Roles.HuntRole.MinFlashSpread * 2
+                      ? $"that border is clear enough (it moved {look.Amplitude:0}) but it only changed {look.Jumps} "
+                        + $"times in about {Roles.HuntRole.SetupWindowSeconds:0} seconds — it blinks too slowly for me to be "
+                        + "sure it has gone quiet rather than caught it mid-blink, so I won't press your attack key on "
+                        + "it. She'll still recognise it when it fires, which only ever cancels a press."
+                      : $"only {look.Jumps} red changes and it moved just {look.Amplitude:0} — I want at least {want} "
+                        + "changes before I'll act on this strip going quiet, because a check that scrapes past means "
+                        + "later looks will sometimes fall short, and falling short is what presses your attack key. "
+                        + "Try a thinner strip right on the flashing edge.", false);
+                else if (_settings.AttackFlashQuiet == 0)
+                    SetBorderState($"FLASHING — {look.Jumps} red changes (it moved {look.Amplitude:0}), and it was still "
+                               + "with attack off. Both checks passed; she'll trust this strip.", true);
+                else
+                    SetBorderState($"FLASHING — {look.Jumps} red changes (it moved {look.Amplitude:0}). Now turn auto "
+                               + "attack OFF and press \u201Ccheck: attack OFF\u201D, so I know this strip goes quiet too.", true);
+            }
+            else if (look.Jumps > 0)
+                SetBorderState($"that strip went red {look.Jumps} time(s) with attack OFF, so something there flickers "
+                           + "red whatever you are doing — she'd read that as \u201Cattack is on\u201D for ever and never "
+                           + "touch your key. Move the strip and check again.", false);
+            else if (_settings.AttackFlashJumps >= want)
+                SetBorderState($"dead still with attack off, and {_settings.AttackFlashJumps} red changes with it on. Both "
+                           + "checks passed; she'll trust this strip.", true);
             else
-                SetLampState($"nothing moved (only {spread:0}). Turn auto attack ON and click again — until I have "
-                           + "seen this strip flash once, I won't take stillness as proof it's off.", false);
+                SetBorderState("dead still with attack off \u2014 good. Now turn auto attack ON and press "
+                           + "\u201Ccheck: attack ON\u201D.", true);
         }
-        catch { SetLampState("couldn't watch that strip just then", false); }
-        finally { _lampBusy = false; }
+        catch { SetBorderState("couldn't watch that strip just then", false); }
+        finally { _borderBusy = false; }
     }
 
-    private bool _lampBusy;
+    private bool _borderBusy;
+    /// <summary>Seconds between the click and the first sample, so the user can put the game back in
+    /// front of this window.</summary>
+    private const int LeadInSeconds = 3;
 
-    private bool _lampClickWired;
-
-    private void SetLampState(string text, bool good)
+    private void SetBorderState(string text, bool good)
     {
-        if (AttackLampState is null) return;
-        AttackLampState.Text = text;
-        AttackLampState.Foreground = Hex(good ? "#7CE38B" : "#FFCB6B");
-        // CLICKING THE READOUT WATCHES AGAIN — the button must keep meaning "pick", because a
-        // re-pick is the only thing that discards the measurement. Wired once: this method runs on
-        // every route in, and hooking the same handler each time would fire it as many times as the
-        // page had been visited.
-        if (_lampClickWired) return;
-        _lampClickWired = true;
-        AttackLampState.Cursor = System.Windows.Input.Cursors.Hand;
-        AttackLampState.MouseLeftButtonUp += (_, _) => RefreshLampState();
+        if (AttackBorderState is null) return;
+        AttackBorderState.Text = text;
+        AttackBorderState.Foreground = Hex(good ? "#7CE38B" : "#FFCB6B");
     }
 }

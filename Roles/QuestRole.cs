@@ -173,6 +173,13 @@ public sealed class QuestRole
     /// block like the position, because the pass-end message would otherwise read the LAST step's
     /// scan.</summary>
     private string _lastDetail = "";
+    /// <summary>The last scan had more distinct squares in the bag rectangle than it judges in one
+    /// pass. Snapshotted with the rest of the miss evidence — a truncated sweep changes what the
+    /// closest square MEANS, so the run-ending message has to know.</summary>
+    private bool _lastCapped;
+    /// <summary>The colour pass ran out of its work budget before reaching the bottom of the bag
+    /// rectangle, so "I searched this box" is not true of all of it.</summary>
+    private bool _lastBagCut;
     /// <summary>Where each item's side-by-side comparison picture was written. PER ITEM: a single
     /// field let a stop message about item B point at the picture written earlier for item A, which
     /// is worse than naming no file at all.</summary>
@@ -267,7 +274,7 @@ public sealed class QuestRole
                      : $"{Squares} squares";
             return $"{n} in the bag area looked the right colour"
                  + (Squares > 0 && Probes != Squares ? $" ({Probes} overlapping probes)" : "")
-                 + (Capped ? $", and I only judged the closest {MaxProposals} probes of them" : "")
+                 + (Capped ? $", and I only judged the closest {MaxProposals} squares of them" : "")
                  + (BestColour >= 0 ? $"; the best of them was {BestColour:0} away on colour, out of {proposeAt:0} allowed" : "")
                  + $"; they span {X0 * 100:0}–{X1 * 100:0}% across and {Y0 * 100:0}–{Y1 * 100:0}% down the window";
         }
@@ -293,6 +300,26 @@ public sealed class QuestRole
     /// sprite; losing the sprite entirely changes everything. 0.80 sits between those.
     /// </summary>
     private const double AfterShotKeep = 0.80;
+
+    /// <summary>
+    /// Where the bag rectangle actually is, in the same window percentages every other line uses.
+    ///
+    /// Deliberately the rectangle and not where the candidates landed. Those are different facts and
+    /// only one of them answers "were you even looking in the right place" — candidates cluster
+    /// wherever the colours happen to match, so quoting their span describes the search's OUTPUT
+    /// while the user needs its INPUT.
+    /// </summary>
+    private string BagBoxSay() => BagBoxSay(_lastBagCut);
+
+    private string BagBoxSay(bool cut)
+        => !_script.BagSet
+             ? "No bag rectangle is set, so the scan had nowhere to look"
+             : $"I searched {_script.BagX * 100:0}–{(_script.BagX + _script.BagW) * 100:0}% across and "
+               + $"{_script.BagY * 100:0}–{(_script.BagY + _script.BagH) * 100:0}% down the game window"
+               + (cut ? " — or rather I started to: that rectangle is big enough that the colour pass ran "
+                        + "out of its budget partway down it, so the lower part was never looked at, and a SMALLER "
+                        + "rectangle around the bags you actually keep quest items in is the fix rather than a "
+                        + "bigger one" : "");
 
     private const int MaxStepMisses = 1;
     private int _finished;
@@ -806,6 +833,8 @@ public sealed class QuestRole
         _lastPos = "";
         _lastColour = -1;
         _lastDetail = "";
+        _lastCapped = false;
+        _lastBagCut = false;
         _pendingLook = null;
         _pendingLookCropped = false;
         _pendingLookFromLook = false;
@@ -870,26 +899,44 @@ public sealed class QuestRole
                 int wantW = (int)Math.Round(step.IconW * frame.Width);
                 int wantH = (int)Math.Round(step.IconH * frame.Height);
                 QuestFind.CopyHit? best = null;
-                int looked = 0;
+                // The squares already judged, for the spatial fold below. Kept as a list rather
+                // than counted, because the fold needs their positions.
+                var judged = new List<QuestFind.IconHit>();
                 // Snapshotted under the store's lock. The icon-pick tile can clear this list from
                 // the UI thread while a run is going, and List<T>'s enumerator throws the instant
                 // that happens — from inside a scan that runs several times a second.
                 QuestFind.IconPatch[] looks = QuestScriptStore.Current.Read(() => step.IconLooks.ToArray());
                 List<QuestFind.IconHit> proposals = QuestFind.ProposeIcons(
                     frame, _script.BagX, _script.BagY, _script.BagW, _script.BagH,
-                    step.IconSig!, step.IconW, step.IconH, CoarsePropose);
+                    step.IconSig!, step.IconW, step.IconH, CoarsePropose, out bool proposeCut);
+                _lastBagCut = proposeCut;
                 Sift sift = Sifted(proposals, step);
                 // PHASE TWO's shortlist: the squares that already look most like the item, which
                 // are the only ones worth showing its other photographs to.
                 var shortlist = new List<(QuestFind.IconHit H, double Ncc)>();
                 foreach (QuestFind.IconHit h in proposals)
                 {
-                    // Bounded. The coarse pass steps in thirds of an icon, so a big bag can offer
-                    // hundreds of squares, and each correlation is an alignment search — hundreds
-                    // of thousands of operations. The sweep this was ported from stops at the
-                    // first acceptance for the same reason; a quest hand-in needs ONE copy, not
-                    // the best one in the bag.
-                    if (++looked > MaxProposals) break;
+                    // FOLDED TO SQUARES BEFORE THE CAP, not after — this is the whole fix.
+                    //
+                    // Every real slot arrives as about nine overlapping probes, so counting probes
+                    // against the cap meant a bag offering 2441 probes had roughly two dozen of its
+                    // 271 slots looked at, and the other 247 were never judged at all. The failure
+                    // is silent and completely convincing: the message quotes a precise correlation
+                    // for the closest square it examined, which is an entirely different item, and
+                    // the copies the user can see were dropped before the pixels ever saw them.
+                    //
+                    // Half an icon, the same distance FindAllCopies and the phase-two shortlist
+                    // fold at, and for the same reason: two distinct slots can never be that close,
+                    // and proposals arrive sorted by colour so the probe kept for each slot is its
+                    // best-centred one.
+                    if (judged.Any(k => Math.Abs(k.X - h.X) < step.IconW * 0.5
+                                     && Math.Abs(k.Y - h.Y) < step.IconH * 0.5)) continue;
+                    // Bounded, because each correlation is an alignment search — hundreds of
+                    // thousands of operations. The sweep this was ported from stops at the first
+                    // acceptance for the same reason; a quest hand-in needs ONE copy, not the best
+                    // one in the bag.
+                    if (judged.Count >= MaxProposals) break;
+                    judged.Add(h);
                     (double ncc, int dx, int dy, bool crop, double whole, double mid, bool tried) =
                         QuestFind.Score(frame, h.X, h.Y, step.IconPixels!, wantW, wantH);
                     if (best is null || ncc > best.Ncc)
@@ -904,14 +951,15 @@ public sealed class QuestRole
                         bestRefLabel = "stored reference";
                     }
                     if (ncc >= NccAccept) break;          // that's a copy — nothing to gain by looking further
-                    if (looks.Length > 0 && ncc > 0)
+                    // BUILT WHETHER OR NOT THERE ARE LEARNED LOOKS. It used to be phase two's
+                    // shortlist and nothing else, so with no learned appearances it stayed empty —
+                    // and phase 1b below, which needs it, would have had nothing to work on in the
+                    // ordinary case of a freshly picked item.
+                    if (ncc > 0)
                     {
-                        // SPATIALLY deduped before trimming. The coarse pass steps in thirds of an
-                        // icon and its own suppressor is narrower than that stride, so every real
-                        // icon arrives as a 3×3 cluster of overlapping proposals — sixteen raw
-                        // entries is under two actual squares, and phase two would be shown the
-                        // same slot nine times. Half an icon is the distance FindAllCopies uses for
-                        // the same reason: two distinct slots can never violate it.
+                        // The outer fold already guarantees one entry per square, so this is now a
+                        // plain insert kept sorted — the position search stays as the belt to the
+                        // fold's braces, since the two must agree on what "the same square" means.
                         int at = shortlist.FindIndex(k => Math.Abs(k.H.X - h.X) < step.IconW * 0.5
                                                        && Math.Abs(k.H.Y - h.Y) < step.IconH * 0.5);
                         if (at >= 0) { if (ncc > shortlist[at].Ncc) shortlist[at] = (h, ncc); }
@@ -920,6 +968,48 @@ public sealed class QuestRole
                         if (shortlist.Count > LookShortlist) shortlist.RemoveAt(shortlist.Count - 1);
                     }
                 }
+
+                // PHASE 1b: THE REST OF THE CLUSTER, for the squares that look most promising.
+                //
+                // The fold above judges ONE probe per square, and that probe is chosen by colour.
+                // The alignment search inside Score covers about a sixth of an icon, but the probe
+                // the fold happens to keep can be a third of an icon off the true centre — so a
+                // real copy can be scored at a point the search cannot walk back from, and a
+                // misaligned patch just scores low and loses silently. That is this file's most
+                // expensive documented bug, and the fold would have reintroduced it: before the
+                // fold, all nine probes of a square were scored and the best won, which was an
+                // implicit wider search paid on every square.
+                //
+                // So it is paid again — but only where it can change the answer. The sixteen
+                // best-correlating squares get their whole cluster scored, which is the old
+                // behaviour exactly, and the other four hundred keep the cheap single look that
+                // exists to stop a copy being dropped before the pixels ever see it.
+                if (best is not null && best.Ncc < NccAccept && judged.Count > 0)
+                    for (int si = 0; si < shortlist.Count && best!.Ncc < NccAccept; si++)
+                    {
+                        QuestFind.IconHit sq = shortlist[si].H;
+                        foreach (QuestFind.IconHit h in proposals)
+                        {
+                            if (Math.Abs(h.X - sq.X) >= step.IconW * 0.5
+                                || Math.Abs(h.Y - sq.Y) >= step.IconH * 0.5) continue;
+                            if (h.X == sq.X && h.Y == sq.Y) continue;      // already scored above
+                            (double ncc, int dx, int dy, bool crop, double whole, double mid, bool tried) =
+                                QuestFind.Score(frame, h.X, h.Y, step.IconPixels!, wantW, wantH);
+                            // WRITTEN BACK, not just compared. The shortlist entry is the point
+                            // PHASE TWO correlates every learned appearance at, and leaving it on
+                            // the colour-best probe would fix the misalignment for the stored
+                            // reference and leave it in place for exactly the population the
+                            // learned appearances exist to rescue.
+                            if (ncc <= shortlist[si].Ncc) continue;
+                            shortlist[si] = (h, ncc);
+                            if (ncc <= best!.Ncc) continue;
+                            best = new QuestFind.CopyHit(h.X + (double)dx / frame.Width,
+                                                         h.Y + (double)dy / frame.Height, ncc, h.Dist);
+                            bestCropped = crop; bestWhole = whole; bestCentre = mid; bestCropTried = tried;
+                            bestRef = step.IconPixels;
+                            bestRefLabel = "stored reference";
+                        }
+                    }
 
                 // PHASE TWO: the learned appearances, against the likeliest squares only. Each look
                 // is compared to the square DIRECTLY — they are alternative photographs, not a
@@ -1203,16 +1293,34 @@ public sealed class QuestRole
                 // of one early pass where nothing was proposed.
                 if (pick is not null) detail += TooLooseWarning(step);
                 _lastDetail = pick is null ? "" : $"{sifted}. {detail}".Trim();
-                Log?.Invoke(pick is null
-                    ? $"✖ no {step.Item} in the bag area — nothing in it even looks the right colour "
-                      + $"(closest square is {closest:0} away, and a candidate has to be within {CoarsePropose:0}). "
-                      + "Nothing was proposed, so the pixel matcher never got to judge anything — if you can see "
-                      + "copies, the bag rectangle is probably not over them."
-                    : $"✖ no {step.Item} in the bag area — {sifted}, and the closest of them, at {_lastPos} of the "
-                      + $"window, matches only {pick.Ncc * 100:0.0}% of its pixels. That is below the "
-                      + $"{ProbableAccept * 100:0}% floor I'll take a chance on. {detail}"
-                      + "If you can see a copy at that spot, re-pick this item's slot from it; if the copies you "
-                      + "can see are somewhere else, the bag rectangle isn't covering them.");
+                _lastCapped = best1.Sift.Capped;
+                // THE RECTANGLE FIRST, ALWAYS, and before a single percentage.
+                //
+                // This is the one fact that makes the rest of the message worth reading, and it used
+                // to be a maybe at the bottom of three hundred words about correlation scores. A run
+                // stopped with eight copies visible in a bag the rectangle did not reach, and every
+                // number in the message was a measurement of somebody's boots — perfectly accurate,
+                // and about the wrong square. If the copies are outside the box, nothing else here
+                // means anything, so it goes at the top where it cannot be missed.
+                // SEPARATE LINES, not one with newlines in it. The durable log writes each entry as
+                // "time [source] message", so an embedded newline produces continuation lines with
+                // no timestamp and no source on them.
+                Log?.Invoke($"✖ no {step.Item} in the bag area. {BagBoxSay()} — if the copies you can see are "
+                      + "OUTSIDE that box, that is the whole answer: widen the bag rectangle on the Quest page, or "
+                      + "move the item into a bag it covers. Nothing below matters in that case.");
+                if (best1.Sift.Capped)
+                    Log?.Invoke($"· that box holds more squares than I judge in one pass, so I looked at the "
+                          + $"{MaxProposals} whose colours were closest and stopped. If your copies are in it but "
+                          + "were not among those, a smaller rectangle around the bags you actually use will find "
+                          + "them.");
+                Log?.Invoke((pick is null
+                    ? $"Inside the box: nothing even looks the right colour (closest square is {closest:0} away, and "
+                      + $"a candidate has to be within {CoarsePropose:0}). Nothing was proposed, so the pixel matcher "
+                      + "never got to judge anything."
+                    : $"Inside the box: {sifted}, and the closest of them, at {_lastPos} of the window, matches only "
+                      + $"{pick.Ncc * 100:0.0}% of its pixels. That is below the {ProbableAccept * 100:0}% floor I'll "
+                      + $"take a chance on. {detail}"
+                      + "If you can see a copy at that spot, re-pick this item's slot from it."));
                 _emptyBagMiss = true;
                 return false;
             }
@@ -1665,7 +1773,10 @@ public sealed class QuestRole
         // being asked to check against their own screen — the exact confusion this record exists to
         // remove, wearing the fix's own clothes.
         int squares = -1;
-        if (proposals.Count <= 600)
+        // The bound is about the quadratic fold, and 600 was set when the judging cap made the
+        // distinct count merely informative. It decides the CAP now, so it has to survive a whole
+        // inventory: a few thousand entries is a few million cheap comparisons, once per scan.
+        if (proposals.Count <= 6000)
         {
             var seen = new List<QuestFind.IconHit>();
             foreach (QuestFind.IconHit h in proposals)
@@ -1673,8 +1784,14 @@ public sealed class QuestRole
                                 && Math.Abs(k.Y - h.Y) < step.IconH * 0.5)) seen.Add(h);
             squares = seen.Count;
         }
-        // Capped is measured in PROBES, because probes are what the judging loop counts.
-        return new Sift(proposals.Count, squares, proposals.Count > MaxProposals, bestColour, x0, y0, x1, y1);
+        // Capped is measured in SQUARES, because squares are what the judging loop now counts. A
+        // count it could not compute (squares < 0) can't answer the question, and claiming "capped"
+        // from the probe count there would be the inflated number wearing the honest one's label.
+        // squares < 0 means the fold was too big to run — and a list that big is unconditionally
+        // more squares than the cap, so it is capped by arithmetic even though it can't be counted.
+        // Reading -1 as "not capped" dropped the caveat in the one case where it certainly applied.
+        return new Sift(proposals.Count, squares, squares < 0 || squares > MaxProposals,
+                        bestColour, x0, y0, x1, y1);
     }
 
     /// <summary>
@@ -2189,7 +2306,8 @@ public sealed class QuestRole
                 // The item a scan couldn't find this pass, and whether it was the colour matcher
                 // that failed to find it. Drives the ending, which is where the advice belongs.
                 string? blockedItem = null;
-                bool blockedByColour = false, blockedHasRest = false, blockedOut = false;
+                bool blockedByColour = false, blockedHasRest = false, blockedOut = false, blockedCapped = false;
+        bool blockedBagCut = false;
                 string blockedPos = "", blockedDetail = "", blockedDiag = "";
                 double blockedColour = -1;
                 _assumedAnyThisPass = false;
@@ -2396,6 +2514,8 @@ public sealed class QuestRole
                                 blockedPos = _lastPos;
                                 blockedColour = _lastColour;
                                 blockedDetail = _lastDetail;
+                                blockedCapped = _lastCapped;
+                                blockedBagCut = _lastBagCut;
                                 blockedDiag = _diagFiles.TryGetValue(DumpKey(step), out string? df) ? df : "";
                                 // And leave the loop. The break below only ends the RETRY loop —
                                 // its own comment says "next STEP" — so without this the runner
@@ -2477,11 +2597,20 @@ public sealed class QuestRole
                              + "from a look-alike. Re-pick its slot once and she'll match its actual pixels instead.";
                     else if (blockedPos.Length > 0)
                     {
-                        why += $" If you can SEE more of them, look at {blockedPos} of the game window — that is the "
-                             + "closest thing to your reference in the bag area. If a copy is sitting right there, "
-                             + "re-picking this item's slot from it will fix it. If that spot is empty or holds "
-                             + "something else, they have run out of the area you dragged — check whether they moved "
-                             + "to a bag the rectangle doesn't cover.";
+                        // FIRST, BEFORE ANY NUMBER: where the search actually looked. A run stopped
+                        // with eight copies sitting in a bag the rectangle never reached, and this
+                        // paragraph opened by pointing at the closest match INSIDE the box — which
+                        // was an entirely different item, described in convincing detail.
+                        why += $" {BagBoxSay(blockedBagCut)}. If the copies you can see are OUTSIDE that box, that is the whole "
+                             + "answer — widen the bag rectangle on the Quest page, or move the item into a bag it "
+                             + $"covers. If they are INSIDE it, look at {blockedPos} of the game window: that is the "
+                             + "closest thing to your reference among the squares I judged. If a copy is sitting "
+                             + "right there, re-picking this item's slot from it will fix it.";
+                        if (blockedCapped)
+                            why += $" One more thing worth knowing: that box holds more squares than I judge in a "
+                                 + $"single pass, so I looked at the {MaxProposals} closest on colour and stopped. A "
+                                 + "rectangle around only the bags you actually keep quest items in is both faster "
+                                 + "and surer than one over the whole inventory.";
                         // The evidence, not just the advice. The old wording asserted the cause — a
                         // shrinking stack's count, a highlighted slot — and after the centre-crop
                         // comparison shipped, the bot can actually TELL whether that is what

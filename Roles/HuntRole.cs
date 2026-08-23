@@ -253,8 +253,51 @@ public sealed class HuntRole
             // And what the CLIENT says about auto attack, when it says anything. A guildmate typing
             // "turn auto-attack off before you pull" must not clear the flag that suppresses the
             // toggle press — the same class of bug as a stranger's chat moving the character.
-            if (AutoAtkOn.IsMatch(raw)) _autoAttackOn = true;
-            else if (AutoAtkOff.IsMatch(raw)) _autoAttackOn = false;
+            if (AutoAtkOn.IsMatch(raw))
+            {
+                _autoAttackOn = true;
+                // A PRESS THAT WORKED IS NOT EVIDENCE OF A STALE STRIP, and without this the cap
+                // fired on the feature working perfectly. EQ drops auto attack when the target
+                // dies, so on the very setup this fallback exists for — a rotation that does not
+                // engage attack — every single fight begins with attack genuinely off, the border
+                // correctly reads silent, the key is pressed, and it engages. Ten of those is one
+                // hour of an overnight run, after which the old code stopped pressing and told the
+                // user their strip had probably moved. The cap is for a strip that is WRONG, and a
+                // press the client confirms turned attack on is proof it was right.
+                Interlocked.Exchange(ref _borderNudges, 0);
+            }
+            else if (AutoAtkOff.IsMatch(raw))
+            {
+                _autoAttackOn = false;
+                // THE BORDER JUST GOT CAUGHT LYING, and this is the only moment it can be.
+                //
+                // EQ prints its own "auto attack is off" for a synthesized press exactly as for a
+                // hand press. So if the client says attack went OFF within a couple of seconds of a
+                // press this class made BECAUSE the border read silent, then the border was silent
+                // while attack was running — and it was this class that stopped the fight. Reading
+                // that and doing nothing was the worst thing in the previous version: the same
+                // wrong press then repeated once a fight, all night, each time announcing
+                // confidently that attack had been off.
+                //
+                // The strip is not un-proven on disk — the user picked it and one bad night may be
+                // a moved window rather than a bad pick — but it is not believed again this run.
+                // TickCount64, not DateTime. This app grinds overnight, and wall-clock arithmetic
+                // across a daylight-saving step produces a negative difference that sails under any
+                // "was it recent" test.
+                long pressed = Interlocked.Read(ref _borderPressedTicks);
+                // A DEAD MOB TURNS ATTACK OFF TOO, and the client prints the same sentence for it.
+                // Without this the detector fires on the first fight whose mob happens to die inside
+                // the window after a correct press, and then disables the border for the whole run
+                // while apologising for something that worked.
+                if (pressed != 0 && !_borderLied && !_mobDead && Environment.TickCount64 - pressed <= 2500)
+                {
+                    _borderLied = true;
+                    Log?.Invoke("The game says auto attack just went OFF right after I pressed "
+                              + $"{_autoAtk.Display} — so the border read silent while attack was running, and that "
+                              + "press stopped your fight. I'm sorry. I won't trust that strip again this run; "
+                              + "re-pick it on the Grind page (it may have moved) and run both checks.");
+                }
+            }
         }
 
         if (_s.GrindBardMode && _singing && LogEventParser.MelodyStopped(raw))
@@ -820,7 +863,19 @@ public sealed class HuntRole
                     // FACING FIX: if our hits are landing, all good. If the log says we can't see
                     // the target / it's out of reach — or nothing lands for a few seconds — turn in
                     // a widening sweep (and close distance) until our swings start printing.
-                    if (_ourSwings != swingsSeen) { swingsSeen = _ourSwings; sweep = 0; unreachable = 0; lastOut = DateTime.Now; }
+                    if (_ourSwings != swingsSeen)
+                    {
+                        swingsSeen = _ourSwings; sweep = 0; unreachable = 0; lastOut = DateTime.Now;
+                        // A STREAK, and it has to be cleared by the thing that breaks it. Left to
+                        // accumulate it becomes a running total over a whole night and the message
+                        // that quotes it — "that's 5 fights RUNNING" — becomes a lie that sends the
+                        // user to re-check a strip that is working.
+                        // MELEE swings, to match the branch that increments it — that one requires
+                        // _meleeSwings to be unchanged, so clearing on _ourSwings (which counts spell
+                        // damage too) let any hybrid rotation reset the streak every fight and the
+                        // warning could never fire.
+                        if (_meleeSwings != meleeAtStart) _borderOnNoSwing = 0;
+                    }
 
                     // AUTO ATTACK DIDN'T ENGAGE. The rotation is meant to start it — most clients
                     // have a "begin auto attack when you cast at a hostile" option — and when that
@@ -848,21 +903,40 @@ public sealed class HuntRole
                         // absence; this is a look at the thing itself. A clear "it's on" cancels the
                         // press outright — and cancels it for the rest of the fight, because the
                         // reason won't have changed.
-                        // Costs about a second, once per fight, and only in a fight that has
+                        // Costs up to three seconds, once per fight, and only in a fight that has
                         // already gone wrong — nothing has swung for two and a half seconds while
-                        // in range. Cheap at that price for the only signal that actually knows.
-                        bool? lamp = await FlashSaysAttackOn(ct);
-                        if (lamp == true)
+                        // in range. A flashing border answers in well under a second because the
+                        // watch stops on the third edge; only the silent case pays the full window,
+                        // and that is exactly the case that must not be rushed.
+                        bool? border = await FlashSaysAttackOn(ct);
+                        if (border == true)
                         {
                             _autoAttackTried = true;
-                            if (_narrateLamp)
+                            if (_narrateBorder)
                             {
-                                _narrateLamp = false;
+                                _narrateBorder = false;
                                 Log?.Invoke("Nothing has swung, but the attack border IS flashing — so auto attack is "
                                           + "already on and this is facing or reach. Leaving your key alone.");
                             }
+                            // THE OTHER WAY THIS STRIP CAN BE WRONG, and it is invisible from inside.
+                            //
+                            // The quiet check is taken OUT of combat; this verdict is taken IN it. So
+                            // anything red that only happens while fighting — a damage tint, an aggro
+                            // glow, a proc — passes the check and then reads "attack is on" for every
+                            // fight of the night, and the feature is off behind a green tick.
+                            //
+                            // Deliberately NOT answered by pressing the key: the whole point of this
+                            // branch is that we have been told attack is on, and acting against that
+                            // on a suspicion is how a working fight gets switched off. What it can do
+                            // is say so, once, with the one instruction that would settle it.
+                            if (++_borderOnNoSwing == BorderOnNoSwingSuspect)
+                                Log?.Invoke($"That's {BorderOnNoSwingSuspect} fights running where the border said attack "
+                                          + "was on and nothing swung. If you ARE attacking, this is facing or reach and "
+                                          + "it's fine. If you are not, that strip is picking up something else that only "
+                                          + "goes red in combat — stand out of combat and press \u201Ccheck: attack OFF\u201D "
+                                          + "on the Grind page to find out which.");
                         }
-                        else NudgeAutoAttack(lamp is false);
+                        else NudgeAutoAttack(border is false);
                     }
 
                     if (castOnly)
@@ -1319,153 +1393,207 @@ public sealed class HuntRole
     private async Task<bool?> FlashSaysAttackOn(CancellationToken ct)
     {
         if (!_s.AttackFlashSet || _vitals is null || !_sink.Ready) return null;
-        FlashLook look = await FlashSpread(ct);
+        FlashLook look = await WatchBorder(ct);
         // COULDN'T WATCH is not "wasn't flashing". The caller has to be able to tell those apart,
         // because one of them justifies pressing a key and the other justifies nothing at all.
-        if (!look.Watched) { _flashUnwatched = true; return null; }
-        _lastDuty = look.Duty;
+        if (!look.Watched)
+        {
+            _flashUnwatched = true;
+            // SAID WHEN IT STOPS WORKING. An unreadable strip returns null, and null takes the
+            // early-out in NudgeAutoAttack before any message is written — so the whole fallback
+            // could be dead for a night with nothing in the log. A strip covered by an overlay, or
+            // one that has drifted outside the window, reads exactly like this every fight.
+            if (++_flashBlind == BlindLooksBeforeSaying)
+                Log?.Invoke($"I have failed to read the attack border {BlindLooksBeforeSaying} times in a row, so the "
+                          + "auto-attack fallback is doing nothing. " + BorderAdvice());
+            return null;
+        }
         _flashUnwatched = false;
-        if (look.Spread >= FlashBar()) return true;
-        // "NOT FLASHING" IS ONLY AN ANSWER IF A MISS WOULD HAVE BEEN UNLIKELY.
+        _flashBlind = 0;
+        // ANY RED MOVEMENT AT ALL MEANS HANDS OFF — not three, one.
         //
-        // Seeing the flash is easy and the failure is harmless — a false "it's on" merely declines
-        // to press. Concluding it ISN'T flashing is the one verdict that presses a toggle, and its
-        // reliability depends entirely on how long the border stays lit. Simulated against a
-        // symmetric blink the miss rate is zero; against a border that lights for a quarter of its
-        // cycle it is about one in four, and a twentieth, one in two. Those misses all read as
-        // "attack is off" and switch off the attack this exists to protect.
+        // Three is what the SETUP bar is built on and what lets the watch stop early; it is not a
+        // threshold for the verdict. A border clearing setup at six edges over six and a half
+        // seconds lands two or three in the run's three-second window depending purely on where
+        // the window falls, and treating two as "I can't tell" hands the decision to the blind
+        // guess, which presses the key — on a strip that was visibly pulsing red two samples ago.
+        // That is this feature's own failure mode arriving through its own safety check, and the
+        // blind path doesn't even arm the lie detector, so it would never be caught.
+        if (look.Jumps > 0) return true;
+
+        // "NOT FLASHING" IS ONLY AN ANSWER IF THE EDGES WOULD HAVE BEEN SEEN, and only if the
+        // border was SILENT rather than merely under-counted.
         //
-        // So the run only takes that verdict from a border whose measured duty can support it.
-        // Below that it says "I can't tell" and falls back to the budgeted guess — which is the
-        // truth, and which is bounded at three presses a run rather than one per fight.
-        return _s.AttackFlashProven && _s.AttackFlashDuty >= MinTrustedDuty ? false : null;
+        // Spotting the flash is easy and being wrong about it is harmless — a false "it's on"
+        // merely declines to press, which is what a wildly panning camera produces. Concluding it
+        // ISN'T flashing is the one verdict that presses a toggle, so it gets three separate
+        // qualifications:
+        //
+        // ZERO, per the branch above. The setup check proves the border CAN be counted; it cannot
+        // prove every later three-second window will land the same number of edges on it, so the
+        // only count this verdict can safely rest on is none at all.
+        //
+        // FULL WINDOW. A watch cut short by the game losing focus can be half a second long, and
+        // half a second cannot contain the edges of a once-a-second border. A truncated watch reads
+        // silent by construction, so it isn't allowed to be the silent verdict.
+        //
+        // AND THE BORDER MUST NOT HAVE BEEN CAUGHT LYING this run — see _borderLied.
+        if (look.Jumps == 0 && look.Full && _s.AttackFlashProven && !_borderLied) return false;
+        return null;
     }
 
-    /// <summary>How far the strip's average colour has to travel to count as a flash. Derived from
-    /// the flash actually measured during setup so a subtle border and a vivid one both work, with
-    /// a floor that screen noise and a scrolling chat reflection cannot reach.</summary>
-    private double FlashBar() => Math.Max(MinFlashSpread, _s.AttackFlashSeen * 0.35);
+    /// <summary>
+    /// How big a redness jump counts as an edge of the flash — ONE constant, and the same one
+    /// during setup and during the run.
+    ///
+    /// It used to be scaled by the amplitude the setup measured, and that was wrong twice over.
+    /// The amplitude is a RANGE across the whole window; the thing it was being compared to is a
+    /// single step between two consecutive looks. Those are only equal for a border that snaps
+    /// instantly — for one that fades over a few frames the step is a third of the range, the bar
+    /// was over a third, and every edge fell just under it. That reads as "not flashing", which
+    /// presses the key and turns attack OFF mid-fight: the exact failure this feature exists to
+    /// prevent, arriving sooner the more vivid the border is.
+    ///
+    /// And the two ends disagreed. Setup runs with the amplitude still zero, so it certified the
+    /// strip at a bar of 20 while every later run demanded 40, 60, 90 — a handshake that proved a
+    /// condition nobody would afterwards test. A constant cannot drift apart from itself.
+    ///
+    /// Static, and the Grind page calls THIS rather than keeping its own copy, so there is one
+    /// expression in the app and it cannot drift apart from itself again.
+    /// </summary>
+    internal static double FlashBar() => MinFlashSpread;
 
-    /// <summary>Noise floor. Two blits of a still region differ by a fraction of one colour step;
-    /// this is far above that and far below any real flash.</summary>
-    internal const double MinFlashSpread = 7.0;
-
-    /// <summary>How much of its cycle the border has to spend LIT before "it isn't flashing" is
-    /// worth acting on. A steady blink is around a half; anything under a fifth is a wink, and a
-    /// watch that misses a wink is indistinguishable from one that watched a dark border.</summary>
-    internal const double MinTrustedDuty = 0.2;
+    /// <summary>The jump floor. Twenty units of MEAN redness across the strip needs the border to be
+    /// something like a tenth of what was picked, which is what forces a tight strip — and no
+    /// landscape can produce it between two looks a tenth of a second apart, because redness is
+    /// invariant to the brightness changes that scenery actually makes.</summary>
+    internal const double MinFlashSpread = 20.0;
 
     /// <summary>
-    /// How many samples the NEGATIVE case is worth. A flash is only seen if the window contains a
-    /// transition, so the window has to outlast the longest phase — and nobody has measured this
-    /// border's period. At 110 ms apart, thirty samples span 3.3 s, which simulation puts at zero
-    /// misses for any period up to six seconds; the nine-sample, 0.9 s window it replaces missed a
-    /// two-second flash two thirds of the time. Every one of those misses reads as "not flashing",
-    /// which presses the toggle and turns off the attack this whole mechanism exists to protect.
+    /// How many redness jumps make a flash rather than a coincidence.
     ///
-    /// The POSITIVE case never pays for it: the loop stops the moment it has seen enough, which for
-    /// a flashing border is five or six samples — half a second or so. Only the answer that is about
-    /// to press a key spends the full three and a bit seconds, which is the right way round.
+    /// A flash has two edges per cycle, so a border blinking anywhere near once a second gives six
+    /// or seven inside the window. The world behind it gives none: however fast the camera pans,
+    /// scenery moves SMOOTHLY between looks a tenth of a second apart, so it drifts rather than
+    /// jumps. Three sits comfortably above the drift and comfortably below the signal.
     /// </summary>
+    internal const int MinFlashJumps = 3;
+
+    /// <summary>
+    /// How many edges an attack-ON setup check has to count before the strip is trusted — DOUBLE
+    /// what the run needs, and measured over the whole window rather than stopped at the first
+    /// three.
+    ///
+    /// The run and the setup ask different questions and so they need different bars. The run asks
+    /// "is it flashing right now", and three edges answers that. The setup asks "will a
+    /// three-second window RELIABLY catch this border", and a check that scraped exactly three
+    /// answers no: the next window will sometimes catch two. Requiring twice the margin is what
+    /// makes the run's silence test mean something, and it is why the setup check does not stop
+    /// early — a truncated count cannot demonstrate headroom it was never allowed to measure.
+    /// </summary>
+    internal const int SetupJumpsWanted = MinFlashJumps * 2;
+
     private const int FlashSamples = 30;
-    /// <summary>Fewest usable reads before an answer means anything — and the same floor the early
-    /// bail respects, or a detection made in five samples would be discarded as unreadable.</summary>
+    /// <summary>
+    /// A LONGER WINDOW FOR THE SETUP CHECK, because it is asking a harder question.
+    ///
+    /// Thirty samples is 3.2 s, and six edges inside that needs the border to blink faster than
+    /// about once a second — a hidden requirement no user could discover, and one a slower border
+    /// can never satisfy however the strip is drawn. Sixty samples is 6.6 s and asks only that it
+    /// blinks faster than once every two seconds or so.
+    ///
+    /// The run does NOT need the same window, and this is why: a watch longer than the border's
+    /// longest steady phase always contains at least one edge, so a 3.2 s run window catches one
+    /// from anything blinking faster than about once every six seconds. The run's press needs zero
+    /// edges, not three, so what it needs is exactly that guarantee — not six edges.
+    /// </summary>
+    private const int SetupSamples = 60;
     private const int MinSamples = 6;
     private const int FlashGapMs = 110;
+    /// <summary>How long the setup window runs, in seconds, for the messages that quote it.</summary>
+    internal const double SetupWindowSeconds = (SetupSamples - 1) * FlashGapMs / 1000.0;
+
+    /// <summary>
+    /// REDNESS, not brightness: red minus the average of the other two.
+    ///
+    /// This is the whole trick and it comes straight from the user's correction — the border is
+    /// drawn OVER the 3D world, so the pixels behind it are never still and "did this change"
+    /// answers yes for ever. What the flash actually does is add RED. A cloud passing, a torch, the
+    /// sun going down move all three channels together and leave this number alone; laying a red
+    /// line over the same pixels moves it a long way.
+    /// </summary>
+    private static double Redness(double r, double g, double b) => r - (g + b) / 2;
 
     /// <summary>What a look at the border came to. Watched=false means it could not be observed at
     /// all — the game lost focus, the run was stopped — which is a different answer from "it was
-    /// still", and must not be mistaken for one.</summary>
-    internal readonly record struct FlashLook(double Spread, bool Watched, double Duty);
+    /// still", and must not be mistaken for one. Full=false means the watch was CUT SHORT for the
+    /// same reasons after enough samples to return a number: the number is real but the window
+    /// isn't long enough for silence to mean anything.</summary>
+    internal readonly record struct FlashLook(int Jumps, double Amplitude, bool Watched, bool Full);
 
     /// <summary>
-    /// Watch the strip and report how far its average colour travelled. Shared by the run and by
-    /// the Grind page's check, so what the page proves is exactly what the run measures.
+    /// Watch the strip and count how many times its redness JUMPED. Shared by the run and by the
+    /// Grind page's check, so what the page proves is exactly what the run measures.
     ///
-    /// The spread is a TRIMMED range — second-lowest to second-highest per channel — because a
-    /// plain min/max is set by its single most extreme sample, and one torn capture or one frame of
-    /// a tooltip drifting past would report a flash that never happened. Trimming discards one
-    /// outlier at each end while leaving a genuine two-level signal untouched, since a flashing
-    /// border spends many samples at each level.
+    /// Counting edges rather than measuring a range is what survives a background that is always
+    /// moving — and it happens to fix the case that beat the previous version, a border that only
+    /// winks: a brief flash produces MORE edges per second, not fewer, so the briefer the wink the
+    /// easier this gets. What it cannot see is a pulse whose edges are further apart than the
+    /// window is long, and the setup check measures that rather than letting the run draw
+    /// conclusions from a border it has never managed to catch.
     /// </summary>
-    internal static async Task<FlashLook> SampleFlash(Ocr.VitalsReader vitals, AppSettings s, double bar,
-                                                      Func<bool> keepGoing, Func<int, Task> wait)
+    /// <param name="stopEarly">Stop as soon as the answer is yes. The RUN wants this — three edges
+    /// is a flash and there is nothing to learn from watching it blink twenty more times while the
+    /// fight is paused. The SETUP check must not have it: its job is to measure how much headroom
+    /// the border has over a full window, and a count stopped at three can only ever report three.
+    /// </param>
+    internal static async Task<FlashLook> SampleFlash(Ocr.VitalsReader vitals, AppSettings s, double jumpBar,
+                                                      Func<bool> keepGoing, Func<int, Task> wait,
+                                                      bool stopEarly = true)
     {
-        var rs = new List<double>(); var gs = new List<double>(); var bs = new List<double>();
-        for (int i = 0; i < FlashSamples; i++)
+        var reds = new List<double>();
+        int jumps = 0;
+        bool full = true;
+        int samples = stopEarly ? FlashSamples : SetupSamples;
+        // A GRAB THAT FAILED IS NOT A QUIET SAMPLE. MeanOf returns null when the game is minimized,
+        // when something is sitting over the strip, or when the blit throws — all of which are
+        // perfectly steady and none of which is the border being still. But voiding the whole window
+        // on the FIRST one was too brittle to ship: a single toast, tooltip or task-switch during a
+        // six-second check killed it outright and sent the user off to re-pick a strip that was
+        // fine. A skipped sample only shortens the window slightly and can never invent an edge, so
+        // a tenth of them is affordable; past that the window is no longer long enough for silence
+        // to mean anything and it is marked short.
+        int misses = 0, missBudget = Math.Max(2, samples / 10);
+        for (int i = 0; i < samples; i++)
         {
-            if (!keepGoing()) break;
+            // CUT SHORT, NOT FINISHED. Whatever has been counted so far is real, but the window is
+            // now shorter than the border's own period might be, so silence from it means nothing.
+            if (!keepGoing()) { full = false; break; }
             if (i > 0) await wait(FlashGapMs);
             if (vitals.MeanOf(s.AttackFlashX, s.AttackFlashY, s.AttackFlashW, s.AttackFlashH)
-                is not (double r, double g, double b)) continue;
-            rs.Add(r); gs.Add(g); bs.Add(b);
-            int t = TrimFor(s.AttackFlashDuty, rs.Count);
-            // ENOUGH IS ENOUGH — but measured the SAME WAY the final answer is, or the shortcut
-            // undoes itself. Bailing on the untrimmed spread stopped at the first sample of a new
-            // phase, and the trim then threw that lone sample away and reported a spread of zero:
-            // simulated against a one-second flash it missed a third of them, and against a
-            // three-second one three quarters. Requiring the TRIMMED spread to clear the bar means
-            // two samples have landed in the new phase, which is exactly what survives trimming.
-            // MinSamples as well as the trim's own minimum: the floor below rejects anything
-            // shorter as unreadable, so bailing at five would have thrown away the very detection
-            // it had just made and reported "couldn't watch".
-            if (rs.Count >= Math.Max(MinSamples, 2 * t + 3) && Spread(rs, gs, bs, t) >= bar) break;
+                is not (double r, double g, double b))
+            { if (++misses > missBudget) full = false; continue; }
+            double red = Redness(r, g, b);
+            if (reds.Count > 0 && Math.Abs(red - reds[^1]) >= jumpBar) jumps++;
+            reds.Add(red);
+            // MinSamples as well as the jump count, so a detection is never thrown away by the
+            // floor below as unreadable. Stopping here is a POSITIVE answer, so the window is not
+            // marked short: nothing downstream reads silence out of a look that found three edges.
+            if (stopEarly && reds.Count >= MinSamples && jumps >= MinFlashJumps) break;
         }
-        // SIX, WHATEVER STOPPED IT. The floor used to apply only when the loop was cut short, so a
-        // capture failing on twenty-six of thirty attempts still returned an answer — computed
-        // untrimmed, from three samples, where one low reading is the whole result. A high one
-        // reads "flashing" and merely declines to press; a low one presses the key and announces
-        // that the border wasn't flashing.
-        if (rs.Count < MinSamples) return new FlashLook(-1, false, 0);
-        int trim = TrimFor(s.AttackFlashDuty, rs.Count);
-        return new FlashLook(Spread(rs, gs, bs, trim), true, LitFraction(rs, gs, bs));
+        if (reds.Count < MinSamples) return new FlashLook(0, 0, false, false);
+
+        // The amplitude, as a trimmed range, so one torn capture cannot set it. Shown to the user
+        // as "how far it moved" and nothing else — the verdict is the edge count, and deriving the
+        // jump bar from this range is what broke the previous version.
+        var v = new List<double>(reds);
+        v.Sort();
+        int lo = v.Count >= 5 ? 1 : 0;
+        return new FlashLook(jumps, v[v.Count - 1 - lo] - v[lo], true, full);
     }
 
-    /// <summary>
-    /// Whether one outlier can be afforded, given how briefly this border is known to light.
-    ///
-    /// Trimming discards the extreme sample at each end, which is what stops a single torn capture
-    /// reading as a flash — but it also discards the ONLY lit sample when the border merely winks,
-    /// turning a real flash into "still" and pressing the toggle. So it is spent only when the
-    /// measured duty says three or more samples should be lit. An unmeasured duty (0) keeps the
-    /// trim, because that is the case the proving click is about to measure.
-    /// </summary>
-    private static int TrimFor(double duty, int n) => duty > 0 && duty * n < 3 ? 0 : 1;
-
-    /// <summary>How much of the watch this region spent at the bright end of its own range — the
-    /// duty cycle, measured rather than assumed.</summary>
-    private static double LitFraction(List<double> r, List<double> g, List<double> b)
-    {
-        int n = r.Count, lit = 0;
-        double lo = double.MaxValue, hi = double.MinValue;
-        var sum = new double[n];
-        for (int i = 0; i < n; i++)
-        { sum[i] = r[i] + g[i] + b[i]; lo = Math.Min(lo, sum[i]); hi = Math.Max(hi, sum[i]); }
-        if (hi - lo < 1e-6) return 0;
-        double mid = (lo + hi) / 2;
-        for (int i = 0; i < n; i++) if (sum[i] > mid) lit++;
-        return (double)lit / n;
-    }
-
-    private static double Spread(List<double> r, List<double> g, List<double> b, int trim)
-    {
-        // A trim that would leave nothing to measure is no trim. At three samples, trim 1 compares
-        // the middle value with itself and returns zero for ever — i.e. "not flashing", i.e. press
-        // — so the guard is here rather than in the agreement of two call sites.
-        if (r.Count < 2 * trim + 2) trim = 0;
-        double d = 0;
-        foreach (List<double> ch in new[] { r, g, b })
-        {
-            var v = new List<double>(ch);
-            v.Sort();
-            int lo = Math.Min(trim, (v.Count - 1) / 2), hi = v.Count - 1 - lo;
-            double delta = v[hi] - v[lo];
-            d += delta * delta;
-        }
-        return Math.Sqrt(d);
-    }
-
-    private Task<FlashLook> FlashSpread(CancellationToken ct)
+    /// <summary>One look at the border, with the run's own guards on it.</summary>
+    private Task<FlashLook> WatchBorder(CancellationToken ct)
         => SampleFlash(_vitals!, _s, FlashBar(), () => !ct.IsCancellationRequested && _sink.Ready,
                        ms => Task.Delay(ms, ct));
 
@@ -1532,48 +1660,68 @@ public sealed class HuntRole
     /// log to have gone silent rather than merely "not started yet", and why it never fires in
     /// cast-only or bard mode — where no melee swing is expected and its absence proves nothing.
     /// </summary>
-    private void NudgeAutoAttack(bool lampSaysOff)
+    private void NudgeAutoAttack(bool borderSaysOff)
     {
+        // CONSUMED FIRST, ahead of every early return, including _autoAttackTried. Clearing it
+        // after one of them left the flag set on a path that had already decided nothing — a fight
+        // that never looked would then inherit an abandoned look from some earlier fight.
+        bool unwatched = _flashUnwatched;
+        _flashUnwatched = false;
         // The decision has been taken either way — a fight that couldn't send is not a fight that
         // should try again three seconds later.
         _autoAttackTried = true;
         if (_autoAtk.IsNone || !_sink.Ready) return;
-        // CONSUMED FIRST, ahead of every early return. Clearing it after one of them left the flag
-        // set on a path that had already decided nothing — true today only because of which
-        // conditions happen to be constant mid-run, which is not a reason.
-        bool unwatched = _flashUnwatched;
-        _flashUnwatched = false;
         // A LOOK THAT NEVER HAPPENED BUYS NOTHING. Losing focus mid-sample used to spend one of the
         // three per-run guesses and then press the key anyway — on no evidence, because the
         // measurement was abandoned before it produced any. The decision still stands for this
         // fight (_autoAttackTried is set above), it just isn't acted on.
         if (unwatched) return;
-        if (!lampSaysOff && ++_blindNudges > MaxBlindNudges)
+        if (!borderSaysOff && ++_blindNudges > MaxBlindNudges)
         {
             // SAID WHEN IT STOPS, like every other cap in this app. Going quiet is
             // indistinguishable from the feature never having worked.
             if (_blindCapSaid) return;
             _blindCapSaid = true;
             Log?.Invoke($"That's {MaxBlindNudges} guesses at auto attack this run, so I'll stop pressing "
-                      + $"{_autoAtk.Display}. It is a toggle and I can't see whether attack is on — " + LampAdvice());
+                      + $"{_autoAtk.Display}. It is a toggle and I can't see whether attack is on — " + BorderAdvice());
             return;
         }
-        _sink.Send(_autoAtk);
-        Log?.Invoke(lampSaysOff
+        // AND THE MEASURED PATH IS CAPPED TOO, just far higher. See MaxBorderNudges.
+        if (borderSaysOff && Interlocked.Increment(ref _borderNudges) > MaxBorderNudges)
+        {
+            if (_borderCapSaid) return;
+            _borderCapSaid = true;
+            Log?.Invoke($"I have now pressed {_autoAtk.Display} {MaxBorderNudges} times this run because the attack "
+                      + "border read silent. That is more than bad luck, so I'll stop: the strip has probably "
+                      + "moved. Re-pick it on the Grind page and run both checks.");
+            return;
+        }
+        // SENT, OR NOTHING HAPPENED. Send re-checks focus itself and no-ops if it went away in
+        // between, and both the log line and the lie detector below would then be describing a
+        // press that never left the building — arming the detector on it would let the user's OWN
+        // next attack keypress read as "the border lied" and disable the feature for the run.
+        if (!_sink.Send(_autoAtk)) return;
+        if (borderSaysOff) Interlocked.Exchange(ref _borderPressedTicks, Environment.TickCount64);
+        Log?.Invoke(borderSaysOff
             ? $"The attack border isn't flashing, so auto attack is OFF — tapping {_autoAtk.Display} to turn it on."
             : $"Nothing has swung since the rotation started, so auto attack MIGHT not be on — tapping "
               + $"{_autoAtk.Display} once. This is a guess: the combat log never says when a song or a spell "
               + "engaged attack, and a character facing the wrong way swings at nothing and prints nothing. "
-              + LampAdvice());
+              + BorderAdvice());
     }
 
     /// <summary>Say the "indicator says it's already on" line once a run, not once a fight.</summary>
-    private bool _narrateLamp = true;
+    private bool _narrateBorder = true;
+
+    /// <summary>Fights where the border said attack was on and nothing had swung. Counted, never
+    /// acted on — see the comment at the point of use.</summary>
+    private int _borderOnNoSwing;
+    private const int BorderOnNoSwingSuspect = 5;
 
     /// <summary>
     /// How many times a whole RUN may press the toggle on a guess rather than on the indicator.
     ///
-    /// Proof gets a press per fight; a guess does not. Without the lamp picked — the default —
+    /// Proof gets a press per fight; a guess does not. Without the border picked — the default —
     /// "nothing has swung" fires on every fight that meets the conditions, so a night's grinding is
     /// hundreds of presses at a key that turns attack OFF as readily as on. A handful is enough to
     /// correct a systemic "the rotation never engages attack"; anything beyond that is a recurring
@@ -1581,23 +1729,58 @@ public sealed class HuntRole
     /// </summary>
     private const int MaxBlindNudges = 3;
     private int _blindNudges;
+
+    /// <summary>
+    /// How many times a whole RUN may press the toggle on the BORDER's say-so.
+    ///
+    /// Much more generous than the blind cap, because this one is acting on a measurement rather
+    /// than on an absence — but not unlimited. A strip that has gone stale (the window moved, the
+    /// UI was rescaled, the unit frame is somewhere else now) still reads "proven" on disk and
+    /// still reads silent every time, so without a cap it presses once a fight for ever, flipping
+    /// attack on and off and announcing each flip as fact.
+    ///
+    /// COUNTED CONSECUTIVELY, cleared by any press the client confirms engaged attack. A press that
+    /// worked is the feature doing its job, and on a rotation that never engages attack that is
+    /// every fight of the night — counting those would switch the fallback off after the first
+    /// hour and blame a strip that was reading perfectly.
+    /// </summary>
+    private const int MaxBorderNudges = 10;
+    private int _borderNudges;
+    private bool _borderCapSaid;
+    /// <summary>Environment.TickCount64 when the last press made on the BORDER's say-so went out.
+    /// Zero until one has. Interlocked because it is written on the role thread and read on the log
+    /// thread, and a 64-bit field is not atomic on every runtime this ships to.</summary>
+    private long _borderPressedTicks;
+    /// <summary>The border said silent, we pressed, and the client then said attack went off — so
+    /// it was on. Set once on the log thread, read on the role thread, never cleared: a run that
+    /// has caught it lying does not get to change its mind halfway through.</summary>
+    private volatile bool _borderLied;
     /// <summary>The last look at the border was abandoned rather than answered.</summary>
     private bool _flashUnwatched;
-    private double _lastDuty;
+    /// <summary>Consecutive looks that could not be read at all.</summary>
+    private int _flashBlind;
+    private const int BlindLooksBeforeSaying = 3;
     private bool _blindCapSaid;
 
     /// <summary>The ONE thing worth doing about it, and which one depends on how far through the
     /// setup they are. Telling somebody who has already picked the indicator to go and pick it is
     /// how good advice gets ignored.</summary>
-    private string LampAdvice()
+    private string BorderAdvice()
         => !_s.AttackFlashSet
             ? "Pick the flashing attack border on the Grind page — a thin strip of the edge that flashes red "
               + "while you're attacking — and I'll watch it instead of inferring from silence."
             : !_s.AttackFlashProven
-              ? "You have picked the attack border but I have never seen it flash, so I can't tell an idle border "
-                + "from a strip of screen where nothing ever happens. Turn auto attack ON in game and click the "
-                + "readout beside the pick button once — that's all it needs."
-              : "The border couldn't be watched just then — the game may not have been in front.";
+              ? "You have picked the attack border but it hasn't passed both checks, so I can't tell an idle border "
+                + "from a strip of screen where nothing ever happens. On the Grind page: turn auto attack ON and "
+                + "press \u201Ccheck: attack ON\u201D, then turn it OFF and press \u201Ccheck: attack OFF\u201D. "
+                + "The readout beside them says what is still missing."
+              : _borderLied
+                ? "I caught that strip reading silent while auto attack was actually running earlier this run, so I "
+                  + "have stopped trusting it for the rest of it. Re-pick it on the Grind page — it may have moved — "
+                  + "and run both checks."
+                : "The border couldn't be read clearly just then: either it pulsed too few times to be sure, or "
+                  + "something was over that strip for part of the look \u2014 the EQ Avatar window itself is the "
+                  + "usual culprit on one monitor, and so is the map overlay.";
 
     private bool _autoAttackTried;
 }

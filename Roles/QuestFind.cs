@@ -245,7 +245,17 @@ public static class QuestFind
     /// </summary>
     public static List<IconHit> ProposeIcons(Bitmap frame, double bx, double by, double bw, double bh,
                                              double[] sig, double iw, double ih, double accept)
+        => ProposeIcons(frame, bx, by, bw, bh, sig, iw, ih, accept, out _);
+
+    /// <param name="truncated">The scan hit its own work guard and never reached the bottom of the
+    /// rectangle. Reported rather than swallowed: every message about a miss tells the user which
+    /// region was searched, and a silent truncation makes that statement a confident lie about the
+    /// one thing those messages exist to settle.</param>
+    public static List<IconHit> ProposeIcons(Bitmap frame, double bx, double by, double bw, double bh,
+                                             double[] sig, double iw, double ih, double accept,
+                                             out bool truncated)
     {
+        truncated = false;
         var kept = new List<IconHit>();
         if (sig.Length != SigGrid * SigGrid * 3 || iw <= 0.002 || ih <= 0.002) return kept;
         double stepX = Math.Max(iw / 3, 0.002), stepY = Math.Max(ih / 3, 0.002);
@@ -255,7 +265,7 @@ public static class QuestFind
         for (double y = by; y + ih <= by + bh + 1e-9 && !bailed; y += stepY)
             for (double x = bx; x + iw <= bx + bw + 1e-9; x += stepX)
             {
-                if (++guard > 40000) { bailed = true; break; }
+                if (++guard > 40000) { bailed = true; truncated = true; break; }
                 double[]? probe = SigFromRegion(frame, x, y, iw, ih);
                 if (probe is null) continue;
                 double dist = SigDistance(probe, sig);
@@ -785,7 +795,7 @@ public static class QuestFind
     ///
     /// Not a safety bar — a cost one, and a large one. The crop is a full alignment search of its
     /// own, run for every candidate the colour pass proposes, and that pass proposes hundreds
-    /// (MaxProposals caps it at 220). Doing it unconditionally added about 40% to the hottest loop
+    /// (MaxProposals caps it at 420 distinct squares). Doing it unconditionally added about 40% to the hottest loop
     /// in the app, in exactly the state where the loop already runs to its cap because nothing
     /// reaches the strict bar and nothing breaks early.
     ///
@@ -908,9 +918,26 @@ public static class QuestFind
     /// judge. Deliberately loose: a false candidate costs a fraction of a millisecond, a missed one
     /// costs a cycle.</summary>
     public const double CoarseProposeAt = 60;
-    /// <summary>Candidates correlated before giving up. Each is an alignment search, and a hand-in
-    /// needs ONE copy, not a census.</summary>
-    public const int MaxProposals = 220;
+    /// <summary>
+    /// DISTINCT SQUARES correlated before giving up. Not probes — squares.
+    ///
+    /// This counted probes, and that quietly made it about eight times smaller than it looked. The
+    /// coarse pass steps in thirds of an icon, so every slot arrives as roughly a 3×3 cluster of
+    /// overlapping probes; a cap of 220 probes was a cap of about 24 SLOTS. A user who drew one
+    /// rectangle over his whole inventory got 2441 probes over ~271 slots, of which the judge saw
+    /// two dozen — and the run stopped saying "no copies in the bag area" with eight of them on
+    /// screen, quoting a 55% match measured on somebody else's boots.
+    ///
+    /// The number is now big enough for a full inventory. In the ordinary case it costs nothing:
+    /// proposals arrive sorted by colour, so the first square judged is usually the item and the
+    /// loop breaks on the first acceptance. The full sweep is paid whenever nothing clears
+    /// PixelAccept — a genuine miss, but also a run being carried by provisional matches or learned
+    /// appearances — which is two or three seconds of CPU per scan on a whole-inventory rectangle,
+    /// and a missed attempt pays it twice because the bags are reopened and the scan repeated. That is
+    /// the price of not dropping a copy before the pixels ever see it, and it is worth paying: the
+    /// miss is the answer that ends the run.
+    /// </summary>
+    public const int MaxProposals = 420;
 
     /// <summary>
     /// The floor for a PROVISIONAL match — the item wearing a face we haven't photographed.

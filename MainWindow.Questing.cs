@@ -1390,12 +1390,20 @@ public partial class MainWindow
         bool any = false, bestFromLook = false, bestTried = false;
         QuestFind.IconPatch[] looksArr = QuestScriptStore.Current.Read(() => st.IconLooks.ToArray());
         var shortlist = new List<(QuestFind.IconHit H, double Ncc)>();
-        int looked = 0;
-        foreach (QuestFind.IconHit h in QuestFind.ProposeIcons(
+        var judged = new List<QuestFind.IconHit>();
+        List<QuestFind.IconHit> proposals = QuestFind.ProposeIcons(
                      frame, script.BagX, script.BagY, script.BagW, script.BagH,
-                     st.IconSig!, st.IconW, st.IconH, QuestFind.CoarseProposeAt))
+                     st.IconSig!, st.IconW, st.IconH, QuestFind.CoarseProposeAt);
+        foreach (QuestFind.IconHit h in proposals)
         {
-            if (++looked > QuestFind.MaxProposals) break;
+            // THE SAME FOLD THE RUN DOES, and it has to be. This method's whole contract is that it
+            // computes the number the run computes — MaxProposals counts distinct SQUARES now, and
+            // counting probes here would judge about a ninth as many slots as the run and then
+            // report "NO match, 55%" about a bag the runner is finding things in perfectly well.
+            if (judged.Any(k => Math.Abs(k.X - h.X) < st.IconW * 0.5
+                             && Math.Abs(k.Y - h.Y) < st.IconH * 0.5)) continue;
+            if (judged.Count >= QuestFind.MaxProposals) break;
+            judged.Add(h);
             // QuestFind.Score, not BestNcc: the run judges with the centre-crop second opinion, and
             // a hover test that computes a different number than the run is worse than no hover
             // test — it is consulted precisely when the two disagree, and it would then confidently
@@ -1409,7 +1417,7 @@ public partial class MainWindow
                 bx = h.X + (double)dx / frame.Width; by = h.Y + (double)dy / frame.Height;
             }
             if (ncc >= QuestFind.PixelAccept) break;
-            if (looksArr.Length > 0 && ncc > 0)
+            if (ncc > 0)
             {
                 int at = shortlist.FindIndex(k => Math.Abs(k.H.X - h.X) < st.IconW * 0.5
                                                && Math.Abs(k.H.Y - h.Y) < st.IconH * 0.5);
@@ -1423,6 +1431,28 @@ public partial class MainWindow
         // same shortlist the run uses, so the test cannot report "NO match, 22%" for a square the
         // run picks up. Showing them to the single best square only would have been a narrower
         // version of the same divergence.
+        // PHASE 1b, the run's own rescue: the fold judged one probe per square and chose it by
+        // colour, so it can sit a third of an icon off the true centre — further than the alignment
+        // search reaches. The likeliest squares get their whole cluster scored, exactly as the run
+        // does, and the winner is written back so the learned looks below are shown the good centre.
+        if (any && bestN < QuestFind.PixelAccept && judged.Count > 0)
+            for (int i = 0; i < shortlist.Count && bestN < QuestFind.PixelAccept; i++)
+            {
+                QuestFind.IconHit sq = shortlist[i].H;
+                foreach (QuestFind.IconHit h in proposals)
+                {
+                    if (Math.Abs(h.X - sq.X) >= st.IconW * 0.5 || Math.Abs(h.Y - sq.Y) >= st.IconH * 0.5) continue;
+                    if (h.X == sq.X && h.Y == sq.Y) continue;
+                    (double n1, int x1, int y1, _, double w1, double m1, bool t1) =
+                        QuestFind.Score(frame, h.X, h.Y, st.IconPixels!, wantW, wantH);
+                    if (n1 <= shortlist[i].Ncc) continue;
+                    shortlist[i] = (h, n1);
+                    if (n1 <= bestN) continue;
+                    bestN = n1; bestWhole = w1; bestCentre = m1; bestTried = t1; bestFromLook = false;
+                    bx = h.X + (double)x1 / frame.Width; by = h.Y + (double)y1 / frame.Height;
+                }
+            }
+
         if (any && bestN < QuestFind.PixelAccept && looksArr.Length > 0)
         {
             int lw = (int)Math.Round(st.IconW * frame.Width), lh = (int)Math.Round(st.IconH * frame.Height);
@@ -1502,7 +1532,11 @@ public partial class MainWindow
 
             // The SAME lookups the run uses — a test that exercises different code proves nothing.
             var points = new List<(string Label, ScreenPoint P)>();
-            foreach (TurnInStep st in script.Steps)
+            // SNAPSHOT, because this loop now spans seconds of live UI. The pixel sweep moved off
+            // the UI thread so the app stays responsive during it — which also means the user can
+            // delete a step tile or add an item mid-test, and List<T>'s enumerator throws the
+            // instant the collection changes. Same pattern BestPixelMatch already uses for IconLooks.
+            foreach (TurnInStep st in QuestScriptStore.Current.Read(() => script.Steps.ToArray()))
             {
                 string label = $"bag slot: {(st.Item.Length > 0 ? st.Item : "item")}";
                 ScreenPoint p = st.Slot;
@@ -1514,7 +1548,7 @@ public partial class MainWindow
                 if (script.SmartFind && script.BagSet && st.HasPixels && st.HasIconSize && st.HasIcon)
                 {
                     (ScreenPoint at, double ncc, bool looked, bool proposed, double colour, double whole,
-                     bool fromLook, double centre, bool cropTried) = BestPixelMatch(script, st);
+                     bool fromLook, double centre, bool cropTried) = await Task.Run(() => BestPixelMatch(script, st));
                     // Said whenever the middle of the icon scored better than the whole square, on
                     // this screen as well as in the run — this is where someone comes to find out
                     // why a square they can see isn't being matched, and "76% whole, 84% middle" is
