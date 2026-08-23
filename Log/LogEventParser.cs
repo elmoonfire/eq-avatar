@@ -120,8 +120,18 @@ public static class LogEventParser
     ///  3. NO QUOTE MARKS. Every channel in this game wraps what was said in quotes, and no line
     ///     the client prints about your own position contains one.
     /// </summary>
-    public static bool CouldBeOurOwnPosition(string msg)
-        => !Chatter.IsMatch(msg) && msg.IndexOf('\'') < 0 && msg.IndexOf('"') < 0;
+    public static bool CouldBeOurOwnPosition(string msg) => !SpokenByAPlayer(msg);
+
+    /// <summary>
+    /// Did a PERSON produce this line, rather than the client?
+    ///
+    /// The same question the position gate asks, under the name it should always have had — a log
+    /// carries the whole server's chat, and any statement of fact read out of it has to know
+    /// whether a human typed it. Every channel wraps speech in quotes and every channel line
+    /// carries a verb; between them nothing anyone says reads as something the client said.
+    /// </summary>
+    public static bool SpokenByAPlayer(string msg)
+        => Chatter.IsMatch(msg) || msg.IndexOf('\'') >= 0 || msg.IndexOf('"') >= 0;
 
     public static LogEvent Parse(string rawLine)
     {

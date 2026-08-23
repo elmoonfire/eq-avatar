@@ -1012,6 +1012,9 @@ public partial class MainWindow : Window
         if (!string.IsNullOrWhiteSpace(HuntTargetKeyBox.Text)) _settings.HuntTargetKey = HuntTargetKeyBox.Text.Trim();
         if (!string.IsNullOrWhiteSpace(HuntConsiderKeyBox.Text)) _settings.HuntConsiderKey = HuntConsiderKeyBox.Text.Trim();
         _settings.HuntLocKey = HuntLocKeyBox.Text.Trim();   // may be blank (optional)
+        _settings.HuntAutoAttackKey = HuntAutoAttackKeyBox.Text.Trim();   // blank = never press it
+        if (int.TryParse(HuntEngageBox.Text.Trim(), out int eng))
+            _settings.HuntEngageMaxMs = Math.Clamp(eng, 200, 2000);
         if (int.TryParse(HuntRestBox.Text.Trim(), out int r)) _settings.HuntRestSeconds = Math.Clamp(r, 0, 600);
         _settings.HuntMode = HuntBox.IsChecked == true;
         _settings.GrindStance = StanceDef.IsChecked == true ? "defensive" : StanceDir.IsChecked == true ? "directive" : "aggressive";
@@ -1041,6 +1044,8 @@ public partial class MainWindow : Window
         HuntTargetKeyBox.Text = _settings.HuntTargetKey;
         HuntConsiderKeyBox.Text = _settings.HuntConsiderKey;
         HuntLocKeyBox.Text = _settings.HuntLocKey;
+        HuntAutoAttackKeyBox.Text = _settings.HuntAutoAttackKey;
+        HuntEngageBox.Text = _settings.HuntEngageMaxMs.ToString();
         HuntRestBox.Text = _settings.HuntRestSeconds.ToString();
         (_settings.GrindStance switch { "defensive" => StanceDef, "directive" => StanceDir, _ => StanceAggro }).IsChecked = true;
         HostileSelBox.SelectedIndex = _settings.HuntHostileOnly ? 1 : 0;

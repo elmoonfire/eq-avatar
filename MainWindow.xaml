@@ -882,6 +882,12 @@
                                                 <TextBlock Text="/loc" VerticalAlignment="Center" Foreground="{StaticResource TextDim}" Margin="0,0,3,8"/>
                                                 <TextBox x:Name="HuntLocKeyBox" Text="" Width="54" VerticalAlignment="Center" Margin="0,0,8,8"
                                                          ToolTip="A key bound to a /loc macro — the bot taps it to keep position live. Strongly recommended for tether / camp / waypoints."/>
+                                                <TextBlock Text="auto attack" VerticalAlignment="Center" Foreground="{StaticResource TextDim}" Margin="0,0,3,8"/>
+                                                <TextBox x:Name="HuntAutoAttackKeyBox" Text="" Width="54" VerticalAlignment="Center" Margin="0,0,8,8"
+                                                         ToolTip="Your in-game auto-attack key. Used only as a fallback: if the rotation fires and nothing swings for a couple of seconds, she taps this once. Leave blank to never touch it — it is a TOGGLE, so pressing it while attack is already running would turn it off."/>
+                                                <TextBlock Text="engage ms" VerticalAlignment="Center" Foreground="{StaticResource TextDim}" Margin="0,0,3,8"/>
+                                                <TextBox x:Name="HuntEngageBox" Text="1200" Width="54" VerticalAlignment="Center" Margin="0,0,8,8"
+                                                         ToolTip="At most this long between a target conning hostile and the first rotation key. The real wait is random up to it, so no two engagements look alike. Capped at 2000."/>
                                                 <TextBlock Text="rest s" VerticalAlignment="Center" Foreground="{StaticResource TextDim}" Margin="0,0,3,8"/>
                                                 <TextBox x:Name="HuntRestBox" Text="8" Width="40" VerticalAlignment="Center" Margin="0,0,8,8"/>
                                             </WrapPanel>

@@ -48,8 +48,12 @@ public sealed class HuntRole
     private CancellationTokenSource? _cts;
 
     private volatile bool _mobDead, _selfDead, _rmbDown, _attacked;
-    private ConsiderDifficulty _lastCon = ConsiderDifficulty.Unknown;
-    private ConsiderAttitude _lastAttitude = ConsiderAttitude.Unknown;
+    // VOLATILE now that the engage path SPINS on them. They are written on the log thread and were
+    // only ever read after a fixed sleep, which happens to force a fresh read; a poll loop does not,
+    // and the rest of this file is scrupulous about exactly this (volatile _cantSee/_tooFar,
+    // Interlocked on the swing counts, Volatile.Read on _locTicks).
+    private volatile ConsiderDifficulty _lastCon = ConsiderDifficulty.Unknown;
+    private volatile ConsiderAttitude _lastAttitude = ConsiderAttitude.Unknown;
     private string _lastConText = "";
     private double? _x, _y;
     private double? _startX, _startY;                       // tether anchor: first /loc after start
@@ -87,6 +91,15 @@ public sealed class HuntRole
     // facing + bard state fed from the log
     private volatile bool _cantSee, _tooFar;
     private int _ourSwings;                                  // count of OUR outgoing combat lines
+    /// <summary>MELEE output only — "You slash a rat…" and friends. Kept apart from _ourSwings,
+    /// which deliberately counts spell and song damage too so a caster's facing logic works. Auto
+    /// attack is a melee question, and a landing nuke says nothing about whether the sword is
+    /// moving.</summary>
+    private int _meleeSwings;
+    /// <summary>What the log last said about auto attack, when it said anything. Null = it has not
+    /// mentioned it, which is the usual state and is why the swing count is the primary signal.</summary>
+    private bool? _autoAttackOn;
+    private readonly InputKey _autoAtk;
     private volatile bool _singing;                          // bard melody believed active
     private DateTime _melodyAt = DateTime.MinValue;
 
@@ -118,6 +131,7 @@ public sealed class HuntRole
         _target = InputKey.Parse(s.HuntTargetKey);
         _con = InputKey.Parse(s.HuntConsiderKey);
         _loc = InputKey.Parse(s.HuntLocKey);
+        _autoAtk = InputKey.Parse(s.HuntAutoAttackKey);
         foreach (string line in (s.GrindTargetMobs ?? "").Split('\n'))
         {
             string t = line.Trim().ToLowerInvariant();
@@ -205,6 +219,43 @@ public sealed class HuntRole
             || raw.Contains("resisted your", StringComparison.OrdinalIgnoreCase)
             || raw.Contains("Your target resisted", StringComparison.OrdinalIgnoreCase))
             Interlocked.Increment(ref _ourSwings);
+
+        // DID THE WEAPON MOVE? Counted from the RAW line, before anything classifies it, because
+        // the Combat classifier needs "points of damage" or the word "hit" or "slash" — so a MISS
+        // only registers for a slashing weapon. A monk punching, a paladin with a mace, a rogue
+        // piercing: auto attack running perfectly, every swing in the first exchange missing, not
+        // one line reaching the counter — and then this class taps a TOGGLE and switches off the
+        // attack it was checking on. "You try to …" is the one phrase every miss, dodge, parry,
+        // riposte and block shares, for every weapon skill there is.
+        // ONE GATE OVER BOTH, because both are facts read out of a public document. Other people's
+        // chat starts with their name so the "You " anchor already blocks it — but the local
+        // player's own speech starts with "You " too, and "You say, 'you try to crush it'" would
+        // otherwise be counted as a swing. Same guard the position parser uses, same reason.
+        if (!LogEventParser.SpokenByAPlayer(raw))
+        {
+            // DID THE WEAPON MOVE? Counted from the RAW line, before anything classifies it,
+            // because the Combat classifier needs "points of damage" or the word "hit" or "slash"
+            // — so a MISS only registers for a slashing weapon. A monk punching, a paladin with a
+            // mace, a rogue piercing: auto attack running perfectly, every swing in the first
+            // exchange missing, not one line reaching the counter — and then this class taps a
+            // TOGGLE and switches off the attack it was checking on. "You try to …" is the one
+            // phrase every miss, dodge, parry, riposte and block shares, for every weapon skill.
+            //
+            // Damage TAKEN is excluded: fall damage and poison ticks read as "You have taken 12
+            // points of damage", and letting those count would suppress the nudge in precisely the
+            // situation it exists for — taking damage while dealing none.
+            if (raw.StartsWith("You ", StringComparison.Ordinal)
+                && !raw.StartsWith("You have taken", StringComparison.OrdinalIgnoreCase)
+                && (raw.Contains("points of damage", StringComparison.OrdinalIgnoreCase)
+                    || raw.Contains("You try to ", StringComparison.OrdinalIgnoreCase)))
+            { Interlocked.Increment(ref _meleeSwings); _autoAttackOn = true; }
+
+            // And what the CLIENT says about auto attack, when it says anything. A guildmate typing
+            // "turn auto-attack off before you pull" must not clear the flag that suppresses the
+            // toggle press — the same class of bug as a stranger's chat moving the character.
+            if (AutoAtkOn.IsMatch(raw)) _autoAttackOn = true;
+            else if (AutoAtkOff.IsMatch(raw)) _autoAttackOn = false;
+        }
 
         if (_s.GrindBardMode && _singing && LogEventParser.MelodyStopped(raw))
         { _singing = false; Log?.Invoke("Melody stopped (log) — will recast."); }
@@ -358,6 +409,9 @@ public sealed class HuntRole
                     _attacked = true;
                 else if (ev.Text.StartsWith("You ", StringComparison.Ordinal)
                          || ev.Text.Contains("by your ", StringComparison.OrdinalIgnoreCase))
+                    // _meleeSwings is NOT incremented here. It is counted from the raw line
+                    // instead, because this classifier drops every non-slashing miss and a miss is
+                    // exactly the case that matters.
                     Interlocked.Increment(ref _ourSwings);   // OUR output is landing → facing is fine
                 break;
             case LogEventKind.Kill: _mobDead = true; break;
@@ -674,7 +728,15 @@ public sealed class HuntRole
                     _lastAttitude = ConsiderAttitude.Unknown;
                     _lastConText = "";
                     _sink.Send(_con);                       // /consider the target (key or mouse5)
-                    await Task.Delay(Vary(750), ct);        // wait for the con line to land
+                    // WAIT FOR THE ANSWER, don't sleep through it. A fixed 750 ms was paid in full
+                    // on every engagement whether the con line arrived in 80 ms or not at all, and
+                    // it was most of the gap between seeing a mob and hitting it. Polling gives that
+                    // time back to the randomised pause below, where it buys something.
+                    for (int w = 0; w < 10; w++)
+                    {
+                        if (_lastCon != ConsiderDifficulty.Unknown || _lastAttitude != ConsiderAttitude.Unknown) break;
+                        await Task.Delay(60, ct);
+                    }
 
                     // No con line came back → nothing was targeted. Don't flail at empty air: roam again.
                     if (_lastCon == ConsiderDifficulty.Unknown && _lastAttitude == ConsiderAttitude.Unknown)
@@ -692,11 +754,30 @@ public sealed class HuntRole
                     { Stats.Skipped++; Log?.Invoke("Skipping — not on the directive target list."); continue; }
                 }
 
+                // A BEAT BEFORE THE FIRST KEY, and a different one every time.
+                //
+                // Not politeness — the con has already landed and the mob is hostile, so this is
+                // pure delay. It is here because a bot that fires its opener the same number of
+                // milliseconds after every con is describing itself, and because a human takes a
+                // moment. Random up to the configured cap, which is itself capped at two seconds:
+                // longer than that and the mob has wandered off before the fight starts.
+                if (Stance != "defensive")
+                {
+                    int cap = Math.Clamp(_s.HuntEngageMaxMs, 200, 2000);
+                    await Task.Delay(_rng.Next(Math.Min(150, cap), cap + 1), ct);
+                }
+
                 // 2) FIGHT — run the rotation until the mob dies / we die / timeout
                 Stats.State = "fighting"; Stats.Fights++;
                 _mobDead = false; _cantSee = false; _tooFar = false;
                 DateTime fightStart = DateTime.Now, lastOut = DateTime.Now;
                 int i = 0, sweep = 0, swingsSeen = _ourSwings, unreachable = 0;
+                int meleeAtStart = _meleeSwings;
+                // The auto-attack grace runs from when we could actually SWING, not from when the
+                // fight began — see the nudge check below.
+                DateTime meleeGraceFrom = DateTime.Now;
+                _autoAttackTried = false;
+                _autoAttackOn = null;
                 bool castOnly = _s.GrindCastOnly;
                 if (castOnly) Stats.State = "fighting — casting";
                 while (!ct.IsCancellationRequested && !_mobDead && !_selfDead)
@@ -730,6 +811,24 @@ public sealed class HuntRole
                     // the target / it's out of reach — or nothing lands for a few seconds — turn in
                     // a widening sweep (and close distance) until our swings start printing.
                     if (_ourSwings != swingsSeen) { swingsSeen = _ourSwings; sweep = 0; unreachable = 0; lastOut = DateTime.Now; }
+
+                    // AUTO ATTACK DIDN'T ENGAGE. The rotation is meant to start it — most clients
+                    // have a "begin auto attack when you cast at a hostile" option — and when that
+                    // works the melee lines start inside a swing timer. So: only in melee mode,
+                    // only after long enough that silence means something, only when nothing has
+                    // swung AND the log hasn't said attack is on, and only once.
+                    // OUT OF REACH RESTARTS THE CLOCK. Now that every melee outcome reaches the
+                    // counter — hit, miss, dodge, parry, riposte, block, every weapon skill — the
+                    // only way to see no melee lines with attack RUNNING is for no swing to have
+                    // been attempted, and the ordinary cause of that is standing too far away. A
+                    // mob targeted at range and closed on over the first few seconds would
+                    // otherwise trip this and toggle off an attack that was already engaged.
+                    // Silence is only evidence once we have been in a position to swing.
+                    if (_tooFar || _cantSee) meleeGraceFrom = DateTime.Now;
+                    if (!_autoAttackTried && !castOnly && !_s.GrindBardMode && !_autoAtk.IsNone
+                        && _meleeSwings == meleeAtStart && _autoAttackOn != true
+                        && (DateTime.Now - meleeGraceFrom).TotalSeconds > AutoAttackGrace)
+                        NudgeAutoAttack();
 
                     if (castOnly)
                     {
@@ -1161,5 +1260,41 @@ public sealed class HuntRole
         catch { /* best effort */ }
     }
 
+    /// <summary>How long a fight has to go without a single melee line before the absence counts as
+    /// evidence rather than as "it hasn't started yet". A melee round is a couple of seconds, so
+    /// this is comfortably past one and still inside the first exchange.</summary>
+    private const double AutoAttackGrace = 2.6;
+
+    /// <summary>The client announcing its own auto-attack state. Bounded to the same sentence so a
+    /// loose " on" can't match "one", "only" or "once" three clauses later — "You can only auto
+    /// attack one target at a time" is not a statement that attack is running.</summary>
+    private static readonly System.Text.RegularExpressions.Regex AutoAtkOn = new(
+        @"(\bauto[- ]?attack\b[^.]{0,20}\bon\b|\byou begin attacking\b)",
+        System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.Compiled);
+    private static readonly System.Text.RegularExpressions.Regex AutoAtkOff = new(
+        @"(\bauto[- ]?attack\b[^.]{0,20}\boff\b|\byou are no longer attacking\b)",
+        System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.Compiled);
+
     private int Vary(int ms) => _s.Vary(ms, _rng);
+
+    /// <summary>
+    /// Tap the auto-attack key, once, because nothing has swung.
+    ///
+    /// EVERY guard here is about the same hazard: this key is a TOGGLE in every EverQuest client,
+    /// so pressing it while attack is already running turns it OFF and the fight quietly stops.
+    /// That is why it is blank by default, why it fires at most once per fight, why it needs the
+    /// log to have gone silent rather than merely "not started yet", and why it never fires in
+    /// cast-only or bard mode — where no melee swing is expected and its absence proves nothing.
+    /// </summary>
+    private void NudgeAutoAttack()
+    {
+        if (_autoAtk.IsNone || !_sink.Ready) return;
+        _autoAttackTried = true;
+        _sink.Send(_autoAtk);
+        Log?.Invoke($"Nothing has swung since the rotation started, so auto attack looks like it isn't on — "
+                  + $"tapping {_autoAtk.Display} once. (That key is a toggle, so if you ever see attack stop "
+                  + "right after this line, it was already on and the mob was simply out of reach.)");
+    }
+
+    private bool _autoAttackTried;
 }

@@ -182,6 +182,26 @@ public sealed class AppSettings
     public string HuntConsiderKey { get; set; } = "C";       // consider current target (can be mouse5)
     public string HuntLocKey { get; set; } = "";             // optional: a key bound to a /loc macro, tapped to refresh position
     public int HuntLocEverySeconds { get; set; } = 6;        // how often to fire the /loc key while roaming
+
+    /// <summary>
+    /// The key bound in game to AUTO ATTACK, used only as a fallback when nothing has swung.
+    ///
+    /// Blank by default and deliberately so: this is a TOGGLE in every EverQuest client, so
+    /// pressing it when attack is already running turns it OFF. It is fired once per fight, and
+    /// only after the log has gone quiet long enough to say that nothing is swinging — never
+    /// speculatively.
+    /// </summary>
+    public string HuntAutoAttackKey { get; set; } = "";
+
+    /// <summary>
+    /// How long, at most, between a target being confirmed hostile and the first rotation key.
+    ///
+    /// The actual wait is random up to this, because a fixed pause between con and attack is the
+    /// most machine-like thing a bot does — every engagement identical to the millisecond. Capped
+    /// at two seconds: past that it stops being a pause before a fight and starts being a mob
+    /// walking away from one.
+    /// </summary>
+    public int HuntEngageMaxMs { get; set; } = 1200;
     /// <summary>Hold right-mouse and pan the camera while running — human-like looking around.</summary>
     public bool HuntLookAround { get; set; } = true;
     public int HuntRunMsMin { get; set; } = 1200;            // forward-burst length range
