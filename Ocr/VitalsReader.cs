@@ -99,6 +99,46 @@ public sealed class VitalsReader
         catch { return null; }
     }
 
+    /// <summary>
+    /// The AVERAGE colour of one small region of the game window, right now.
+    ///
+    /// A region blit rather than a whole frame, because the caller samples it repeatedly: eight
+    /// full-window captures to answer one question would allocate sixty megabytes to look at a
+    /// few hundred pixels. One number per sample is all a "did this change" test needs.
+    /// </summary>
+    public (double R, double G, double B)? MeanOf(double nx, double ny, double nw, double nh)
+    {
+        IntPtr h = _hwnd();
+        if (h == IntPtr.Zero || nw <= 0 || nh <= 0 || !GetWindowRect(h, out RECT r)) return null;
+        int winW = r.Right - r.Left, winH = r.Bottom - r.Top;
+        if (winW <= 0 || winH <= 0) return null;
+        int cw = Math.Max(2, (int)(nw * winW)), ch = Math.Max(2, (int)(nh * winH));
+        int cx = r.Left + (int)(nx * winW), cy = r.Top + (int)(ny * winH);
+        try
+        {
+            using var bmp = new Bitmap(cw, ch, PixelFormat.Format32bppArgb);
+            using (Graphics g = Graphics.FromImage(bmp))
+                g.CopyFromScreen(cx, cy, 0, 0, new Size(cw, ch), CopyPixelOperation.SourceCopy);
+            BitmapData d = bmp.LockBits(new Rectangle(0, 0, cw, ch), ImageLockMode.ReadOnly,
+                                        PixelFormat.Format32bppArgb);
+            try
+            {
+                double sr = 0, sg = 0, sb = 0;
+                var row = new byte[cw * 4];
+                for (int y = 0; y < ch; y++)
+                {
+                    System.Runtime.InteropServices.Marshal.Copy(IntPtr.Add(d.Scan0, y * d.Stride), row, 0, row.Length);
+                    for (int x = 0; x < cw; x++)
+                    { sb += row[x * 4]; sg += row[x * 4 + 1]; sr += row[x * 4 + 2]; }
+                }
+                double n = cw * ch;
+                return (sr / n, sg / n, sb / n);
+            }
+            finally { bmp.UnlockBits(d); }
+        }
+        catch { return null; }
+    }
+
     /// <summary>Pixels of one bar as [x][y] RGB triples, grabbed live off the screen, or null when
     /// the window is gone.</summary>
     private double[,,]? Grab(Bar bar)

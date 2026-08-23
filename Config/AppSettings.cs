@@ -204,49 +204,53 @@ public sealed class AppSettings
     public int HuntEngageMaxMs { get; set; } = 1200;
 
     /// <summary>
-    /// A small picked region of the game UI that CHANGES when auto attack is running — the little
-    /// indicator beside the health and resource window.
+    /// A thin picked strip of the game window that FLASHES while auto attack is running.
     ///
-    /// This exists because the log cannot answer the question. The client announces "Auto attack is
-    /// on" only when the key is pressed by hand; engaging it the way a bot does, through a song or
-    /// a spell at a hostile target, turns it on silently. And silence in the combat log is not
-    /// evidence it is off — a character facing the wrong way swings at nothing and prints nothing.
-    /// The indicator is the only place the state is actually shown, so it is the only place worth
-    /// reading it from.
+    /// The first version of this watched the little combat icon and was simply wrong about what it
+    /// meant: the green circle and the red cross say whether the character is IN COMBAT, which is
+    /// not the same question at all and does not move when attack is toggled. The flashing border
+    /// around the unit frame is the only thing on screen that actually tracks auto attack.
     ///
-    /// Not OCR. There is no text here, just a lamp that lights: the region is photographed once
-    /// while attack is OFF and afterwards compared pixel for pixel. "It stopped looking like the
-    /// picture of off" is a far easier question than "what does that say".
+    /// That changes the test from a comparison to an OBSERVATION OVER TIME. A flash cannot be seen
+    /// in one snapshot — catch it mid-blink and it looks exactly like a border that is not
+    /// flashing at all — so the region is sampled repeatedly for about a second and the question
+    /// becomes "did this change while I watched". That needs no stored photograph, and it is immune
+    /// to the things a stored photograph is fragile about: the window moving, the UI being rescaled,
+    /// a different palette. Only the rectangle is remembered.
     /// </summary>
-    public double AttackLampX { get; set; }
-    public double AttackLampY { get; set; }
-    public double AttackLampW { get; set; }
-    public double AttackLampH { get; set; }
-
-    /// <summary>What that region looks like with auto attack OFF. Base64 RGB, as the icon
-    /// references are stored.</summary>
-    public Roles.QuestFind.IconPatch? AttackLampOff { get; set; }
+    public double AttackFlashX { get; set; }
+    public double AttackFlashY { get; set; }
+    public double AttackFlashW { get; set; }
+    public double AttackFlashH { get; set; }
 
     /// <summary>
-    /// Has this pick ever been SEEN to tell the two states apart?
+    /// How much this strip actually moved when it was SEEN flashing, in average-colour distance.
     ///
-    /// Correlation is variance-normalised, so a three-pixel light inside a forty-pixel box barely
-    /// moves the number — the box would read "off" while attack was running, and that is the single
-    /// direction that ends in the toggle being pressed. So the pick is not trusted for that answer
-    /// until its readout on the Grind page has actually shown the lit state at least once. Until
-    /// then it can still say "on" (which only ever cancels a press) and everything else falls back
-    /// to the guess, budgeted.
+    /// Both the proof and the threshold. Zero means nobody has ever watched this region flash, so
+    /// "it isn't flashing now" carries no weight — it could equally be a strip picked somewhere
+    /// nothing ever happens, and believing that would press a toggle on no evidence. Once a real
+    /// flash has been measured, the run-time bar is set from it rather than from a constant, so a
+    /// subtle border and a vivid one both work.
     /// </summary>
-    public bool AttackLampProven { get; set; }
+    public double AttackFlashSeen { get; set; }
 
-    /// <summary>Half of the handshake: the readout has seen the region NOT look like the off
-    /// picture. On its own that proves nothing — a tooltip drifting over the corner or the window
-    /// moving a pixel does it too — so proof needs the other half, a return to looking like off
-    /// afterwards. Only a light that goes on and then off again can do both.</summary>
-    public bool AttackLampSawOn { get; set; }
+    /// <summary>
+    /// What fraction of the time that border is actually LIT, measured while it was seen flashing.
+    ///
+    /// The one assumption in this design that nothing had measured. The spread is a trimmed range,
+    /// which needs two samples inside the lit phase to survive trimming — true for a symmetric
+    /// blink, false for a brief pulse, and simulation puts the miss rate at a quarter for a 25%
+    /// duty and over half for 5%. Every one of those misses reads as "not flashing" and presses the
+    /// toggle. So the proving click counts it, and the run trims only when it can afford to: a
+    /// border that merely winks is measured on its raw range instead, whose failure direction is a
+    /// false "it IS flashing" — which declines to press, and is the harmless way to be wrong.
+    /// </summary>
+    public double AttackFlashDuty { get; set; }
 
     [System.Text.Json.Serialization.JsonIgnore]
-    public bool AttackLampSet => AttackLampW > 0.0005 && AttackLampH > 0.0005 && AttackLampOff is { Ok: true };
+    public bool AttackFlashSet => AttackFlashW > 0.0005 && AttackFlashH > 0.0005;
+    [System.Text.Json.Serialization.JsonIgnore]
+    public bool AttackFlashProven => AttackFlashSet && AttackFlashSeen > 0;
     /// <summary>Hold right-mouse and pan the camera while running — human-like looking around.</summary>
     public bool HuntLookAround { get; set; } = true;
     public int HuntRunMsMin { get; set; } = 1200;            // forward-burst length range

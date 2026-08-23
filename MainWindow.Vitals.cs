@@ -176,109 +176,116 @@ public partial class MainWindow
         UpdateTargetStatus();
     }
 
-    // ---------------------------------------------------------------- the attack indicator
+    // ---------------------------------------------------------------- the attack border
 
     /// <summary>
-    /// Learn what the auto-attack indicator looks like while attack is OFF.
+    /// Pick the strip of the unit frame that FLASHES while auto attack is running.
     ///
-    /// OFF and not ON, because OFF is the state a person can reliably arrange while picking — stand
-    /// still, don't attack, drag a box — whereas holding attack on through a pick means being in a
-    /// fight while dragging a rectangle. At run time the question is then "does this still look like
-    /// off", and everything that could go wrong with it (the lamp lit, a tooltip across it, the
-    /// window moved) answers no, i.e. "assume attack is on", i.e. don't press a toggle. The safe
-    /// answer is the easy one to arrange.
+    /// Only the rectangle is stored — no photograph. The test at run time is not "does this look
+    /// like the picture" but "did this change while I watched", which is the only question a FLASH
+    /// can answer: catch a flashing border mid-blink and a single frame of it is indistinguishable
+    /// from a still one. Not storing a reference also means the pick survives the window moving,
+    /// the UI being rescaled, and the colours being different from the day it was taken.
     /// </summary>
     private void AttackLamp_Click(object sender, RoutedEventArgs e)
     {
         AutoTargetEq();
         using System.Drawing.Bitmap? frame = VitalsSvc.CaptureFrame();
-        if (frame is null)
-        {
-            SetLampState("no game window to capture — launch EQ first", false);
-            return;
-        }
-        var dlg = new Ocr.CompassPickWindow(frame, "Pick the attack indicator",
-            "Make sure auto attack is OFF first. Drag a SMALL box around the little light that comes on when you "
-            + "are attacking — keep your health and mana bars OUT of it, or it will look different every second "
-            + "for reasons that have nothing to do with attack. Then press Enter.",
+        if (frame is null) { SetLampState("no game window to capture — launch EQ first", false); return; }
+        var dlg = new Ocr.CompassPickWindow(frame, "Pick the flashing attack border",
+            "Drag a THIN box over a piece of the border that flashes red while you are attacking — a strip along "
+            + "one edge of the unit frame is ideal. Keep your health and mana bars out of it, or they will look "
+            + "like a flash every time they move. Then press Enter.",
             SwatchSize, loupeNX: _settings.LoupeNX, loupeNY: _settings.LoupeNY)
         { Owner = this };
         if (dlg.ShowDialog() != true) return;
         AbsorbPickerPrefs(dlg, SwatchSize, rememberSize: false);
 
-        Roles.QuestFind.IconPatch? off = Roles.QuestFind.PatchFromRegion(frame, dlg.NX, dlg.NY, dlg.NW, dlg.NH);
-        if (off is not { Ok: true })
-        {
-            SetLampState("that box was too small or off-screen — try again", false);
-            return;
-        }
-        // Capped like the quest icon references, and for a sharper reason: this rides inside
-        // AppSettings, which is rewritten on a 450 ms debounce every time anything on any page
-        // changes — far more often than questscripts.json.
-        if (off.Data.Length > 120_000)
-        {
-            SetLampState($"that box is {off.W}×{off.H} — too big to store. Drag a small one around just the light.",
-                         false);
-            return;
-        }
-        _settings.AttackLampX = dlg.NX; _settings.AttackLampY = dlg.NY;
-        _settings.AttackLampW = dlg.NW; _settings.AttackLampH = dlg.NH;
-        _settings.AttackLampOff = off;
-        // A NEW PICK IS UNPROVEN AGAIN. The old proof was about the old box.
-        _settings.AttackLampProven = false;
-        _settings.AttackLampSawOn = false;
+        _settings.AttackFlashX = dlg.NX; _settings.AttackFlashY = dlg.NY;
+        _settings.AttackFlashW = dlg.NW; _settings.AttackFlashH = dlg.NH;
+        // A NEW STRIP HAS PROVED NOTHING. The old measurement was about the old rectangle.
+        _settings.AttackFlashSeen = 0;
         _settings.Save();
-        SetLampState($"learned ({off.W}×{off.H}) as ATTACK OFF. Now turn attack ON in game and click this text — "
-                   + "it has to see the difference before it will trust the reading.", true);
+        SetLampState("picked. Now turn auto attack ON in game and click this text — I'll watch that strip for a "
+                   + "second and see whether it really flashes.", true);
     }
 
-    /// <summary>What the indicator reads RIGHT NOW, against what was learned. Shown so the pick can
-    /// be trusted before a run depends on it: a pick that silently learned the wrong thing looks
-    /// exactly like one that worked.</summary>
-    private void RefreshLampState()
+    /// <summary>
+    /// Watch the picked strip for about a second and say what happened.
+    ///
+    /// This is also where the pick earns its trust. "It isn't flashing" and "this is a piece of
+    /// screen where nothing ever happens" are the same reading, and only one of them justifies
+    /// pressing an auto-attack toggle — so until a real flash has been measured here, the run
+    /// declines to conclude anything from stillness.
+    /// </summary>
+    private async void RefreshLampState()
     {
         if (AttackLampState is null) return;
-        if (!_settings.AttackLampSet) { SetLampState("not picked — she'll have to guess, at most 3 times a run", false); return; }
+        if (!_settings.AttackFlashSet)
+        { SetLampState("not picked — she'll have to guess, at most 3 times a run", false); return; }
+        if (_lampBusy) return;
+        _lampBusy = true;
         try
         {
-            using System.Drawing.Bitmap? frame = VitalsSvc.CaptureFrame();
-            if (frame is null) { SetLampState("learned (game not on screen)", true); return; }
-            Roles.QuestFind.IconPatch? now = Roles.QuestFind.PatchFromRegion(
-                frame, _settings.AttackLampX, _settings.AttackLampY, _settings.AttackLampW, _settings.AttackLampH);
-            if (now is not { Ok: true } live || _settings.AttackLampOff is not { Ok: true } off
-                || live.W != off.W || live.H != off.H)
-            { SetLampState("learned — but that spot can't be read now; re-pick if the window moved", false); return; }
-            double ncc = Roles.QuestFind.Ncc(live.Pixels, off.Pixels);
-            // A TWO-STATE HANDSHAKE, because one reading proves nothing. "It stopped looking like
-            // the off picture" is produced by the lamp lighting — and equally by a tooltip drifting
-            // over that corner, or the window moving a pixel between the pick and the check. Only a
-            // region that changes and then changes BACK has demonstrated it is tracking a light
-            // rather than an accident, and it is this proof that unlocks the one answer ("off")
-            // which ends in the toggle being pressed.
-            if (ncc < 0.97)
+            AutoTargetEq();
+            if (_grindTarget == IntPtr.Zero)
             {
-                if (!_settings.AttackLampSawOn) { _settings.AttackLampSawOn = true; _settings.Save(); }
-                SetLampState(_settings.AttackLampProven
-                    ? $"reads ATTACK ON ({ncc * 100:0}% like the off picture)"
-                    : $"reads ATTACK ON ({ncc * 100:0}% like the off picture) — good. Now turn attack OFF in game "
-                      + "and click here once more, and I'll know this box really is following the light.", true);
+                // NOT AN ALARM. This runs once at startup, and the game not being open yet is the
+                // ordinary case, not a fault with the pick.
+                SetLampState("picked — start the game and click here to check it", true);
+                return;
             }
-            else if (_settings.AttackLampProven)
-                SetLampState($"reads attack off ({ncc * 100:0}% like the off picture)", true);
-            else if (_settings.AttackLampSawOn)
+            SetLampState("watching that strip…", true);
+            double bar = Math.Max(Roles.HuntRole.MinFlashSpread, _settings.AttackFlashSeen * 0.35);
+            Roles.HuntRole.FlashLook look = await Roles.HuntRole.SampleFlash(
+                VitalsSvc, _settings, bar, () => true, ms => Task.Delay(ms));
+            if (!look.Watched)
+            { SetLampState("couldn't read that strip — is it inside the game window?", false); return; }
+            double spread = look.Spread;
+
+            if (spread >= bar && spread >= Roles.HuntRole.MinFlashSpread)
             {
-                _settings.AttackLampProven = true;
-                _settings.Save();
-                SetLampState("reads attack off again — that's both states seen, so this box really is following "
-                           + "the light. She'll trust it from now on and stop guessing.", true);
+                // The strongest flash seen wins: the bar is derived from it, and a weak sample later
+                // must not be able to talk the threshold down to where noise clears it.
+                bool changed = false;
+                if (spread > _settings.AttackFlashSeen) { _settings.AttackFlashSeen = spread; changed = true; }
+                // THE DUTY IS THE MEASUREMENT THAT MATTERS MOST, because the run's trimmed range
+                // needs two lit samples to survive trimming and a border that merely winks gives
+                // it one. The smallest duty seen wins — it is the one the run has to cope with.
+                if (look.Duty > 0 && (_settings.AttackFlashDuty <= 0 || look.Duty < _settings.AttackFlashDuty))
+                { _settings.AttackFlashDuty = look.Duty; changed = true; }
+                if (changed) _settings.Save();
+                // AND SAY WHEN IT IS ONLY JUST A FLASH. MeanOf averages the whole strip, so a two
+                // pixel border inside a generous box is diluted to within a unit or two of the noise
+                // floor — it works today and misreads mid-fight on the first frame that lands badly.
+                // The number to judge that by is already in hand; it just has to be said.
+                bool faint = spread < Roles.HuntRole.MinFlashSpread * 2;
+                bool brief = look.Duty > 0 && look.Duty < Roles.HuntRole.MinTrustedDuty;
+                SetLampState(
+                    faint
+                      ? $"flashing, but only just (moved {spread:0}, floor is {Roles.HuntRole.MinFlashSpread:0}). "
+                        + "Re-pick a narrower strip right on the border — a wide box averages the flash away and "
+                        + "she may misread it mid-fight."
+                    : brief
+                      ? $"FLASHING (moved {spread:0}), but lit only {look.Duty * 100:0}% of the time — a wink rather "
+                        + "than a blink. I can spot it when it fires, but I can't safely tell 'not flashing' from "
+                        + "'I looked between flashes', so I won't press your attack key on that reading. A strip "
+                        + "closer to the part that stays lit longest would fix it."
+                      : $"FLASHING (moved {spread:0}, lit {look.Duty * 100:0}% of the time) — that's auto attack on, "
+                        + "and it's what she'll watch for.",
+                    !faint && !brief);
             }
+            else if (_settings.AttackFlashProven)
+                SetLampState($"not flashing (moved {spread:0}, needs {bar:0}) — that reads as auto attack off.", true);
             else
-                SetLampState($"reads attack off ({ncc * 100:0}% like the off picture). Turn attack ON in game and "
-                           + "click here — until I've seen this box look different I won't trust it to tell me "
-                           + "attack is off.", false);
+                SetLampState($"nothing moved (only {spread:0}). Turn auto attack ON and click again — until I have "
+                           + "seen this strip flash once, I won't take stillness as proof it's off.", false);
         }
-        catch { SetLampState("learned", true); }
+        catch { SetLampState("couldn't watch that strip just then", false); }
+        finally { _lampBusy = false; }
     }
+
+    private bool _lampBusy;
 
     private bool _lampClickWired;
 
@@ -287,10 +294,10 @@ public partial class MainWindow
         if (AttackLampState is null) return;
         AttackLampState.Text = text;
         AttackLampState.Foreground = Hex(good ? "#7CE38B" : "#FFCB6B");
-        // CLICKING THE READOUT RE-READS IT — the button must keep meaning "pick", because a second
-        // pick taken while attack is ON would learn the lit lamp as the picture of OFF and invert
-        // the whole test. Wired once: this method runs on every route in, and hooking the same
-        // handler each time would fire it as many times as the page had been visited.
+        // CLICKING THE READOUT WATCHES AGAIN — the button must keep meaning "pick", because a
+        // re-pick is the only thing that discards the measurement. Wired once: this method runs on
+        // every route in, and hooking the same handler each time would fire it as many times as the
+        // page had been visited.
         if (_lampClickWired) return;
         _lampClickWired = true;
         AttackLampState.Cursor = System.Windows.Input.Cursors.Hand;

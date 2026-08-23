@@ -885,9 +885,9 @@
                                                 <TextBlock Text="auto attack" VerticalAlignment="Center" Foreground="{StaticResource TextDim}" Margin="0,0,3,8"/>
                                                 <TextBox x:Name="HuntAutoAttackKeyBox" Text="" Width="54" VerticalAlignment="Center" Margin="0,0,8,8"
                                                          ToolTip="Your in-game auto-attack key. Used only as a fallback: if the rotation fires and nothing swings for a couple of seconds, she taps this once. Leave blank to never touch it — it is a TOGGLE, so pressing it while attack is already running would turn it off."/>
-                                                <Button x:Name="AttackLampBtn" Content="pick attack light" Click="AttackLamp_Click"
+                                                <Button x:Name="AttackLampBtn" Content="pick attack border" Click="AttackLamp_Click"
                                                         VerticalAlignment="Center" Margin="0,0,8,8" Padding="8,2"
-                                                        ToolTip="The little indicator beside your health window that lights when auto attack is running. Turn auto attack OFF, then click here and drag a small box around it. After that she reads the state instead of guessing at it — the combat log never says when a song or spell engaged attack."/>
+                                                        ToolTip="The thin border that FLASHES around your unit frame while auto attack is running. Click here and drag a narrow strip over a piece of it, keeping your bars out. She then watches it for a second rather than guessing — the combat log never says when a song or spell engaged attack, and the green/red combat icon means something else entirely."/>
                                                 <TextBlock x:Name="AttackLampState" Text="" VerticalAlignment="Center" Foreground="{StaticResource TextDim}" Margin="0,0,8,8"/>
                                                 <TextBlock Text="engage ms" VerticalAlignment="Center" Foreground="{StaticResource TextDim}" Margin="0,0,3,8"/>
                                                 <TextBox x:Name="HuntEngageBox" Text="1200" Width="54" VerticalAlignment="Center" Margin="0,0,8,8"
