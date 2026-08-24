@@ -94,6 +94,27 @@ public sealed class AppSettings
     /// </summary>
     public List<double> GameCloseMinutes { get; set; } = new();
 
+    /// <summary>What preceded each of those closes — "death 12m before", "afk 32m before", or
+    /// "no death or afk seen" — index-aligned with <see cref="GameCloseMinutes"/>. The minutes
+    /// alone were quietly lying: the 08-24 close was 217 minutes into the grind but ~62 minutes
+    /// after input stopped, and averaging a crash-after-death with a genuine idle timer produces
+    /// a number that describes neither. The cause tag is what makes the history readable.</summary>
+    public List<string> GameCloseCauses { get; set; } = new();
+
+    /// <summary>The unattended guard: refocus the game when a run is meant to be going and the
+    /// machine looks unattended, answer the client's A.F.K. flag with a harmless Shift tap, and
+    /// keep the session alive after a death. On by default because the failure it prevents
+    /// (server idle-kick → END_GAME, the whole night lost) was measured twice; the Grind page
+    /// checkbox turns it off for supervised play. It never acts while a person is at the
+    /// keyboard — every intervention is gated on measured input idleness.</summary>
+    public bool UnattendedGuardEnabled { get; set; } = true;
+
+    /// <summary>Centre of the respawn window's accept button, normalized to the game window
+    /// (0..1 each axis); 0/0 = never picked. Picked on the Grind page while the respawn window
+    /// is actually up, same flow as every other screen pick.</summary>
+    public double RespawnClickNX { get; set; }
+    public double RespawnClickNY { get; set; }
+
     /// <summary>Make the roles narrate the numbers behind their decisions — match distances, click
     /// coordinates, the raw text an OCR read before anything parsed it. Off by default: these lines
     /// are voluminous enough to push the real narration out of the buffer, and they are only worth
@@ -440,6 +461,7 @@ public sealed class AppSettings
         // the initializer. The list is appended to from a UI timer, outside any try, so that would
         // be a null reference on the dispatcher thread rather than a lost setting.
         GameCloseMinutes ??= new List<double>();
+        GameCloseCauses ??= new List<string>();
         if (SwatchRev < 1)
         {
             if (IconSwatchPx == 32) IconSwatchPx = DefaultIconSwatchPx;   // 32 fitted no slot

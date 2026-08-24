@@ -263,11 +263,24 @@ public partial class MainWindow
         List<double> hist = _settings.GameCloseMinutes;
         hist.Add(Math.Round(mins, 1));
         if (hist.Count > 12) hist.RemoveRange(0, hist.Count - 12);
+        // The WHY beside the minutes. 08-24 proved the minutes alone mislead: a close 217 minutes
+        // into the grind was really a close ~62 minutes after input stopped — a cause tag is what
+        // keeps a crash-after-death from being averaged with a genuine timer.
+        string cause = GuardCloseCause();
+        List<string> causes = _settings.GameCloseCauses;
+        if (!string.IsNullOrEmpty(cause))
+        {
+            causes.Add(cause);
+            if (causes.Count > 12) causes.RemoveRange(0, causes.Count - 12);
+        }
         try { _settings.Save(); } catch { /* a diagnostic must never break a run */ }
 
         string s = $"That was {mins:0} minutes into the grind";
         if (idle > 1) s += $", and the game had not been the focused window for {idle:0} of them";
         s += ".";
+        if (!string.IsNullOrEmpty(cause) && cause != "no death or afk seen")
+            s += $" Before the close I saw: {cause} — that, not the run length, is the number that "
+               + "matters, because the measured kill chain is input-stops → A.F.K. → ~30 min → kick → exit.";
         if (hist.Count >= 3)
         {
             double lo = double.MaxValue, hi = 0, sum = 0;

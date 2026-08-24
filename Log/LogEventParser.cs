@@ -15,6 +15,7 @@ public enum LogEventKind
     Death,
     Tell,
     Consider,   // result of a /consider — carries a rough difficulty
+    Afk,        // the client's own "You are now A.F.K." — the 30-minute warning before an idle kick
     System
 }
 
@@ -169,6 +170,23 @@ public static class LogEventParser
         // Private tell only: "Soandso tells you, 'msg'" — exclude group/guild/raid channels.
         if (msg.Contains(" tells you,", StringComparison.OrdinalIgnoreCase))
             return new LogEvent(stamp, LogEventKind.Tell, msg);
+
+        // EVERYTHING BELOW IS A STATEMENT OF FACT, and the position parser's rule applies to all
+        // of them: a fact read out of a log that carries the whole server's chat has to know a
+        // human didn't type it. The field case that forced this outward from Location: somebody
+        // said "thank you kindly" in General and the con reader announced a Kindly mob — twice,
+        // on two different nights, from two different strangers being polite. A con can skip a
+        // mob; the same hole under Death or Kill would stop a role or credit a kill on a stranger's
+        // chat, so the gate goes HERE, over the lot, not into the classifier that happened to fire.
+        if (spoken) return new LogEvent(stamp, LogEventKind.Other, msg);
+
+        // The client's own A.F.K. flag — printed at the start of the line, like every fact the
+        // client states about you. In the field this fired exactly 31.6 minutes before the server
+        // dropped the connection and the client exited with END_GAME: it is not a status line, it
+        // is the half-time whistle on an idle kick, and the unattended guard treats it as one.
+        if (msg.StartsWith("You are now A.F.K.", StringComparison.OrdinalIgnoreCase) ||
+            msg.StartsWith("You are no longer A.F.K.", StringComparison.OrdinalIgnoreCase))
+            return new LogEvent(stamp, LogEventKind.Afk, msg);
 
         // /consider lines (before combat, since con lines carry no damage words) — either the
         // difficulty tail or the faction-attitude phrasing marks one.

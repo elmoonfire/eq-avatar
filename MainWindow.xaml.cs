@@ -245,6 +245,7 @@ public partial class MainWindow : Window
         _kmAuto?.Cancel();
         _kmApplyCts?.Cancel();
         _questStartCancelled = true;
+        GuardHoldOff();      // the death-hold keep-alive is input too, and F12 means ALL input stops
         // Recorded into BOTH module consoles, not a neutral source neither one shows: whoever
         // pressed the panic key is watching one of these, and the line saying it worked has to be
         // the next line they see there.
@@ -376,6 +377,8 @@ public partial class MainWindow : Window
         // Stamped every tick the game is in front, so a close can say how long it had been sitting
         // unattended beforehand — the measurement that tests the idle-kick theory.
         if (_grindTarget != IntPtr.Zero && GetForegroundWindow() == _grindTarget) _gameFocusedAt = DateTime.UtcNow;
+        // The unattended guard rides the same heartbeat: focus rescue, A.F.K. answer, session hold.
+        GuardTick();
         if (GameWindowDied())
         {
             GrindTargetLabel.Text = "game not found — launch EQ, then click ◎";
@@ -938,6 +941,7 @@ public partial class MainWindow : Window
         }
 
         _runStartedAt = DateTime.UtcNow;      // for the close-time pattern, nothing else
+        GuardOnRoleStart();                   // a running role IS the keep-alive; any death-hold ends here
         var rotation = GrindRole.ParseRotation(GrindRotation.Text);
         _currentLog ??= EqLogWatcher.FindNewestLog(LogFolderBox.Text.Trim());
         var sink = new ForegroundSendInputSink(() => _grindTarget);
@@ -949,6 +953,9 @@ public partial class MainWindow : Window
             _hunt = new HuntRole(sink, rotation, _currentLog, _settings, _heat, CompassSvc, VitalsSvc, () => _mapZone);
             _hunt.Log += m => Dispatcher.Invoke(() => GrindLogLine(m));
             _hunt.Stopped += () => Dispatcher.Invoke(() => { _grindTimer.Stop(); UpdateGrindStats(); EndRoleSession(); });
+            // Death is not a plain stop: the respawn window has to be clicked and the session held
+            // alive, or the client is AFK-kicked and EXITS about an hour later (measured 08-24).
+            _hunt.Died += () => Dispatcher.Invoke(OnHuntDied);
             _hunt.Start();
             FocusGameSoon();
             _grindTimer.Start();
@@ -1062,6 +1069,7 @@ public partial class MainWindow : Window
         TargetMobsBox.Text = _settings.GrindTargetMobs;
         BardBox.IsChecked = _settings.GrindBardMode;
         CastOnlyBox.IsChecked = _settings.GrindCastOnly;
+        InitUnattendedUi();
         LevBox.IsChecked = _settings.LevEnabled;
         LevKeyBox.Text = _settings.LevCastKey;
         LevNameBox.Text = _settings.LevBuffName;

@@ -765,6 +765,13 @@
                                                       ToolTip="Caster / bard mode: fights with spells and songs only. It never turns to face the mob and never steps closer mid-fight — all that time goes into the rotation instead. If EQ says the target is out of range or out of sight, it drops that target and hunts a reachable one."/>
                                             <CheckBox x:Name="StopOnDeathBox" Content="stop on death" IsChecked="True" VerticalAlignment="Center" Margin="0,0,4,4"
                                                       Foreground="{StaticResource TextDim}"/>
+                                            <CheckBox x:Name="UnattendedBox" Content="unattended guard" IsChecked="True" Click="Unattended_Click" VerticalAlignment="Center" Margin="0,0,10,4"
+                                                      Foreground="{StaticResource TextDim}"
+                                                      ToolTip="For overnight runs. If the game loses focus while the machine is idle, brings it back in front (Esc closes a stray menu first). Answers the client's 'You are now A.F.K.' line with a harmless Shift tap — measured: the server kicks ~30 min after that line and the client then EXITS. After a death, keeps the session alive instead of letting it idle out. Never acts while you're actually at the keyboard."/>
+                                            <Button x:Name="RespawnPickBtn" Content="pick: respawn button" Click="RespawnPick_Click" VerticalAlignment="Center" Margin="0,0,6,4"
+                                                    ToolTip="Drag a box over the respawn window's accept button — do it once while the window is really up (die somewhere safe). After a death the bot clicks it, then parks at the respawn point with the session held alive; it does NOT hunt on from bind."/>
+                                            <TextBlock x:Name="RespawnPickLabel" Text="respawn: not picked" VerticalAlignment="Center" Margin="0,0,0,4"
+                                                       Foreground="{StaticResource TextDim}"/>
                                         </WrapPanel>
                                     </StackPanel>
                                 </Border>

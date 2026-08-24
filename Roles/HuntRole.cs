@@ -37,6 +37,13 @@ public sealed class HuntRole
 {
     public event Action<string>? Log;
     public event Action? Stopped;
+    /// <summary>The character died. Raised BEFORE the role tears itself down, so the owner can run
+    /// the respawn/hold handling (click the respawn window, keep the session alive) — the two
+    /// instrumented nights proved that a client left inputless after a death is AFK-flagged and
+    /// then exits with END_GAME about an hour later. Stopping the hunt is still right — the
+    /// character respawns at bind, and "walk back to camp" from there is how it drowned — but
+    /// stopping must never mean surrendering the client to the idle kick.</summary>
+    public event Action? Died;
     public HuntStats Stats { get; } = new();
 
     private readonly IInputSink _sink;
@@ -193,7 +200,10 @@ public sealed class HuntRole
 
     public void Stop()
     {
-        if (_cts == null) return;
+        // Idempotent on purpose: the death path calls this from the loop's own thread, and the
+        // user's F12 can land moments later. Two Stops must not raise Stopped twice — the second
+        // EndRoleSession would tear down a session bookkeeping that is already closed.
+        if (_cts is not { IsCancellationRequested: false }) return;
         _cts.Cancel();
         if (_watcher != null) { _watcher.LineRead -= OnLine; _watcher.Dispose(); }
         ReleaseKeys();
@@ -725,7 +735,20 @@ public sealed class HuntRole
         {
             while (!ct.IsCancellationRequested)
             {
-                if (_selfDead) { Log?.Invoke("Death detected — stopping hunt for safety."); Stats.Deaths++; break; }
+                if (_selfDead)
+                {
+                    // Order matters: narrate, count, hand the corpse to the owner (respawn click +
+                    // session hold live there — this class has no window handle and no screen), and
+                    // only then tear down. The old `break` left a ZOMBIE: the loop exited but _cts
+                    // was never cancelled, so Running stayed true, the grind timer kept painting,
+                    // and Stopped never fired — the app spent the rest of the night insisting a
+                    // dead character was hunting. Stop() does the whole teardown and is idempotent.
+                    Log?.Invoke("Death detected — combat and navigation stopped.");
+                    Stats.Deaths++;
+                    Died?.Invoke();
+                    Stop();
+                    break;
+                }
                 if (!_sink.Ready) { Stats.State = "paused (EQ not focused)"; await Task.Delay(400, ct); continue; }
 
                 await MaybeLev(ct);                          // keep Levitate up + view above horizon
