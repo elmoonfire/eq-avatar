@@ -109,6 +109,22 @@ public sealed class AppSettings
     /// keyboard — every intervention is gated on measured input idleness.</summary>
     public bool UnattendedGuardEnabled { get; set; } = true;
 
+    /// <summary>Bring the game back by itself after it closes while a run was going: relaunch it,
+    /// drive the auto-login through to Enter World, wait for the zone-in, and restart the role.
+    ///
+    /// This exists because of the 08-25 close, which no amount of keep-alive could have prevented:
+    /// the SERVER shut down for a Tuesday patch. Prevention had already taken the two causes it
+    /// could take (idle kick after a death, idle kick after a stolen focus); a scheduled restart
+    /// is not a fault to prevent but an outage to sit out. Only fires when a role was actually
+    /// running, the machine is unattended, and the client's own log does not say the user camped.
+    /// </summary>
+    public bool AutoRecoverEnabled { get; set; } = true;
+
+    /// <summary>How many relaunch attempts one close is allowed. A bounded number, because the
+    /// failure mode of an unbounded relaunch loop is hammering a login server all night — and the
+    /// one thing worse than a lost night is an account that drew attention for it.</summary>
+    public int RecoverMaxAttempts { get; set; } = 6;
+
     /// <summary>Centre of the respawn window's accept button, normalized to the game window
     /// (0..1 each axis); 0/0 = never picked. Picked on the Grind page while the respawn window
     /// is actually up, same flow as every other screen pick.</summary>

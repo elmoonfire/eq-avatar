@@ -118,6 +118,10 @@ public partial class MainWindow
 
     private (bool ok, string result) RemoteStop()
     {
+        // The phone's Stop means the same thing as the app's Stop button, including to a
+        // recovery counting down to a relaunch — otherwise stopping from another room replied
+        // "nothing was running" and the game launched itself ten minutes later anyway.
+        CancelRecovery("stopped from the remote");
         // Every role that can send input, exactly like F12 — the phone's Stop button meaning
         // "stop, except the two newest runners" is not a promise anyone would expect it to make.
         bool wasRunning = _grind is { Running: true } || _hunt is { Running: true }

@@ -113,6 +113,11 @@ public sealed class UnattendedGuard : IDisposable
     /// sending, this hovers near zero; the moment input stops — role paused, respawn window up —
     /// it climbs. That is exactly the condition the guard exists for, so the pollution is welcome:
     /// a busy role means nothing needs rescuing.</summary>
+    /// <summary>Public face of the idle measurement, so the recovery path gates on exactly the
+    /// same definition of "nobody is here" that the guard does. Two different presence tests in
+    /// one app is two different answers to one question.</summary>
+    public static double SecondsSinceInput() => IdleSeconds();
+
     private static double IdleSeconds()
     {
         var lii = new LASTINPUTINFO { cbSize = (uint)Marshal.SizeOf<LASTINPUTINFO>() };
@@ -241,13 +246,32 @@ public sealed class UnattendedGuard : IDisposable
     /// <summary>One short clause for the close post-mortem: what this guard last saw before the
     /// window died. The close-time history keeps minutes; this keeps the WHY beside them, because
     /// a crash-after-death and an idle timer must not be averaged into one meaningless number.</summary>
-    public string CloseCause(DateTime closedAtUtc)
+    public string CloseCause(DateTime closedAtUtc) => CloseCauseWithAge(closedAtUtc).Cause;
+
+    /// <summary>
+    /// The cause clause AND the age of the event it names.
+    ///
+    /// They have to come from one decision. When they were computed separately the caller asked
+    /// "how old is the newest death-or-AFK?" while this method answered with the DEATH whenever
+    /// one existed — so a run whose real cause was an AFK five minutes ago was filed under a
+    /// death from two hours before it started, which is the exact mis-attribution the age check
+    /// was added to prevent.
+    /// </summary>
+    public (string Cause, double? AgeMinutes) CloseCauseWithAge(DateTime closedAtUtc)
     {
-        if (LastDeathAt is DateTime d && (closedAtUtc - d).TotalHours < 3)
-            return $"death {(closedAtUtc - d).TotalMinutes:0}m before";
-        if (LastAfkAt is DateTime a && (closedAtUtc - a).TotalHours < 3)
-            return $"afk {(closedAtUtc - a).TotalMinutes:0}m before";
-        return "no death or afk seen";
+        // THE MOST RECENT ONE WINS, not death-by-default. Preferring the death meant a close whose
+        // real in-run cause was an AFK five minutes earlier got filed under a death from before
+        // the run started — and once the caller's age check rejected that death as too old, the
+        // AFK was thrown away with it and the close recorded as having no cause at all.
+        DateTime? d = LastDeathAt, a = LastAfkAt;
+        bool deathNewer = d is DateTime dd && (a is not DateTime aa || dd >= aa);
+        if (deathNewer && d is DateTime dv && (closedAtUtc - dv).TotalHours < 3)
+            return ($"death {(closedAtUtc - dv).TotalMinutes:0}m before", (closedAtUtc - dv).TotalMinutes);
+        if (a is DateTime av && (closedAtUtc - av).TotalHours < 3)
+            return ($"afk {(closedAtUtc - av).TotalMinutes:0}m before", (closedAtUtc - av).TotalMinutes);
+        if (d is DateTime dv2 && (closedAtUtc - dv2).TotalHours < 3)
+            return ($"death {(closedAtUtc - dv2).TotalMinutes:0}m before", (closedAtUtc - dv2).TotalMinutes);
+        return ("no death or afk seen", null);
     }
 
     public void Dispose() { _watcher?.Dispose(); _watcher = null; _watchPath = null; }

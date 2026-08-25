@@ -246,6 +246,7 @@ public partial class MainWindow : Window
         _kmApplyCts?.Cancel();
         _questStartCancelled = true;
         GuardHoldOff();      // the death-hold keep-alive is input too, and F12 means ALL input stops
+        CancelRecovery("F12");
         // Recorded into BOTH module consoles, not a neutral source neither one shows: whoever
         // pressed the panic key is watching one of these, and the line saying it worked has to be
         // the next line they see there.
@@ -381,6 +382,7 @@ public partial class MainWindow : Window
         GuardTick();
         if (GameWindowDied())
         {
+            // (the running role is captured inside GameWindowDied itself — it has other callers)
             GrindTargetLabel.Text = "game not found — launch EQ, then click ◎";
             LaunchStatus.Text = "The game window closed. Launch is ready whenever you are.";
             GrindLogLine("The game window closed — it'll be re-detected when it's back. Checking in a moment "
@@ -942,6 +944,9 @@ public partial class MainWindow : Window
 
         _runStartedAt = DateTime.UtcNow;      // for the close-time pattern, nothing else
         GuardOnRoleStart();                   // a running role IS the keep-alive; any death-hold ends here
+        // A start that came from a person supersedes a recovery in flight. (A recovery's OWN
+        // restart lands here too — by then it has already returned, so there is nothing to cancel.)
+        if (!_recoverRestarting) CancelRecovery("a run was started by hand");
         var rotation = GrindRole.ParseRotation(GrindRotation.Text);
         _currentLog ??= EqLogWatcher.FindNewestLog(LogFolderBox.Text.Trim());
         var sink = new ForegroundSendInputSink(() => _grindTarget);
@@ -1070,6 +1075,7 @@ public partial class MainWindow : Window
         BardBox.IsChecked = _settings.GrindBardMode;
         CastOnlyBox.IsChecked = _settings.GrindCastOnly;
         InitUnattendedUi();
+        InitRecoveryUi();
         LevBox.IsChecked = _settings.LevEnabled;
         LevKeyBox.Text = _settings.LevCastKey;
         LevNameBox.Text = _settings.LevBuffName;
@@ -1741,6 +1747,10 @@ public partial class MainWindow : Window
 
     private void StopGrind_Click(object sender, RoutedEventArgs e)
     {
+        // Stop means stop. Without this, a recovery counting down to a relaunch ignored the one
+        // button whose whole meaning is "stop doing things", and launched the game ten minutes
+        // after the user had explicitly halted the run.
+        if (!_recoverStopping) CancelRecovery("the run was stopped");
         _grind?.Stop();
         _hunt?.Stop();
         _questRun?.Stop();          // F12 reaches every role that can send input, not just the grind ones

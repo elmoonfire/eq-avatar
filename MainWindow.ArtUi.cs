@@ -165,6 +165,14 @@ public partial class MainWindow
         // A SENTINEL, not zero. _gamePid is only filled in on a tick where the window was alive,
         // so a window that dies within one heartbeat of being targeted leaves it at 0 — and the
         // poll below would then silently skip a verdict the line above has already promised.
+        // CAPTURED HERE, not at the one call site that happens to be the UI tick. This method is
+        // a ONE-SHOT consumed by whichever caller reaches it first — the tick, AutoTargetEq, a
+        // page navigation, a Tools button — and only this line is on every one of those paths.
+        // Recording the running role from the tick alone left a stale answer behind: a window
+        // REBUILD (which EQ does on every death loading screen) recorded "hunt", nothing cleared
+        // it, and hours later a game the user closed by hand was recovered as though a run had
+        // been going.
+        RememberRunningRoleForRecovery();
         _diedPid = _gamePid > 0 ? _gamePid : -1;
         _diedAt = DateTime.UtcNow;
         _grindTarget = IntPtr.Zero;
@@ -219,12 +227,15 @@ public partial class MainWindow
             ? $"The game's process (pid {pid}) is still running, so the client did NOT close — it destroyed and "
               + "rebuilt its window, which EQ does on a resolution or full-screen change and on the loading screen "
               + "after a death. I'll re-attach on my own as soon as the new window appears."
-            : $"The game's process (pid {pid}) is gone as well, so the client itself exited or crashed. That was not "
-              + "this app — nothing in it ever closes the game. If it keeps happening while you're away, Windows' "
-              + "Event Viewer → Windows Logs → Application will have the entry, and it's worth noting whether it "
-              + "follows a death or a zone.");
+            // THE CLIENT'S OWN LOG ANSWERS THIS, so stop telling the user to go and read Event
+            // Viewer. Three closes read as "exited or crashed" under the old wording and had
+            // three different causes; dbg.txt distinguished all three on the first try.
+            : $"The game's process (pid {pid}) is gone as well. Reading its own dbg.txt: "
+              + Login.CloseReason.FromLogFolder(LogFolderBox.Text.Trim()).Say + ".");
         GrindLogLine(note.Trim());
         LoginLogLine(note.Trim());
+        if (alive) ForgetRecoveryRole();     // a rebuilt window is not a close; nothing to recover from
+        else ConsiderRecovery();
     }
 
     /// <summary>
@@ -266,7 +277,16 @@ public partial class MainWindow
         // The WHY beside the minutes. 08-24 proved the minutes alone mislead: a close 217 minutes
         // into the grind was really a close ~62 minutes after input stopped — a cause tag is what
         // keeps a crash-after-death from being averaged with a genuine timer.
-        string cause = GuardCloseCause();
+        // SCOPED TO THIS RUN, and that is a correction of 0.10.55. The guard's window was three
+        // hours, so the 08-25 close — a server patch — was reported as "death 165m before", from a
+        // death in an entirely different session earlier that evening. A cause that predates the
+        // run cannot be the cause of the run ending.
+        // ONE call, so the clause and the age it is checked against describe the same event.
+        // `mins` is the run length; _runStartedAt has already been cleared two lines above, which
+        // is exactly the kind of ordering that made the original bug easy to write.
+        (string cause, double? causeAge) = GuardCloseCauseWithAge();
+        if (causeAge is double age && age > mins)
+            cause = "no death or afk this run";
         List<string> causes = _settings.GameCloseCauses;
         if (!string.IsNullOrEmpty(cause))
         {
@@ -278,7 +298,7 @@ public partial class MainWindow
         string s = $"That was {mins:0} minutes into the grind";
         if (idle > 1) s += $", and the game had not been the focused window for {idle:0} of them";
         s += ".";
-        if (!string.IsNullOrEmpty(cause) && cause != "no death or afk seen")
+        if (!string.IsNullOrEmpty(cause) && !cause.StartsWith("no death or afk", StringComparison.Ordinal))
             s += $" Before the close I saw: {cause} — that, not the run length, is the number that "
                + "matters, because the measured kill chain is input-stops → A.F.K. → ~30 min → kick → exit.";
         if (hist.Count >= 3)

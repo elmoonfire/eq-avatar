@@ -60,6 +60,18 @@ public partial class MainWindow
     /// <summary>One clause of cause for the close history, or empty when no guard ever ran.</summary>
     private string GuardCloseCause() => _guard?.CloseCause(DateTime.UtcNow) ?? "";
 
+    /// <summary>How many minutes ago the guard's most recent death/AFK sighting was, or null when
+    /// it has seen neither. The caller compares it against the RUN length: an event older than the
+    /// run started before the run and cannot explain the run ending. Without this, 0.10.55 blamed
+    /// a 5am server patch on a death from the previous evening.</summary>
+    private (string Cause, double? AgeMinutes) GuardCloseCauseWithAge()
+        => _guard?.CloseCauseWithAge(DateTime.UtcNow) ?? ("", null);
+
+    /// <summary>Was the guard holding a dead character's session alive when the window died? That
+    /// still counts as a run in progress for recovery purposes — the client is what needs bringing
+    /// back, even though the character must NOT be sent hunting again from its bind point.</summary>
+    private bool GuardWasHolding => _guard?.HoldSession == true;
+
     // ---------------- death → respawn window ----------------
 
     /// <summary>
