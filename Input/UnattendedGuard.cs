@@ -208,14 +208,17 @@ public sealed class UnattendedGuard : IDisposable
             //
             // NOT INTO THE GAME, AND NOT INTO OURSELVES.
             //
-            // ⚠ CORRECTED BY HAYDEN, 08-25: an earlier version of this comment claimed Esc opens
-            // EQ's main menu. It does not — that is WoW. In EQ Legends Esc CLOSES windows, and
-            // Options is bound to `o`. The correction does not retire the guard, it sharpens the
-            // reason for it: closing windows is the specific harm this app cannot survive, because
-            // every screen read it makes — the target window, the HP/mana bars, the compass — is a
-            // read of an in-game window that has to be OPEN and where it was picked. Esc into the
-            // client, unattended, dozens of times, is the bot blinding itself one window at a time
-            // and then reporting that its picks have "moved".
+            // ⚠ WHAT ESC ACTUALLY DOES IN EQ LEGENDS, corrected twice by Hayden on 08-25 because
+            // this comment got it wrong twice. It does NOT open a main menu (that is WoW; Options
+            // here is bound to `o`), and it does NOT close the target window or the unit-frame
+            // HP/mana bars — those are persistent HUD, so the Grind role's screen reads are safe
+            // from it. What it closes is BAGS, the character inventory, options panels.
+            //
+            // Which is still a real hazard, but for a different role than the one guessed at:
+            // Auto Merge and the Quest Runner CLICK INTO BAG SLOTS, and both are in this guard's
+            // definition of "a run is going". An Esc fired mid-merge closes the very window the
+            // next click is aimed at — and a bag click is a toggle, so the click that lands
+            // afterwards is not the one that was intended.
             //
             // (For the record, Esc was NOT implicated in the 08-25 logout: the server broadcast
             // "coming down in 1 minute" at 11:14:13 and terminated the session at 11:17:20.)
