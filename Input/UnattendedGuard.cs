@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Threading.Tasks;
 using EQAvatar.Spike.Config;
@@ -49,6 +50,14 @@ public sealed class UnattendedGuard : IDisposable
     private const int RescueCooldownSec = 45;  // one rescue attempt per this window
     private const int KeepAliveMinutes = 5;    // hold-mode heartbeat; the client flags AFK only after ~30
 
+    /// <summary>How many rescues inside <see cref="ThrashWindowMinutes"/> mean the guard is not
+    /// fixing anything but fighting something. Field evidence (08-25): FORTY rescues at a
+    /// metronomic 75-second beat over an hour, every one reporting success, while the character
+    /// stood at one `/loc` and killed nothing. A rescue that is needed again a minute later did
+    /// not work, and repeating it forever is the app insisting instead of reporting.</summary>
+    private const int ThrashRescues = 3;
+    private const int ThrashWindowMinutes = 15;
+
     private const ushort VK_SHIFT = 0x10;
     private const ushort VK_ESCAPE = 0x1B;
 
@@ -56,6 +65,29 @@ public sealed class UnattendedGuard : IDisposable
     /// cursor out-and-back. The pair exists because the tap's whole job is resetting the client's
     /// idle clock and there is no readback for "did that count" — a keypress AND a mouse move is
     /// two independent reasons for the answer to be yes. Called only while the game is focused.</summary>
+    /// <summary>
+    /// WHO HAS THE SCREEN — title and owning process.
+    ///
+    /// The single most useful fact about a focus loss, and the guard threw it away: forty log
+    /// lines on 08-25 said "dismissing whatever is in front" and not one said WHAT was in front,
+    /// so an hour of thrashing produced no evidence at all. The house rule that one number from
+    /// the app beats a confident guess applies exactly here, and this costs one call.
+    /// </summary>
+    private static (string Title, string Process) Foreground()
+    {
+        IntPtr h = GetForegroundWindow();
+        var sb = new System.Text.StringBuilder(512);
+        GetWindowText(h, sb, sb.Capacity);
+        string proc = "?";
+        try
+        {
+            GetWindowThreadProcessId(h, out uint pid);
+            if (pid != 0) proc = System.Diagnostics.Process.GetProcessById((int)pid).ProcessName;
+        }
+        catch { }
+        return (sb.ToString(), proc);
+    }
+
     private static void ActivityTap()
     {
         InputProbe.SendInputKey(VK_SHIFT, 45);
@@ -70,6 +102,8 @@ public sealed class UnattendedGuard : IDisposable
     [DllImport("user32.dll")] private static extern bool GetLastInputInfo(ref LASTINPUTINFO plii);
     [DllImport("kernel32.dll")] private static extern uint GetTickCount();
     [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll", CharSet = CharSet.Auto)] private static extern int GetWindowText(IntPtr hWnd, System.Text.StringBuilder text, int count);
+    [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
 
     private readonly Func<IntPtr> _game;
     private readonly Func<bool> _roleActive;
@@ -152,7 +186,7 @@ public sealed class UnattendedGuard : IDisposable
             return;
         }
 
-        if (!Wanted) return;
+        if (!Wanted || ThrashStop) return;
         double unfocused = (now - _lastFocused).TotalSeconds;
         if (unfocused < FocusGraceSec) return;
         if (IdleSeconds() < IdleGateSec && unfocused < HardGraceSec) return;   // a person is here — theirs
@@ -166,18 +200,30 @@ public sealed class UnattendedGuard : IDisposable
         if (System.Threading.Interlocked.Exchange(ref _rescueBusy, 1) == 1) return;
         try
         {
-            _log($"Unattended guard: {why} — dismissing whatever is in front and refocusing the game.");
+            (string fgTitle, string fgProc) = Foreground();
+            _log($"Unattended guard: {why}. In front: \"{fgTitle}\" ({fgProc}). Refocusing the game.");
+
             // A context menu runs its own modal input loop and swallows SetForegroundWindow; Esc is
-            // the one key every menu answers. If something other than a menu holds focus, a single
-            // Esc while the machine is unattended is the least input that could matter.
-            InputProbe.SendInputKey(VK_ESCAPE, 40);
-            await Task.Delay(300);
+            // the one key every menu answers.
+            //
+            // NOT INTO THE GAME, AND NOT INTO OURSELVES. Esc is a real keypress with real meaning
+            // in EQ — it opens the main menu — and if the window in front belongs to the game's own
+            // process (a rebuilt window, a dialog) then "dismiss whatever is in front" would be
+            // pressing Esc into the client dozens of times unattended. Our own window needs no
+            // dismissing either: raising the game is enough.
+            string me = System.Diagnostics.Process.GetCurrentProcess().ProcessName;
+            bool ownWindow = fgProc.Equals(me, StringComparison.OrdinalIgnoreCase)
+                          || fgProc.StartsWith("eqgame", StringComparison.OrdinalIgnoreCase)
+                          || fgProc.StartsWith("everquest", StringComparison.OrdinalIgnoreCase);
+            if (!ownWindow) { InputProbe.SendInputKey(VK_ESCAPE, 40); await Task.Delay(300); }
+            else _log("Unattended guard: that window belongs to the game or to me, so no Esc — just raising the game.");
             bool ok = await GameFocus.BringAndSettleAsync(h, settleMs: 350);
             if (ok)
             {
                 ActivityTap();                              // count as activity immediately
                 _lastKeepAlive = DateTime.UtcNow;
                 _log("Unattended guard: the game is back in front.");
+                NoteRescueAndCheckThrash(fgTitle, fgProc);
             }
             else
                 _log("Unattended guard: could NOT bring the game forward — will retry in "
@@ -186,6 +232,41 @@ public sealed class UnattendedGuard : IDisposable
         catch (Exception ex) { _log("Unattended guard: rescue failed — " + ex.Message); }
         finally { System.Threading.Interlocked.Exchange(ref _rescueBusy, 0); }
     }
+
+    /// <summary>
+    /// Record a rescue and decide whether the guard has stopped helping.
+    ///
+    /// A rescue that reports success and is needed again seventy-five seconds later did not
+    /// succeed at anything; repeating it forty times over an hour, as this did on 08-25 while the
+    /// character stood at one `/loc` and killed nothing, is the app insisting rather than
+    /// reporting. Past the threshold it stands down, says what kept taking the screen, and leaves
+    /// the session-keeping tap running so the client at least survives to be looked at.
+    /// </summary>
+    private void NoteRescueAndCheckThrash(string fgTitle, string fgProc)
+    {
+        DateTime now = DateTime.UtcNow;
+        _recentRescues.Add(now);
+        _recentRescues.RemoveAll(t => (now - t).TotalMinutes > ThrashWindowMinutes);
+        if (_recentRescues.Count < ThrashRescues || ThrashStop) return;
+
+        ThrashStop = true;
+        HoldSession = true;      // keep the client alive; it is the run that is not working
+        _log($"⚠ Unattended guard STANDING DOWN: {_recentRescues.Count} refocus rescues in "
+           + $"{ThrashWindowMinutes} minutes means something keeps taking the screen and I am not fixing it — "
+           + $"the last thief was \"{fgTitle}\" ({fgProc}). While this is happening the role is paused far more "
+           + "than it runs, so the character is achieving nothing. I'll keep the session alive so the client "
+           + "isn't idle-kicked, but the run needs you: close whatever that window is, then start the run again.");
+    }
+
+    /// <summary>Rescue timestamps inside the thrash window.</summary>
+    private readonly List<DateTime> _recentRescues = new();
+
+    /// <summary>The guard gave up rescuing focus for this run — see NoteRescueAndCheckThrash.
+    /// Cleared when a role is started, which is the user saying "try again".</summary>
+    public bool ThrashStop { get; private set; }
+
+    /// <summary>A fresh run clears the stand-down and the rescue history.</summary>
+    public void ResetThrash() { ThrashStop = false; _recentRescues.Clear(); }
 
     private void OnLine(string raw)
     {

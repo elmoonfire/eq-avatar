@@ -50,6 +50,7 @@ public partial class MainWindow
     {
         UnattendedGuard g = EnsureGuard();
         g.HoldSession = false;
+        g.ResetThrash();        // a fresh run is the user saying "try again"
         g.Attach(_currentLog);
     }
 
