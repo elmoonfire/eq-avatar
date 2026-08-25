@@ -206,11 +206,19 @@ public sealed class UnattendedGuard : IDisposable
             // A context menu runs its own modal input loop and swallows SetForegroundWindow; Esc is
             // the one key every menu answers.
             //
-            // NOT INTO THE GAME, AND NOT INTO OURSELVES. Esc is a real keypress with real meaning
-            // in EQ — it opens the main menu — and if the window in front belongs to the game's own
-            // process (a rebuilt window, a dialog) then "dismiss whatever is in front" would be
-            // pressing Esc into the client dozens of times unattended. Our own window needs no
-            // dismissing either: raising the game is enough.
+            // NOT INTO THE GAME, AND NOT INTO OURSELVES.
+            //
+            // ⚠ CORRECTED BY HAYDEN, 08-25: an earlier version of this comment claimed Esc opens
+            // EQ's main menu. It does not — that is WoW. In EQ Legends Esc CLOSES windows, and
+            // Options is bound to `o`. The correction does not retire the guard, it sharpens the
+            // reason for it: closing windows is the specific harm this app cannot survive, because
+            // every screen read it makes — the target window, the HP/mana bars, the compass — is a
+            // read of an in-game window that has to be OPEN and where it was picked. Esc into the
+            // client, unattended, dozens of times, is the bot blinding itself one window at a time
+            // and then reporting that its picks have "moved".
+            //
+            // (For the record, Esc was NOT implicated in the 08-25 logout: the server broadcast
+            // "coming down in 1 minute" at 11:14:13 and terminated the session at 11:17:20.)
             string me = System.Diagnostics.Process.GetCurrentProcess().ProcessName;
             bool ownWindow = fgProc.Equals(me, StringComparison.OrdinalIgnoreCase)
                           || fgProc.StartsWith("eqgame", StringComparison.OrdinalIgnoreCase)
