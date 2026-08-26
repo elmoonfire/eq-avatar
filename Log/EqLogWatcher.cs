@@ -14,6 +14,16 @@ namespace EQAvatar.Spike.Log;
 /// </summary>
 public sealed class EqLogWatcher : IDisposable
 {
+    /// <summary>Ceiling on one poll's read. The live tail moves a few hundred bytes at a time, so
+    /// this only matters for Start(fromStart: true) against a log that has been running for weeks —
+    /// Hayden's was 84 MB on 08-26 — where reading it in one allocation is a large-object-heap
+    /// spike for no reason. The backlog just arrives over the next few polls instead.</summary>
+    private const int MaxPollBytes = 1 << 22;   // 4 MB
+
+    /// <summary>How large a half-written line is allowed to get before it is treated as proof the
+    /// file has no line endings at all, rather than as a line still being written.</summary>
+    private const int MaxFragmentBytes = 1 << 16;   // 64 KB
+
     private readonly string _path;
     private readonly int _pollMs;
     private Timer? _timer;
@@ -116,22 +126,102 @@ public sealed class EqLogWatcher : IDisposable
             if (length < _offset)
             {
                 // File was truncated or rotated — restart from the top.
-                Info?.Invoke("Log truncated/rotated — resetting to start.");
+                // RESET FIRST, ANNOUNCE SECOND. Info marshals to the UI thread, and a subscriber
+                // that throws while the window is closing used to jump out of this method with
+                // _offset still past the end of a file that had just been rotated. Every later
+                // poll took the same branch, threw in the same place, and the tailer never read
+                // another line — silently, because the thing that was failing was the logger.
                 _offset = 0;
+                Info?.Invoke("Log truncated/rotated — resetting to start.");
             }
             if (length == _offset) return;
 
-            using var fs = new FileStream(_path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
-            fs.Seek(_offset, SeekOrigin.Begin);
-            using var reader = new StreamReader(fs, Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
+            // ── ONLY COMPLETE LINES, AND THE OFFSET ONLY MOVES OVER COMPLETE LINES ──────────
+            //
+            // The client is WRITING this file while we read it, so a poll lands mid-line roughly
+            // whenever a poll lands. The old code used StreamReader.ReadLine() to EOF and then set
+            // `_offset = fs.Position`, and both halves of that are wrong at the same moment:
+            // ReadLine hands out the half-written line as though it were finished, and Position —
+            // which is where the reader's BUFFER ended, not where the last line did — then skips
+            // the rest of it for ever. So a line straddling a poll arrived split in two, and the
+            // second half never arrived at all.
+            //
+            // That was survivable while every test in this app was a Contains() over a fragment
+            // that usually still held the keyword. It is not survivable now: the combat evidence
+            // is ANCHORED at the start of the line, and "…rran `amir has taken 66 damage from
+            // your Fufil's" matches nothing. A lost kill line, a lost death, a lost "You are now
+            // A.F.K." are all the same bug and always were.
+            //
+            // So: read bytes, cut at the last newline, publish only what is left of it, and leave
+            // the remainder in the file for the next poll to find whole. Splitting on 0x0A is
+            // UTF-8-safe — a continuation byte is never 0x0A.
+            //
+            // AND IT IS HELD FOR EVER IF IT NEVER COMPLETES, deliberately. Replaying a finished
+            // log that does not end in a newline therefore drops its last line — EQ writes one per
+            // line, so that is a file somebody truncated by hand. The alternative is a timer that
+            // gives up and publishes the fragment, and if the writer then finishes the line the
+            // remainder arrives as a SECOND line: the split-line bug back again, now with a race
+            // in front of it. A line withheld is recoverable; a line published twice, in halves,
+            // is what this replaces.
+            long want = length - _offset;
+            if (want > MaxPollBytes) want = MaxPollBytes;      // a first-run backlog, in slices
 
-            string? line;
-            while ((line = reader.ReadLine()) != null)
+            byte[] buf = new byte[want];
+            int got;
+            using (var fs = new FileStream(_path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
             {
-                if (line.Length > 0)
-                    LineRead?.Invoke(line);
+                fs.Seek(_offset, SeekOrigin.Begin);
+                got = 0;
+                while (got < buf.Length)
+                {
+                    int n = fs.Read(buf, got, buf.Length - got);
+                    if (n <= 0) break;
+                    got += n;
+                }
             }
-            _offset = fs.Position;
+            if (got <= 0) return;
+
+            int cut = Array.LastIndexOf(buf, (byte)'\n', got - 1);
+            if (cut < 0)
+            {
+                // No complete line yet — wait for the rest.
+                //
+                // UNLESS the pending fragment has grown past anything a log line can be. That
+                // means a file with no newlines in it at all, and holding for a newline that is
+                // never coming would re-read and re-allocate the SAME bytes every 150 ms for the
+                // life of the process. Bounded at the fragment size rather than at the poll cap:
+                // a 3 MB newline-free file is under the cap, so a cap-sized test would never fire
+                // and would churn megabyte allocations six times a second for ever.
+                if (got >= MaxFragmentBytes)
+                {
+                    _offset += got;
+                    Info?.Invoke($"Skipped {got} bytes with no line ending in them — this file does not look "
+                               + "like a game log.");
+                }
+                return;
+            }
+
+            // A byte-order mark only exists at the very top of the file, and reading bytes by hand
+            // means nothing strips it for us; left alone it prefixes the first line with U+FEFF and
+            // defeats every anchor on it.
+            int from = 0;
+            if (_offset == 0 && got >= 3 && buf[0] == 0xEF && buf[1] == 0xBB && buf[2] == 0xBF) from = 3;
+
+            string text = Encoding.UTF8.GetString(buf, from, (cut + 1) - from);
+            _offset += cut + 1;
+
+            // ONE SUBSCRIBER'S BAD DAY IS NOT THE REST OF THE BATCH'S. The offset has already
+            // moved over these lines — it has to, or a later poll re-delivers them — so an
+            // exception escaping this loop would take every line after it with it, permanently.
+            // Forty lines arrive, a parser throws on the third, and the death and the kill in
+            // lines 20 and 31 are simply gone. Each line is handed out on its own.
+            foreach (string raw in text.Split('\n'))
+            {
+                string line = raw.TrimEnd('\r');
+                if (line.Length == 0) continue;
+                try { LineRead?.Invoke(line); }
+                catch (Exception ex) { Info?.Invoke("Line handler failed (continuing): " + ex.Message); }
+            }
         }
         catch (Exception ex)
         {

@@ -145,6 +145,15 @@ public sealed class HuntRole
     /// attack is a melee question, and a landing nuke says nothing about whether the sword is
     /// moving.</summary>
     private int _meleeSwings;
+    /// <summary>CONTINUOUS attack only — the four verbs a player's auto attack prints. A rotation
+    /// that fires kick lands melee lines every fight without auto attack ever engaging, so the
+    /// fallback that exists to notice exactly that cannot be counted with _meleeSwings.</summary>
+    private int _autoSwings;
+
+    /// <summary>How close together two "can't see it / too far" passes have to be before they are
+    /// read as one target being genuinely unreachable, rather than two unrelated blips in a long
+    /// fight. Four seconds is a little over one cast.</summary>
+    private const double BlockedTogetherSeconds = 4;
     /// <summary>What the log last said about auto attack, when it said anything. Null = it has not
     /// mentioned it, which is the usual state and is why the swing count is the primary signal.</summary>
     private bool? _autoAttackOn;
@@ -258,54 +267,78 @@ public sealed class HuntRole
 
     private void OnLine(string raw)
     {
-        // Facing/range feedback + bard interrupts arrive as plain lines the parser doesn't type.
-        if (raw.Contains("You cannot see your target", StringComparison.OrdinalIgnoreCase)) _cantSee = true;
-        else if (raw.Contains("too far away", StringComparison.OrdinalIgnoreCase)
-                 || raw.Contains("out of range", StringComparison.OrdinalIgnoreCase)) _tooFar = true;
+        // THE WATCHER HANDS OUT THE FILE'S LINE, STAMP AND ALL — "[Wed Aug 26 08:46:54 2026] You
+        // slash …". Every Contains() below is unaffected; every ANCHORED test needs this, and the
+        // melee counter went years without it (see LogEventParser.StripStamp).
+        string msg = LogEventParser.StripStamp(raw);
 
-        // Spell/song damage is attributed to the VICTIM ("a rat was hit by non-melee for 42 points
-        // of damage."), so the melee "did one of OUR lines print?" test never fires for a caster or
-        // a bard. Count these as our output too — a resist still proves the cast reached the mob,
-        // which is exactly what the facing/reach logic wants to know.
-        if (raw.Contains("hit by non-melee", StringComparison.OrdinalIgnoreCase)
-            || raw.Contains("resisted your", StringComparison.OrdinalIgnoreCase)
-            || raw.Contains("Your target resisted", StringComparison.OrdinalIgnoreCase))
+        // Facing/range feedback + bard interrupts arrive as plain lines the parser doesn't type.
+        // GATED, which they never were: two blocked passes end a cast-only fight, and "lol he's
+        // too far away" in /ooc is two words a stranger types. It used to be absorbed by the reset
+        // on our own damage landing; that reset is now correctly narrower, so the hole is real.
+        if (!LogEventParser.SpokenAloud(msg))
+        {
+            if (msg.Contains("You cannot see your target", StringComparison.OrdinalIgnoreCase)) _cantSee = true;
+            else if (msg.Contains("too far away", StringComparison.OrdinalIgnoreCase)
+                     || msg.Contains("out of range", StringComparison.OrdinalIgnoreCase)) _tooFar = true;
+        }
+
+        // OUR SPELL / SONG OUTPUT. Attributed to the VICTIM ("a rat was hit by non-melee for 42
+        // points of damage"), so the melee "did one of OUR lines print?" test never fires for a
+        // caster or a bard, and the facing/give-up logic reads a perfect melody as total silence.
+        //
+        // ⚠ THIS IS THE 10-12 SECONDS A KILL. What this client actually prints is
+        //
+        //     [Wed Aug 26 09:08:33 2026] A kerran `amir has taken 66 damage from your Fufil's Curtailing Chant V.
+        //
+        // and that matched NOTHING the old code looked for: not "hit by non-melee", not "resisted
+        // your", not the melee block's "by your " (this says FROM your), not the classifier's
+        // "points of damage" (this says "damage from"). So the 8-second "did anything land?"
+        // window expired on every single kill, the target was dropped and re-conned, and the mob
+        // died on the third attempt from the song that had been ticking since the first. The field
+        // logs are wall-to-wall "Cast-only: nothing landed in 8s" between kills because of it.
+        //
+        // The matching lives in LogEventParser (OurSpellLanded) with the rest of the log grammar,
+        // and it is ANCHORED, which is also why it is handed the STRIPPED message: the first
+        // attempt at this fix gated on SpokenByAPlayer, and that call refuses any line containing
+        // an apostrophe — which is every spell in the game. It would have shipped as a no-op and
+        // taken the two working patterns down with it. Read the comment there before touching it.
+        //
+        // STILL OPEN, and bounded rather than guessed at: a song ticks on EVERY mob it hit, so a
+        // dropped or fleeing mob keeps printing damage and keeps `lastOut` fresh while the CURRENT
+        // target is unreachable. The give-up window can therefore run to HuntMaxFightSeconds
+        // instead of the 8s cast-only cap. Fixing it properly means scoping the damage to the
+        // target's NAME, which this class does not track yet — and a name test that mismatches
+        // reintroduces exactly the bug above, so it waits for a measurement rather than a guess.
+        if (LogEventParser.OurSpellLanded(msg))
             Interlocked.Increment(ref _ourSwings);
 
-        // DID THE WEAPON MOVE? Counted from the RAW line, before anything classifies it, because
-        // the Combat classifier needs "points of damage" or the word "hit" or "slash" — so a MISS
-        // only registers for a slashing weapon. A monk punching, a paladin with a mace, a rogue
-        // piercing: auto attack running perfectly, every swing in the first exchange missing, not
-        // one line reaching the counter — and then this class taps a TOGGLE and switches off the
-        // attack it was checking on. "You try to …" is the one phrase every miss, dodge, parry,
-        // riposte and block shares, for every weapon skill there is.
-        // ONE GATE OVER BOTH, because both are facts read out of a public document. Other people's
-        // chat starts with their name so the "You " anchor already blocks it — but the local
-        // player's own speech starts with "You " too, and "You say, 'you try to crush it'" would
-        // otherwise be counted as a swing. Same guard the position parser uses, same reason.
-        if (!LogEventParser.SpokenByAPlayer(raw))
+        // ONE GATE OVER BOTH, because both are facts read out of a public document — and it is
+        // SpokenALOUD, not SpokenByAPlayer: the latter refuses any line containing an apostrophe,
+        // and mob names have them ("a gnoll's pet"), so it threw real combat lines away. The
+        // anchor inside OurWeaponMoved is what actually keeps other people's chat out — a
+        // stranger's line starts with their name — and the chat-verb test catches the one case an
+        // anchor cannot, the LOCAL player's own speech: "You say, 'you try to crush it'".
+        if (!LogEventParser.SpokenAloud(msg))
         {
-            // DID THE WEAPON MOVE? Counted from the RAW line, before anything classifies it,
-            // because the Combat classifier needs "points of damage" or the word "hit" or "slash"
-            // — so a MISS only registers for a slashing weapon. A monk punching, a paladin with a
-            // mace, a rogue piercing: auto attack running perfectly, every swing in the first
-            // exchange missing, not one line reaching the counter — and then this class taps a
-            // TOGGLE and switches off the attack it was checking on. "You try to …" is the one
-            // phrase every miss, dodge, parry, riposte and block shares, for every weapon skill.
-            //
-            // Damage TAKEN is excluded: fall damage and poison ticks read as "You have taken 12
-            // points of damage", and letting those count would suppress the nudge in precisely the
-            // situation it exists for — taking damage while dealing none.
-            if (raw.StartsWith("You ", StringComparison.Ordinal)
-                && !raw.StartsWith("You have taken", StringComparison.OrdinalIgnoreCase)
-                && (raw.Contains("points of damage", StringComparison.OrdinalIgnoreCase)
-                    || raw.Contains("You try to ", StringComparison.OrdinalIgnoreCase)))
-            { Interlocked.Increment(ref _meleeSwings); _autoAttackOn = true; }
+            // DID THE WEAPON MOVE? Grammar lives in LogEventParser.OurWeaponMoved with the rest of
+            // it, and it is fed the STRIPPED message — this test used to be anchored against the
+            // watcher's raw line, which still carries "[Wed Aug 26 08:46:54 2026] ", so it had
+            // never matched once, for any user, on any client.
+            if (LogEventParser.OurWeaponMoved(msg))
+            {
+                Interlocked.Increment(ref _meleeSwings);
+                // AND ONLY A CONTINUOUS SWING IS EVIDENCE THAT CONTINUOUS ATTACK IS ON. A kick is
+                // the rotation's doing; treating it as proof retires the auto-attack fallback for
+                // the whole run, silently. See LogEventParser.AutoSwing.
+                if (LogEventParser.AutoAttackSwung(msg))
+                { Interlocked.Increment(ref _autoSwings); _autoAttackOn = true; }
+            }
 
             // And what the CLIENT says about auto attack, when it says anything. A guildmate typing
             // "turn auto-attack off before you pull" must not clear the flag that suppresses the
             // toggle press — the same class of bug as a stranger's chat moving the character.
-            if (AutoAtkOn.IsMatch(raw))
+            if (AutoAtkOn.IsMatch(msg))
             {
                 _autoAttackOn = true;
                 // A PRESS THAT WORKED IS NOT EVIDENCE OF A STALE STRIP, and without this the cap
@@ -318,7 +351,7 @@ public sealed class HuntRole
                 // press the client confirms turned attack on is proof it was right.
                 Interlocked.Exchange(ref _borderNudges, 0);
             }
-            else if (AutoAtkOff.IsMatch(raw))
+            else if (AutoAtkOff.IsMatch(msg))
             {
                 _autoAttackOn = false;
                 // THE BORDER JUST GOT CAUGHT LYING, and this is the only moment it can be.
@@ -523,7 +556,13 @@ public sealed class HuntRole
                 if (ev.Text.Contains(" YOU ", StringComparison.Ordinal) || ev.Text.Contains(" YOU!", StringComparison.Ordinal)
                     || ev.Text.Contains(" YOU for ", StringComparison.Ordinal))
                     _attacked = true;
-                else if (ev.Text.StartsWith("You ", StringComparison.Ordinal)
+                // OurWeaponMoved, NOT StartsWith("You ") — "You have taken 12 points of damage."
+                // starts with "You " and is classified Combat, so the old test counted being HURT
+                // as output. Harmless while _ourSwings had four consumers; not harmless now that
+                // it is the cast-only give-up clock and nothing else: a damage shield or an add's
+                // DoT ticking on the character would hold a hopeless fight open for its full
+                // timeout. Same exclusion the raw-line counter uses, in the one place it was missed.
+                else if (LogEventParser.OurWeaponMoved(ev.Text)
                          || ev.Text.Contains("by your ", StringComparison.OrdinalIgnoreCase))
                     // _meleeSwings is NOT incremented here. It is counted from the raw line
                     // instead, because this classifier drops every non-slashing miss and a miss is
@@ -1115,7 +1154,8 @@ public sealed class HuntRole
                 _mobDead = false; _cantSee = false; _tooFar = false;
                 DateTime fightStart = DateTime.Now, lastOut = DateTime.Now;
                 int i = 0, sweep = 0, swingsSeen = _ourSwings, unreachable = 0;
-                int meleeAtStart = _meleeSwings;
+                int meleeSeen = _meleeSwings, autoAtStart = _autoSwings;
+                DateTime lastBlocked = DateTime.MinValue;
                 // The auto-attack grace runs from when we could actually SWING, not from when the
                 // fight began — see the nudge check below.
                 DateTime meleeGraceFrom = DateTime.Now;
@@ -1153,18 +1193,59 @@ public sealed class HuntRole
                     // FACING FIX: if our hits are landing, all good. If the log says we can't see
                     // the target / it's out of reach — or nothing lands for a few seconds — turn in
                     // a widening sweep (and close distance) until our swings start printing.
+                    // ── WHAT EACH KIND OF EVIDENCE IS ALLOWED TO RESET ────────────────────────
+                    // These used to be one branch, and merging them was safe only for as long as
+                    // spell damage never actually matched anything. Now that a bard's melody
+                    // reaches _ourSwings several times a fight, one branch would have handed a
+                    // song TICK the authority to clear the two counters that end a hopeless fight:
+                    //
+                    //   • A song is not target-scoped. It keeps ticking on the mob that fled behind
+                    //     a wall while we stand in front of a NEW one that nothing can reach. Every
+                    //     tick zeroed `unreachable`, so the "out of range or line of sight" drop —
+                    //     which fires at 2 and used to end that fight in about a second — could
+                    //     never reach 2 at all.
+                    //   • A tick says nothing about which way we are POINTING. Every tick zeroed
+                    //     `sweep` and refreshed the clock the facing sweep runs off, so a melee
+                    //     hybrid with a DoT up would stand facing a wall for the full
+                    //     HuntMaxFightSeconds instead of turning to find the mob after 3.2s.
+                    //
+                    // Both of those are the 10-12 seconds a kill coming back in a new costume, in
+                    // the exact mode this release speeds up. So: each fact resets only what it is
+                    // actually evidence of.
+
+                    // OUR SPELL OR SONG LANDED — proof the cast connected, and that we are aimed
+                    // well enough to cast. It refreshes the give-up clock and calms the facing
+                    // sweep, and it does NOT touch `unreachable`, which is the one thing a song
+                    // tick genuinely cannot speak to: a melody keeps ticking on the mob that fled
+                    // behind a wall while we stand in front of a new one nothing can reach.
+                    //
+                    // The clock is refreshed in BOTH modes, and the first draft of this gated it on
+                    // castOnly to protect a melee hybrid from a background DoT holding the sweep
+                    // off. That trade was backwards. A wizard grinds with GrindCastOnly UNCHECKED
+                    // — it defaults off — so the gate left the clock with no source at all for
+                    // every pure caster: the sweep fired at 3.2s, refreshed the clock itself,
+                    // fired again, and escalated to turning 180° every three seconds for the whole
+                    // fight while the nukes landed perfectly. Certain, universal and every fight,
+                    // against a hybrid case that needs a DoT AND bad facing and is capped at
+                    // HuntMaxFightSeconds anyway.
                     if (_ourSwings != swingsSeen)
+                    { swingsSeen = _ourSwings; sweep = 0; lastOut = DateTime.Now; }
+
+                    // OUR WEAPON MOVED — proof of facing AND reach, because a swing that connects
+                    // (or misses, or is parried) had to be aimed at something within arm's length.
+                    // That is what the sweep and the range counter are asking about, so this is the
+                    // fact that is allowed to clear them.
+                    if (_meleeSwings != meleeSeen)
                     {
-                        swingsSeen = _ourSwings; sweep = 0; unreachable = 0; lastOut = DateTime.Now;
+                        meleeSeen = _meleeSwings; sweep = 0; unreachable = 0; lastOut = DateTime.Now;
                         // A STREAK, and it has to be cleared by the thing that breaks it. Left to
                         // accumulate it becomes a running total over a whole night and the message
                         // that quotes it — "that's 5 fights RUNNING" — becomes a lie that sends the
                         // user to re-check a strip that is working.
-                        // MELEE swings, to match the branch that increments it — that one requires
-                        // _meleeSwings to be unchanged, so clearing on _ourSwings (which counts spell
-                        // damage too) let any hybrid rotation reset the streak every fight and the
-                        // warning could never fire.
-                        if (_meleeSwings != meleeAtStart) _borderOnNoSwing = 0;
+                        // AUTO swings, to match the branch that raises it: that warning counts
+                        // fights where the border claimed attack was on and CONTINUOUS attack never
+                        // swung, so a kick landing must not clear it.
+                        if (_autoSwings != autoAtStart) _borderOnNoSwing = 0;
                     }
 
                     // AUTO ATTACK DIDN'T ENGAGE. The rotation is meant to start it — most clients
@@ -1186,7 +1267,7 @@ public sealed class HuntRole
                     // silence only means anything once we are in a position to actually swing.
                     if (_tooFar || _cantSee) meleeGraceFrom = DateTime.Now;
                     if (!_autoAttackTried && !castOnly && !_s.GrindBardMode && !_autoAtk.IsNone
-                        && _meleeSwings == meleeAtStart && _autoAttackOn != true
+                        && _autoSwings == autoAtStart && _autoAttackOn != true
                         && (DateTime.Now - meleeGraceFrom).TotalSeconds > AutoAttackGrace)
                     {
                         // THE INDICATOR DECIDES WHEN IT CAN. Everything above is inference from an
@@ -1236,9 +1317,19 @@ public sealed class HuntRole
                         // The rotation just keeps firing. When EQ says the target is out of reach or
                         // out of sight we don't fix it, we drop it: the seek phase will walk us to a
                         // mob we can actually hit, which is faster than pivoting at this one.
+                        // TWO BLOCKS CLOSE TOGETHER, not two blocks all fight. Nothing resets this
+                        // counter in cast-only any more (there are no melee swings to reset it, and
+                        // a song tick is not evidence the CURRENT target is reachable), so without a
+                        // decay it is a running total: a mob that pathed behind a pillar at t+2s and
+                        // again at t+15s, damage landing the whole time, would be dropped at 20%
+                        // health with the log claiming it was out of range.
                         bool blocked = _cantSee || _tooFar;
                         _cantSee = false; _tooFar = false;
-                        if (blocked) unreachable++;
+                        if (blocked)
+                        {
+                            if ((DateTime.Now - lastBlocked).TotalSeconds > BlockedTogetherSeconds) unreachable = 0;
+                            unreachable++; lastBlocked = DateTime.Now;
+                        }
                         double giveUp = Math.Max(3, _s.GrindCastGiveUpSeconds);
                         bool quiet = (DateTime.Now - lastOut).TotalSeconds > giveUp;
                         if (unreachable >= 2 || quiet)

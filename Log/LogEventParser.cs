@@ -134,6 +134,181 @@ public static class LogEventParser
     public static bool SpokenByAPlayer(string msg)
         => Chatter.IsMatch(msg) || msg.IndexOf('\'') >= 0 || msg.IndexOf('"') >= 0;
 
+    /// <summary>
+    /// Did a PERSON produce this line — asked WITHOUT the apostrophe test.
+    ///
+    /// <see cref="SpokenByAPlayer"/> refuses any line containing an apostrophe. That is deliberate
+    /// over a POSITION, where the client's own wording never has one and the cost of believing a
+    /// forgery is a drowned character. It is wrong everywhere the client's own wording DOES have
+    /// one — every spell in this game is named after somebody, and half the mobs in Norrath carry
+    /// an apostrophe in their name — so combat evidence uses this instead and leans on an ANCHOR
+    /// for the part the apostrophe test was covering: anything anyone says begins with a speaker.
+    /// </summary>
+    public static bool SpokenAloud(string msg)
+        => Chatter.IsMatch(msg) || msg.IndexOf('"') >= 0;
+
+    // ─────────────────────────────────────────────────────────────────────────────────────────
+    // OUR DAMAGE LANDING — and why it cannot use SpokenByAPlayer.
+    //
+    // SpokenByAPlayer treats ANY apostrophe as speech. That is right for a position (the client's
+    // own "Your Location is …" never contains one, so the test is free paranoia over the input
+    // that can drown the character) and it is CATASTROPHIC here, because every spell this game
+    // owns is named after somebody:
+    //
+    //     A kerran `amir has taken 66 damage from your Fufil's Curtailing Chant V.
+    //     A kerran `amir has taken 98 damage from your Tuyen's Chant of Frost V.
+    //     A kerran `amir has taken 56 damage from your Denon's Disruptive Discord III.
+    //
+    // Three field lines from 08-26, three apostrophes. Gating those on SpokenByAPlayer refuses
+    // 100% of them — the fix reads as if it works, ships, and the field report is "still 10-12
+    // seconds a kill". It would also have DEMOTED the two patterns that were working, since a
+    // resist line names the spell too.
+    //
+    // So the guard here is STRUCTURAL, not punctuational, and there are three independent parts:
+    //
+    //  1. ANCHORED. `^` — once the timestamp is stripped the client prints the victim first and a
+    //     person cannot, because anything anyone says starts with a speaker.
+    //  2. NO COMMA IN THE VICTIM. `[^,]` — every channel in this game prints "<name> says, '…'",
+    //     so the comma sits between the speaker and anything they typed and the grammar below
+    //     physically cannot span it. This is the chat guard, and unlike a verb blacklist it can
+    //     never be tripped by a spell whose NAME contains a chat word.
+    //  3. THE VICTIM IS NOT US. `(?!You\b|Your\b)` — "You were hit by non-melee for 100 points of
+    //     damage" is a mob nuking US, and the old ungated Contains("hit by non-melee") counted
+    //     that as our output: being nuked read as "our cast landed" and refreshed the give-up
+    //     window. Fixed here as a side effect of asking the question properly.
+    //
+    // KNOWN AND ACCEPTED HOLE: an emote carries no speaker prefix and no comma, so
+    // `/em has taken 66 damage from your song` prints a line this accepts. The cost is one
+    // phantom increment — the bot believes a cast connected — which is the mildest thing on the
+    // list of what a poisoned log can do here, and strictly better than the ungated Contains this
+    // replaces. It is written down rather than hidden.
+    // ─────────────────────────────────────────────────────────────────────────────────────────
+
+    /// <summary>"A kerran `amir has taken 66 damage from your Fufil's Curtailing Chant V."</summary>
+    private static readonly Regex SpellDamageOut = new(
+        @"^\s*(?!You\b|Your\b)[^,]{1,64}? has taken \d+ damage from your\b",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    /// <summary>"A rat was hit by non-melee for 42 points of damage." — victim-attributed, so the
+    /// melee "did one of OUR lines print?" test never sees a caster's or a bard's output.</summary>
+    private static readonly Regex NonMeleeOut = new(
+        @"^\s*(?!You\b|Your\b)[^,]{1,64}? (?:was|is|were) hit by non-melee for \d+\b",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    /// <summary>A resist still proves the cast REACHED the mob, which is exactly what the facing
+    /// and reach logic wants to know — so it counts as our output landing.</summary>
+    private static readonly Regex ResistOut = new(
+        @"^\s*(?:Your target resisted\b|(?!You\b|Your\b)[^,]{1,64}? resisted your\b)",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    /// <summary>
+    /// "You hit a rat for 42 points of magic damage by Shock of Blades." — a direct nuke, worded
+    /// as a HIT with a damage TYPE and a "by &lt;spell&gt;" tail. It is our output, but it is not a
+    /// weapon swing, and the "points of damage" test below deliberately misses it (this says
+    /// "points of MAGIC damage"), so without this line a pure nuker was as invisible as the bard.
+    /// Grammar copied from <c>CombatTracker.SpellRe</c> rather than invented.
+    /// </summary>
+    private static readonly Regex NukeOut = new(
+        @"^\s*You hits? .{1,64}? for \d+ points of [\w-]+ damage by ",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    /// <summary>
+    /// "A kerran `amir is struck by YOUR Tuyen's Chant of Frost V for 98 points of non-melee
+    /// damage." — the OTHER non-melee wording (<c>CombatTracker.DsRe</c>), which shares not one
+    /// distinguishing phrase with "was hit by non-melee for". "by YOUR" is required literally so
+    /// that "by Soandso's Thorns" — somebody else's damage shield on the same mob — cannot count.
+    /// </summary>
+    private static readonly Regex StruckByOurs = new(
+        @"^\s*(?!You\b|Your\b)[^,]{1,64}? is \w+ by YOUR .{1,64}? for \d+ points? of non-melee damage",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    /// <summary>
+    /// Did OUR spell or song just do something to a mob? Give it the message with the timestamp
+    /// stripped (<see cref="StripStamp"/>) — every pattern is anchored and a "[Wed Aug 26 …] "
+    /// prefix defeats all of them.
+    /// </summary>
+    public static bool OurSpellLanded(string msg)
+        => msg.IndexOf('"') < 0
+           && (SpellDamageOut.IsMatch(msg) || NonMeleeOut.IsMatch(msg) || ResistOut.IsMatch(msg)
+               || NukeOut.IsMatch(msg) || StruckByOurs.IsMatch(msg));
+
+    /// <summary>
+    /// Something happening TO us, in the client's passive voice. Every one of these starts with
+    /// "You " and carries "points of damage", so the weapon test below would otherwise count being
+    /// NUKED as swinging — and then suppress the auto-attack nudge in exactly the situation the
+    /// nudge exists for: taking damage while dealing none.
+    /// </summary>
+    private static readonly Regex DamageToUs = new(
+        @"^You (?:have taken|take |took |were |are |get |feel )",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    /// <summary>
+    /// Did OUR WEAPON move — hit, miss, dodge, parry, riposte, block, any weapon skill?
+    ///
+    /// Read from the line before anything classifies it, because the Combat classifier needs
+    /// "points of damage" or the word "hit" or "slash" — so a MISS only registers for a slashing
+    /// weapon. A monk punching, a paladin with a mace, a rogue piercing: auto attack running
+    /// perfectly, every swing in the first exchange missing, not one line reaching the counter,
+    /// and then the caller taps a TOGGLE and switches off the attack it was checking on.
+    /// "You try to …" is the one phrase every miss outcome shares, for every weapon skill there is.
+    ///
+    /// Give it the STRIPPED message: the anchor is the whole chat guard here.
+    /// </summary>
+    public static bool OurWeaponMoved(string msg)
+        => !SpokenAloud(msg)
+           && msg.StartsWith("You ", StringComparison.Ordinal)
+           && !DamageToUs.IsMatch(msg)
+           && (msg.Contains("points of damage", StringComparison.OrdinalIgnoreCase)
+               || msg.Contains("You try to ", StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>
+    /// The verbs a PLAYER'S continuous attack prints: 1H/2H Slashing says "slash", 1H/2H Blunt
+    /// says "crush", Piercing says "pierce", Hand to Hand says "hit", and ranged says "shoot" —
+    /// a ranger on auto-fire is auto-attacking, and leaving archery out meant the fallback below
+    /// fired on every one of their fights and blind-pressed the toggle at a bow that was working.
+    ///
+    /// EVERYTHING ELSE IN THE WEAPON LIST IS A HOTKEY — kick, bash, backstab, slam, strike, punch,
+    /// claw. That distinction is the whole reason this exists. <see cref="OurWeaponMoved"/> counts
+    /// them all, correctly, because a landed kick proves facing and reach as well as a swing does.
+    /// But the auto-attack fallback asks a different question — "did the rotation fail to ENGAGE
+    /// continuous attack?" — and a rotation that fires kick every fight answers that question with
+    /// a kick. Counting it says attack is running, suppresses the fallback for the whole run, logs
+    /// nothing, and the user grinds all night at hotkey-only damage behind a feature that looks on.
+    ///
+    /// A class whose auto-attack verb is not one of these four falls through to the border check,
+    /// which is the existing safety net for exactly that: it looks at the attack indicator itself
+    /// rather than inferring from silence, and it cancels the press when it can see attack is on.
+    /// </summary>
+    private static readonly Regex AutoSwing = new(
+        @"^\s*You (?:try to )?(?:slash|crush|pierce|hit|shoot)\b",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    /// <summary>Did our CONTINUOUS attack swing — as opposed to any weapon moving at all? Give it
+    /// the stripped message. See <see cref="AutoSwing"/> for why the two are not the same question.</summary>
+    public static bool AutoAttackSwung(string msg) => OurWeaponMoved(msg) && AutoSwing.IsMatch(msg);
+
+    /// <summary>
+    /// Take the client's "[Wed Aug 26 09:04:33 2026] " off the front, if it is there.
+    ///
+    /// EVERY ANCHORED TEST OUTSIDE THIS FILE NEEDS THIS, and one of them didn't have it: HuntRole
+    /// counted melee swings with raw.StartsWith("You ") against the line the watcher hands out,
+    /// which is the file's line, stamp and all. Field log, 08-26:
+    ///
+    ///     [Wed Aug 26 08:46:54 2026] You slash kerran tiger spahi for 152 points of damage.
+    ///
+    /// It starts with '['. The melee counter had therefore never incremented once, on any client,
+    /// for any user — so the auto-attack fallback saw "nothing has swung" in every fight it was
+    /// enabled for and went to the border check every time.
+    /// </summary>
+    public static string StripStamp(string rawLine)
+    {
+        Match p = Prefix.Match(rawLine);
+        // TrimStart, because Prefix eats `\]\s?` — at MOST ONE space. A client that writes two,
+        // or a line indented for any reason, would leave every anchored test below failing
+        // silently, which is the exact failure mode this whole commit exists to remove.
+        return (p.Success ? p.Groups["msg"].Value : rawLine).TrimStart();
+    }
+
     public static LogEvent Parse(string rawLine)
     {
         string msg = rawLine;
