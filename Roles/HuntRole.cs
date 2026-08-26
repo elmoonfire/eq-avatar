@@ -44,6 +44,11 @@ public sealed class HuntRole
     /// character respawns at bind, and "walk back to camp" from there is how it drowned — but
     /// stopping must never mean surrendering the client to the idle kick.</summary>
     public event Action? Died;
+    /// <summary>The role stopped ITSELF for safety — a teleport it will not walk back from, or
+    /// water under the character — with the character alive and in no danger. The owner keeps the
+    /// SESSION alive for it: parking without a keep-alive just moves the loss from a drowning to
+    /// an idle kick half an hour later, and the user still wakes up to a closed game.</summary>
+    public event Action? Parked;
     public HuntStats Stats { get; } = new();
 
     private readonly IInputSink _sink;
@@ -64,6 +69,23 @@ public sealed class HuntRole
     private string _lastConText = "";
     private double? _x, _y;
     private double? _startX, _startY;                       // tether anchor: first /loc after start
+    /// <summary>Altitude the run started at. The reference for "am I underwater?" — an absolute
+    /// depth is meaningless across zones, but "far below where I was standing" never is.</summary>
+    private double? _startZ;
+
+    /// <summary>Absolute backstop, scaled off the user's own leash — see refuseAt in GoHome. The
+    /// leash defaults to 300 and the UI allows 1500, so a bare constant small enough to catch an
+    /// eject would refuse ordinary roaming and stop every run on its first breach.</summary>
+    private const double FarTetherStop = 250;
+    /// <summary>A position jump too large to have been walked: the instance expired and put the
+    /// character at the zone-in. Cleared only by a fresh run.</summary>
+    private bool _teleported;
+    /// <summary>Consecutive passes spent well below the run's starting altitude. One is a ravine;
+    /// three is water.</summary>
+    private int _deepReadings;
+    /// <summary>This far below the run's starting altitude is water or a pit, never new ground.
+    /// Both drownings sat at z −33 against an anchor of z 11–22.</summary>
+    private const double DeepBelowAnchor = 25;
     private DateTime _lastLoc = DateTime.MinValue;
     private readonly List<string> _targets = new();          // directive mode: lowercase mob names
 
@@ -409,9 +431,19 @@ public sealed class HuntRole
                             // …but not for ever. Three in a row means the refusal is now the thing
                             // that is wrong — a real teleport, a zone I missed — so take it and say so.
                             if (_wildLocs < 4) break;
+                            // AND THAT IS THE TELEPORT SIGNAL. Three readings in a row that were
+                            // physically impossible, and then one accepted anyway, is precisely
+                            // what an instance eject looks like — this guard already measures
+                            // distance against elapsed time, already stands aside for a real zone
+                            // line, and is already tuned. A second, parallel "did it jump?" test
+                            // written beside it was strictly worse: it compared against a `_x`
+                            // this guard may have left stale for twenty seconds, so ordinary
+                            // walking could trip it and park the run for the night.
+                            _teleported = true;
                             if (fresh)
                                 Log?.Invoke($"That's {_wildLocs} positions in a row I couldn't accept, so I'll "
-                                          + "believe this one and carry on from here.");
+                                          + "believe this one and carry on from here — and a jump like that is a "
+                                          + "teleport, so I will not try to walk home from it.");
                             // RE-ARMED. Leaving the counter above the threshold meant every later
                             // reading sailed through too — the guard would have switched itself off
                             // for the rest of the run and printed "that's 47 in a row" while doing it.
@@ -443,7 +475,11 @@ public sealed class HuntRole
                     _fwdMsSinceLoc = 0; _sideMsSinceLoc = 0;
                     _x = nx; _y = ny;
                     if (_startX is null)
-                    { _startX = nx; _startY = ny; if (_s.HuntTetherEnabled) Log?.Invoke($"Tether anchored at /loc {ny:0}, {nx:0} — radius {_s.HuntTetherRadius}."); }
+                    {
+                        _startX = nx; _startY = ny;
+                        _startZ = ev.Z;      // the reference for "am I underwater?"
+                        if (_s.HuntTetherEnabled) Log?.Invoke($"Tether anchored at /loc {ny:0}, {nx:0} — radius {_s.HuntTetherRadius}.");
+                    }
 
                     // Altitude watch: a sharp Z drop = fell into a pit or water → recovery mode.
                     if (ev.Z is double nz)
@@ -456,7 +492,14 @@ public sealed class HuntRole
                             if (drop > 18)
                             { if (!_fell) Log?.Invoke($"Dropped {drop:0} units (z {zg:0} → {nz:0}) — pit/water recovery mode."); _fell = true; }
                             else if (drop > 8) _dip = true;               // shallow dip → steer away
-                            else { _zGood = nz; _goodX = nx; _goodY = ny; }   // normal ground tracks us
+                            // NORMAL GROUND TRACKS US — but only ABOVE the water. _zGood
+                            // re-baselined on any drop of 8 or less with no floor at all, so a
+                            // shelving beach walked the baseline down step by step: _fell never
+                            // set, the recovery never ran, and the depth guard was never
+                            // consulted. That is a drowning the guard cannot see, and it is the
+                            // shape of a beach, not an edge case.
+                            else if (_startZ is not double sz0 || nz > sz0 - DeepBelowAnchor)
+                            { _zGood = nz; _goodX = nx; _goodY = ny; }
                         }
                     }
                 }
@@ -746,7 +789,11 @@ public sealed class HuntRole
     {
         Stats.State = "recovering — climbing out";
         DateTime began = DateTime.Now;
-        await PitchTo(55, ct);
+        // LOOK UP FIRST, AND STEEPLY. In EQ the swim direction follows the camera pitch, so a
+        // camera left where the grind parks it — at the ground — means "forward" is DOWN, and the
+        // recovery swims the character to the bottom. Hayden watched exactly that on 08-26: it
+        // never tilted up. 55° was already too shallow to climb the one shelf that gets you out.
+        await PitchTo(_fell ? 75 : 55, ct);
         while (!ct.IsCancellationRequested && _sink.Ready && (DateTime.Now - began).TotalSeconds < 45)
         {
             RefreshHeadingFromCompass();
@@ -763,8 +810,28 @@ public sealed class HuntRole
                 return;
             }
         }
+        // WATER IS NOT GROUND, AND ADOPTING IT AS GROUND IS HOW THE CHARACTER DROWNS.
+        //
+        // The old line here shrugged and wrote the current altitude down as the new floor. On
+        // Kerra Isle that floor was z −33 — the sea — recorded on 08-23 and again on 08-26, both
+        // times immediately before the character died in it. Once the sea is "ground", every
+        // later depth check passes, the recovery never fires again, and the bot happily walks the
+        // seabed until it suffocates.
+        //
+        // A level far BELOW where the run started is water or a pit, never a new floor. The
+        // honest move is to stop: the character is somewhere the navigator has no model of, and
+        // every extra step is taken blind.
+        if (_z is double nz && _startZ is double sz && nz < sz - DeepBelowAnchor)
+        {
+            Log?.Invoke($"I am at z {nz:0}, {sz - nz:0} below where this run started, and I could not climb out. "
+                      + "That is water or a pit, not new ground — treating it as ground is what drowned the "
+                      + "character before. Stopping here so it stays alive.");
+            await PitchTo(_s.LevEnabled ? 10 : 2, ct);
+            ParkSafely();
+            return;
+        }
         Log?.Invoke("Couldn't climb out the way we came — accepting this level as the new ground (watch me).");
-        if (_z is double nz) { _zGood = nz; _goodX = _x; _goodY = _y; }
+        if (_z is double nz2) { _zGood = nz2; _goodX = _x; _goodY = _y; }
         _fell = false;
         await PitchTo(_s.LevEnabled ? 10 : 2, ct);
     }
@@ -792,6 +859,19 @@ public sealed class HuntRole
         return NormDeg(Deg(bearing) - Deg(_hdg));
     }
 
+    /// <summary>Stop the run, but hand the character over as a LIVE session rather than an
+    /// abandoned one.</summary>
+    private void ParkSafely()
+    {
+        // Stop() in a finally. The handler marshals with Dispatcher.Invoke, which throws once the
+        // dispatcher is shutting down — and an exception between the two calls would leave _cts
+        // uncancelled, Running true and Stopped never raised: the same zombie the death path was
+        // fixed for in 0.10.55.
+        try { Parked?.Invoke(); }
+        catch (Exception ex) { Log?.Invoke("Park handler failed (stopping anyway): " + ex.Message); }
+        finally { Stop(); }
+    }
+
     /// <summary>Signed degrees to turn so the current heading points at the tether anchor.</summary>
     private double HomeErrorDeg()
         => _startX is double sx && _startY is double sy ? BearingErrorDegTo(sx, sy) : 0;
@@ -801,8 +881,37 @@ public sealed class HuntRole
     /// no more drifting further away on a blind turn.</summary>
     private async Task GoHome(CancellationToken ct, double r)
     {
+        double away = TetherDistance();
+        // Scaled off the leash the USER set, never a bare constant: with the default radius of
+        // 300 a flat 250 would fire on every ordinary breach.
+        double refuseAt = Math.Max(FarTetherStop, r * 3);
+
+        // A CHARACTER A THOUSAND UNITS OUT DID NOT WALK THERE.
+        //
+        // Watched live on 08-26, and it is the same chain as 08-23: the instance expired, an NPC
+        // said "Rrrrr… I remove you from ourrr peaceful island!", the character was teleported to
+        // the instance entrance ~1000 units away, and this method dutifully set off in a straight
+        // line toward a camp on an ISLAND — through the sea. It drowned, twice now.
+        //
+        // Straight-line homing is a drift corrector. It is right for the tens of units a fight
+        // wanders, and it is catastrophic for a teleport, because the one thing it cannot do is
+        // know that the direct line crosses water it can neither swim nor climb out of. So past
+        // this distance it does not guess: it stops, says what it thinks happened, and hands the
+        // character back intact. Getting home from an eject is Pathfinding's job — a recorded
+        // route — and until that exists, standing still beats drowning.
+        if (_teleported || away > refuseAt)
+        {
+            Log?.Invoke($"I am {away:0} units from camp — that is a teleport, not drift, and it usually means the "
+                      + "instance expired and put the character at the zone-in. I will NOT try to walk back: the "
+                      + "straight line from here crosses water, and that is exactly how the character drowned on "
+                      + "08-23 and again on 08-26. Stopping here with the character alive. Bring it back to camp "
+                      + "and start the run again.");
+            ParkSafely();
+            return;
+        }
+
         Stats.State = "tether — homing";
-        Log?.Invoke($"Past the tether ({TetherDistance():0} > {r:0}) — walking straight back.");
+        Log?.Invoke($"Past the tether ({away:0} > {r:0}) — walking straight back.");
         bool blind = _loc.IsNone && (DateTime.Now.Ticks - Interlocked.Read(ref _locTicks)) > 12L * TimeSpan.TicksPerSecond;
         if (blind)
         {
@@ -881,6 +990,33 @@ public sealed class HuntRole
                 await MaybeLev(ct);                          // keep Levitate up + view above horizon
                 if (_fell) { await Recover(ct); continue; }  // fell into a pit / water → climb out first
 
+                // DEEP AND NOT FALLING — the gradual wade the fall detector cannot see.
+                //
+                // It has to sit AFTER the recovery, not before it: the fall threshold is 18 and
+                // this one is 25, so in front it pre-empted every real dunk, Recover never got
+                // its climb-out, and "Climbed back out — resuming the hunt" became unreachable
+                // for exactly the case it was written for. What is left for this check is the
+                // case Recover genuinely cannot see: `_zGood` re-baselines on any drop of 8 or
+                // less, so a shelving beach walks the baseline down step by step and `_fell`
+                // never sets at all.
+                //
+                // SUSTAINED, because one deep reading is also what a ravine or a dungeon ramp
+                // looks like in passing, and parking a run on a bad step would be its own bug.
+                if (_z is double zNow && _startZ is double zAnchor && zNow < zAnchor - DeepBelowAnchor)
+                {
+                    if (++_deepReadings >= 3)
+                    {
+                        Log?.Invoke($"I have been at z {zNow:0} for {_deepReadings} readings, {zAnchor - zNow:0} below "
+                                  + "where this run started, without the fall detector ever firing — that is a wade "
+                                  + "into water, and walking blind in it is what drowned the character before. "
+                                  + "Stopping here with it alive.");
+                        await PitchTo(_s.LevEnabled ? 10 : 2, ct);
+                        ParkSafely();
+                        break;
+                    }
+                }
+                else _deepReadings = 0;
+
                 // DEFENSIVE stance: hold position like a defensive pet — no roaming, no pulling.
                 // The rotation only fires once something swings at us.
                 if (Stance == "defensive")
@@ -909,6 +1045,10 @@ public sealed class HuntRole
                         default: await Wander(ct); break;                     // hunt / zone roam
                     }
                     if (!_sink.Ready) continue;
+                    // The mode call above can have parked the role (a teleport, or water under
+                    // us). Without this the loop sent one more Tab into the game AFTER the role
+                    // had announced it stopped and torn itself down.
+                    if (ct.IsCancellationRequested) break;
                     _sink.Send(_target);                    // target nearest NPC (Tab by default)
                     await Task.Delay(Vary(350), ct);
 

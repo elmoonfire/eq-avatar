@@ -961,6 +961,11 @@ public partial class MainWindow : Window
             // Death is not a plain stop: the respawn window has to be clicked and the session held
             // alive, or the client is AFK-kicked and EXITS about an hour later (measured 08-24).
             _hunt.Died += () => Dispatcher.Invoke(OnHuntDied);
+            // Parked = the role stopped ITSELF for safety with the character alive (a teleport it
+            // won't walk back from, or water underneath). Keep the SESSION alive: parking without
+            // a keep-alive only moves the loss from a drowning to an idle kick half an hour
+            // later, and the user still wakes up to a closed game.
+            _hunt.Parked += () => Dispatcher.Invoke(OnHuntParked);
             _hunt.Start();
             FocusGameSoon();
             _grindTimer.Start();

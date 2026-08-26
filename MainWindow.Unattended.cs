@@ -76,6 +76,23 @@ public partial class MainWindow
     // ---------------- death → respawn window ----------------
 
     /// <summary>
+    /// The hunt parked itself for safety — character alive, run over. Hold the session so the
+    /// client survives until someone can put the character back at camp.
+    /// </summary>
+    private void OnHuntParked()
+    {
+        EnsureGuard().HoldSession = true;
+        // ONLY CLAIM IT IF IT WILL HAPPEN. The hold is gated on the guard being enabled, so with
+        // the checkbox off this line used to promise a keep-alive nothing was going to send — and
+        // the run would end in the very idle kick the hold exists to prevent.
+        GrindLogLine(_settings.UnattendedGuardEnabled
+            ? "Holding the session alive (activity tap every few minutes) so the client isn't idle-kicked while the "
+              + "character waits. Put it back at camp and start the run again when you're ready."
+            : "⚠ The unattended guard is OFF, so nothing will keep this session alive — the client will be idle-kicked "
+              + "in about half an hour and then exit. Turn the guard on, or come back to the character before then.");
+    }
+
+    /// <summary>
     /// The hunt died. Stopping the hunt was right (the character is about to be somewhere else —
     /// resuming at bind is how it walked into the sea); what must NOT happen is input stopping.
     /// So: hold the session immediately, then deal with the respawn window if its button has been
