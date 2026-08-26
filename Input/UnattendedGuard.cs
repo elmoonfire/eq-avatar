@@ -53,6 +53,42 @@ public sealed class UnattendedGuard : IDisposable
     private const int RescueCooldownSec = 45;  // one rescue attempt per this window
     private const int KeepAliveMinutes = 5;    // hold-mode heartbeat; the client flags AFK only after ~30
 
+    /// <summary>
+    /// How recently a role must have been running for a death or a park to arm the session hold.
+    ///
+    /// THE GUARD CANNOT TELL A BOT'S DEATH FROM YOURS, and until this existed it did not try. It
+    /// tails the client log ALL the time, not only during a run, so the test "a death just landed
+    /// and no role is running" is equally true of a run that died and of Hayden playing his own
+    /// character and dying. Measured on his machine 08-26: he died at 12:11 with nothing running,
+    /// the hold latched, and the app tapped Shift and nudged his mouse every five minutes for the
+    /// next two hours while he sat there using the computer.
+    ///
+    /// Two minutes is comfortably longer than the teardown the death handler already waits out
+    /// (6 s) and far shorter than any gap in which a person could sit down and start playing.
+    /// </summary>
+    private const int RoleRecentSec = 120;
+
+    /// <summary>
+    /// How long a hold may last before it gives up.
+    ///
+    /// The hold exists to carry a client across the gap between a run ending badly and a person
+    /// coming back to it. If nobody has come back in this long, nobody is coming, and a latch that
+    /// never clears is exactly how this one ran unnoticed for two hours. Ending it costs the
+    /// client an idle kick it was going to get anyway once the app is closed; leaving it on costs
+    /// the user their mouse.
+    ///
+    /// TWELVE, not six: the hold's whole job is to carry a character that died at midnight through
+    /// to whenever somebody wakes up, and six hours does not reliably cover a night. With the idle
+    /// gate above now in place a stale hold is invisible to a person at the keyboard anyway, so
+    /// this number is only here to stop the latch living for days.
+    /// </summary>
+    private const int HoldMaxHours = 12;
+
+    /// <summary>Minutes of UNBROKEN real input, with no role running, that mean a person has taken
+    /// the character over by hand and the hold should let go. Three, because our own keep-alive tap
+    /// can only manufacture sixty seconds of apparent presence.</summary>
+    private const int HoldPresenceMinutes = 3;
+
     /// <summary>How many rescues inside <see cref="ThrashWindowMinutes"/> mean the guard is not
     /// fixing anything but fighting something. Field evidence (08-25): FORTY rescues at a
     /// metronomic 75-second beat over an hour, every one reporting success, while the character
@@ -121,6 +157,16 @@ public sealed class UnattendedGuard : IDisposable
     private DateTime _lastKeepAlive = DateTime.UtcNow;
     private int _rescueBusy;                   // Interlocked: one rescue in flight, ever
 
+    /// <summary>The last moment a role was actually running, as seen by the 300 ms tick. This is
+    /// what separates "a run just ended in a death" from "somebody is playing their character".</summary>
+    private DateTime _lastRoleActive = DateTime.MinValue;
+    /// <summary>When the current hold began, so it can end.</summary>
+    private DateTime _holdSince = DateTime.MinValue;
+    /// <summary>Interlocked: one hold-arming task in flight.</summary>
+    private int _armingHold;
+    /// <summary>Start of the current unbroken run of real input, or MinValue when idle.</summary>
+    private DateTime _presentSince = DateTime.MinValue;
+
     /// <summary>The client's A.F.K. flag went up (and has not been seen to clear).</summary>
     public DateTime? LastAfkAt { get; private set; }
     /// <summary>Last "You have been slain"-class line. For the close post-mortem.</summary>
@@ -129,7 +175,33 @@ public sealed class UnattendedGuard : IDisposable
     /// <summary>Keep the session alive with periodic input even though no role is running —
     /// set after a death (character parked at bind, hunting would be wrong, but the client
     /// must not be surrendered to the idle kick). Cleared when a role starts or F12 fires.</summary>
-    public bool HoldSession { get; set; }
+    public bool HoldSession
+    {
+        get => _hold;
+        set
+        {
+            if (value && !_hold)
+            {
+                _holdSince = DateTime.UtcNow;
+                // AND THE PRESENCE CLOCK STARTS OVER. A RUNNING ROLE'S OWN INPUT KEEPS THE IDLE
+                // COUNTER PINNED — this file says so a few lines down — so by the time a run ends
+                // in a death, `_presentSince` has been unbroken since the run STARTED. The instant
+                // the hold armed, `!_roleActive()` became true, that hours-old run of "presence"
+                // was consumed, and the hold cleared itself on the very next 300 ms tick: at 3am,
+                // to a sleeping user, announcing that they had been using the computer. Thirty
+                // minutes later the A.F.K. flag would have gone up with nothing left to answer it.
+                // Only presence established AFTER the hold means anybody came back.
+                _presentSince = DateTime.MinValue;
+            }
+            _hold = value;
+        }
+    }
+    private bool _hold;
+
+    /// <summary>Was a role running just now — or recently enough that whatever we are reacting to
+    /// probably belongs to it? See <see cref="RoleRecentSec"/>.</summary>
+    private bool RoleRecentlyActive
+        => _roleActive() || (DateTime.UtcNow - _lastRoleActive).TotalSeconds <= RoleRecentSec;
 
     public UnattendedGuard(Func<IntPtr> game, Func<bool> roleActive, AppSettings s, Action<string> log)
     { _game = game; _roleActive = roleActive; _s = s; _log = log; }
@@ -169,18 +241,69 @@ public sealed class UnattendedGuard : IDisposable
     /// <summary>Called from the app's existing UI heartbeat (~300 ms). Cheap on every path.</summary>
     public void Tick()
     {
+        DateTime now = DateTime.UtcNow;
+        if (_roleActive()) _lastRoleActive = now;
+
+        // SOMEBODY CAME BACK. The hold is cleared by a fresh run or by F12, and neither of those
+        // is what a person does when they simply sit down and take over the character by hand —
+        // so the latch outlived its purpose and went on tapping at them.
+        //
+        // Sustained real input is the one signal that cannot be anything else. Our own tap does
+        // reset the idle counter, but it only fires when the machine has ALREADY been idle a
+        // minute, so a run of presence begun by our own tap ends sixty seconds later when the
+        // counter climbs back past the gate — it can never reach the threshold below.
+        if (IdleSeconds() < IdleGateSec)
+        { if (_presentSince == DateTime.MinValue) _presentSince = now; }
+        else _presentSince = DateTime.MinValue;
+
+        if (HoldSession && !_roleActive() && _presentSince != DateTime.MinValue
+            && _presentSince > _holdSince                      // belt and braces with the setter
+            && (now - _presentSince).TotalMinutes >= HoldPresenceMinutes)
+        {
+            HoldSession = false;
+            _log($"You've been using the computer for {HoldPresenceMinutes} minutes straight, so the session hold "
+               + "is off — your own input is keeping the client alive better than my tap was. Start a run (or die "
+               + "during one) and I'll pick it up again.");
+        }
+
+        // A HOLD THAT NEVER ENDS IS NOT A SAFETY FEATURE. See HoldMaxHours. Re-checked inside,
+        // because a death landing between the test and the clear would otherwise have its brand
+        // new hold cancelled by this line.
+        if (HoldSession && _holdSince != DateTime.MinValue)
+        {
+            DateTime since = _holdSince;                       // read ONCE, then decide on that read
+            if ((now - since).TotalHours >= HoldMaxHours)
+            {
+                HoldSession = false;
+                _log($"Session hold has been running {HoldMaxHours} hours with nobody coming back to the character, "
+                   + "so I've stopped it. Nothing is being sent to the game any more.");
+            }
+        }
+
         IntPtr h = _game();
-        if (h == IntPtr.Zero) { _lastFocused = DateTime.UtcNow; return; }   // no game = nothing to guard
+        if (h == IntPtr.Zero) { _lastFocused = now; return; }   // no game = nothing to guard
 
         bool focused = GetForegroundWindow() == h;
-        DateTime now = DateTime.UtcNow;
 
         if (focused)
         {
             _lastFocused = now;
             // Hold-mode heartbeat. Shift alone is bound to nothing in any EQ client — it is a
             // modifier — so this cannot cast, move, or toggle; it only counts as activity.
-            if (HoldSession && Enabled && (now - _lastKeepAlive).TotalMinutes >= KeepAliveMinutes)
+            //
+            // AND NOT WHILE SOMEBODY IS AT THE KEYBOARD. This is the gate the rescue path below
+            // has always had and this one never did, and it is the whole difference between a
+            // safety net and a poltergeist: measured on Hayden's machine on 08-26, a death while
+            // he was PLAYING armed the hold, and for the next two hours the app tapped Shift and
+            // nudged his mouse every five minutes while he sat there using it. The second nudge is
+            // an ABSOLUTE move back to where the cursor was 60 ms earlier, so catching him
+            // mid-motion yanks the pointer backwards by however far he had moved.
+            //
+            // And it was never needed in that state. The keep-alive exists to stop an idle kick;
+            // the kick clock is driven by the CLIENT seeing no input. A person typing IS input, so
+            // while the idle counter is short there is nothing to prevent and nothing to send.
+            if (HoldSession && Enabled && IdleSeconds() >= IdleGateSec
+                && (now - _lastKeepAlive).TotalMinutes >= KeepAliveMinutes)
             {
                 _lastKeepAlive = now;
                 Task.Run(ActivityTap);
@@ -192,7 +315,19 @@ public sealed class UnattendedGuard : IDisposable
         if (!Wanted || ThrashStop) return;
         double unfocused = (now - _lastFocused).TotalSeconds;
         if (unfocused < FocusGraceSec) return;
-        if (IdleSeconds() < IdleGateSec && unfocused < HardGraceSec) return;   // a person is here — theirs
+        // THE HARD-GRACE OVERRIDE IS FOR A RUNNING ROLE ONLY.
+        //
+        // It exists because a role's own mouse humanizer pollutes GetLastInputInfo — the counter
+        // cannot tell this app's SendInput from a person's hand, so on those machines "idle" never
+        // arrives and the guard would never rescue a run that genuinely needed it. Ten minutes
+        // unfocused is then taken as proof enough.
+        //
+        // None of that reasoning survives without a role. Nothing is generating synthetic input, so
+        // the idle counter is telling the truth, and overriding it means taking the foreground away
+        // from somebody who is demonstrably using the computer — pressing Esc into whatever they
+        // were in first. Hayden watched exactly that this morning while working in HWiNFO64.
+        bool hardGraceApplies = _roleActive() && unfocused >= HardGraceSec;
+        if (IdleSeconds() < IdleGateSec && !hardGraceApplies) return;          // a person is here — theirs
         if ((now - _lastRescue).TotalSeconds < RescueCooldownSec) return;
         _lastRescue = now;
         _ = RescueAsync(h, $"unfocused {unfocused:0}s with a run meant to be going");
@@ -294,15 +429,29 @@ public sealed class UnattendedGuard : IDisposable
                 // teardown, then hold. Redundant when the hunt's Died handler already set it, and
                 // that redundancy is the point: every role that stops on a death gets the hold,
                 // not just the one that grew an event.
+                // WAS THERE A RUN TO STOP? Without this test the answer was "a death landed and no
+                // role is running", which is exactly as true of a person playing their own
+                // character as it is of a run that just died — and this guard tails the log
+                // whether or not anything is running. Hayden died at 12:11 on 08-26 with nothing
+                // going, and the hold latched on for two hours.
+                bool runWasGoing = RoleRecentlyActive;
+                // ONE ARMING ATTEMPT IN FLIGHT. Two death-class lines can land in the same poll —
+                // they did on 08-26 — and each spawned a task that waited the same six seconds and
+                // then raced the same `!HoldSession` test, so both won and both announced it.
+                if (System.Threading.Interlocked.Exchange(ref _armingHold, 1) == 1) break;
                 _ = Task.Run(async () =>
                 {
+                    try
+                    {
                     await Task.Delay(6000);
-                    if (Enabled && !_roleActive() && !HoldSession)
+                    if (Enabled && runWasGoing && !_roleActive() && !HoldSession)
                     {
                         HoldSession = true;
                         _log("The death stopped the run — holding the session alive (activity tap "
                            + "every " + KeepAliveMinutes + " min) so the idle kick never starts.");
                     }
+                    }
+                    finally { System.Threading.Interlocked.Exchange(ref _armingHold, 0); }
                 });
                 break;
 
@@ -316,7 +465,40 @@ public sealed class UnattendedGuard : IDisposable
                 _log("⚠ The client flagged A.F.K. — measured on 08-24: the server drops the session "
                    + "~30 minutes after this line and the client then EXITS. "
                    + (Wanted ? "Answering it now." : "The unattended guard is off, so I am only telling you."));
-                if (Wanted)
+                // THE SAME PRESENCE GATE AS EVERY OTHER PATH, and it is needed here MOST.
+                //
+                // This is a second, independent way into RescueAsync and it had none of the Tick
+                // path's guards — no idle test, no role test, no stand-down, no cooldown. Worse,
+                // gating the keep-alive tap on idleness (which is right) makes this path MORE
+                // reachable, not less: suppressing the tap while a person is present is exactly
+                // what lets the client reach the A.F.K. flag in the hold state, and the flag then
+                // arrived here and took the foreground anyway. The fix for the poltergeist would
+                // have rerouted it rather than stopped it.
+                //
+                // A running role keeps the old behaviour: the A.F.K. flag during a run is the
+                // measured start of a kill chain and is worth interrupting someone for.
+                // NOT GATED ON ThrashStop, and the first draft was. A stand-down means the guard
+                // has stopped FIGHTING for focus every 75 seconds — it does not mean the client
+                // should be surrendered. Its own message promises it "leaves the session-keeping
+                // tap running", and that promise is empty while the game is unfocused, which is
+                // precisely the state a stand-down implies: the tap only fires in the focused
+                // branch. So after a stand-down this is the ONLY thing left keeping the client
+                // alive, and it runs about once every half hour rather than once a minute.
+                // AND `_roleActive()` DOES NOT SURVIVE A STAND-DOWN. Standing down does not stop the
+                // run — the role stays Running, idling in its "paused (EQ not focused)" branch —
+                // so a bare `_roleActive()` here goes on bypassing the idle gate for ever after the
+                // guard has announced it had stopped fighting for the screen. A person who sits
+                // down at nine and works in another window would have had Esc pressed into it and
+                // EverQuest pulled in front, every half hour, by a run that is achieving nothing.
+                // The idle clause still covers the case that matters: at 3am nobody is typing, so
+                // the rescue happens anyway.
+                bool mayAnswer = Wanted && ((_roleActive() && !ThrashStop) || IdleSeconds() >= IdleGateSec);
+                if (Wanted && !mayAnswer)
+                    _log("…but you are at the keyboard, and I will not take the screen off you for it. Note that "
+                       + "your typing only clears the flag if it goes INTO the game — if you are working in "
+                       + "something else, the client will be kicked in about half an hour. Click into EverQuest "
+                       + "for a moment, or start a run, and I'll take it from there.");
+                if (mayAnswer)
                     _ = Task.Run(async () =>
                     {
                         IntPtr h = _game();
