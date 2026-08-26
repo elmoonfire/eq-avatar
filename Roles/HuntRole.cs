@@ -76,6 +76,26 @@ public sealed class HuntRole
     private double _pxPerDeg;                                // mouselook px per degree (self-tuning)
     private int _turnSign = 1;                               // drag direction ↔ angle sign (auto-detected)
     private int _signMisses;
+    /// <summary>The drag→compass polarity has been OBSERVED, so stop re-testing it. It is a
+    /// property of the mouse and the client and cannot change mid-session; treating it as an open
+    /// question on every turn is what allowed a single overshoot to invert every subsequent
+    /// turn.</summary>
+    private bool _turnSignProven;
+    /// <summary>The <see cref="CompassReader.Mirror"/> the polarity was proven under. The latch's
+    /// premise — "this is a property of the mouse and the client, fixed for the session" — is
+    /// FALSE, and review caught it: the reader assumes +1 until it learns the real mirror, and a
+    /// spin recalibration resets it to unlearned. Proving a polarity under one mirror and keeping
+    /// it after the mirror flips inverts every turn for the rest of the run with no way back, so
+    /// the latch is stamped with the mapping it was measured under and dies with it.</summary>
+    private int _turnSignMirror;
+    /// <summary>Consecutive compass observations that the drag went the wrong way. Kept apart from
+    /// <see cref="_signMisses"/>, which belongs to the open-loop /loc calibration — two different
+    /// measurements of the same quantity, and sharing a counter would let one vote in the other's
+    /// election.</summary>
+    private int _compassSignMisses;
+    /// <summary>Consecutive compass observations that the drag went the RIGHT way. Corroboration
+    /// is required in both directions — see the note where it is counted.</summary>
+    private int _compassSignHits;
     private double _cmdTurnDeg;                              // commanded turn sum since last measured heading
     private double _preTurnHdg;
     private int _turnsSinceMeasure;
@@ -488,6 +508,12 @@ public sealed class HuntRole
         if (Math.Abs(cmd) < 25 || Math.Abs(actual) < 8) return;
         if (Math.Sign(actual) != Math.Sign(cmd))
         {
+            // NOT OVER THE COMPASS'S HEAD. This is the open-loop /loc estimate, and it is the
+            // weaker witness of the two: `cmd` is an UNNORMALIZED sum of commanded turns while
+            // `actual` is wrapped, so two 120° turns between /loc fixes read as a sign mismatch
+            // that never happened. Left ungated it would silently invert a polarity the compass
+            // had measured directly — and the compass, having settled, would never look again.
+            if (_turnSignProven) { _signMisses = 0; return; }
             if (++_signMisses >= 2)
             { _turnSign = -_turnSign; _signMisses = 0; Log?.Invoke("Turn direction was inverted — flipped mouselook sign."); }
             return;
@@ -554,12 +580,113 @@ public sealed class HuntRole
             await DragTurn(Math.Sign(err) * dir * (int)Math.Round(Math.Abs(err) * px), ct);
             await Task.Delay(80, ct);
             if (_compass.ReadLocDeg() is not double now) break;
-            if (it == 0 && Math.Abs(NormDeg(target - now)) > Math.Abs(err) + 10)
-            { dir = -dir; _turnSign = dir; Log?.Invoke("Compass shows the drag turned the wrong way — flipped direction."); }
+            // DID THE NEEDLE MOVE THE WRONG WAY — not "is the residual error bigger".
+            //
+            // THE OLD TEST CONFLATED TWO DIFFERENT FAULTS. It asked whether |target - now| had
+            // grown, which is true both when the drag went the wrong way AND when it went the
+            // RIGHT way and overshot: command 30°, turn 90° correctly, and the residual is 60 —
+            // bigger, so the sign was flipped on a turn that was aimed perfectly and merely too
+            // strong. Because the flip was written straight into the persistent `_turnSign`, that
+            // poisoned every later turn (including the open-loop path, which reads the same
+            // field) until the next overshoot flipped it back. The field log for 08-25 shows the
+            // result: HUNDREDS of "flipped direction" lines in one run — an oscillation, not a
+            // calibration, and roughly half of all turns aimed backwards because of it.
+            //
+            // Direction is disproven only by the needle DEFINITELY moving (>3°, so noise cannot
+            // vote) and moving AWAY from the target. An overshoot has the right sign and is a
+            // px-per-degree problem the loop's next iteration corrects on its own.
+            double moved = NormDeg(now - cur);
+
+            // ONLY ASK THE QUESTION WHERE IT HAS AN ANSWER.
+            //
+            // `moved` is wrapped into (-180, 180], so near a half-turn "toward the target" stops
+            // meaning anything: command +180, turn 181° perfectly, and moved reads -179 — the
+            // opposite sign on a turn that was aimed exactly right.
+            //
+            // AND THE LIMIT IS 90, NOT 150, because what wraps is the PHYSICAL rotation and not
+            // the commanded one — the guard has to leave room for the overshoot as well as the
+            // turn. A commanded 140° needs only a 1.29× overshoot to cross 180 and read
+            // backwards, and 2× is ordinary when the spin calibration has locked onto the
+            // half-period of a compass tape with north/south symmetry. The scan fires 120° and
+            // ±140° turns routinely, so 90–149 was not a corner case, it was most of the
+            // traffic — and the error there is SYSTEMATIC, which is exactly what a second
+            // opinion cannot catch: two big turns produce two identical false readings and
+            // corroborate each other.
+            bool answerable = it == 0 && Math.Abs(err) < 90 && Math.Abs(moved) > 3;
+
+            // A LATCH IS ONLY GOOD FOR AS LONG AS THE MAPPING IT WAS MEASURED UNDER. See
+            // _turnSignMirror: the reader assumes mirror +1 until it learns better.
+            int mirrorNow = _compass.Mirror;
+            if (_turnSignProven && _turnSignMirror != mirrorNow)
+            {
+                _turnSignProven = false; _compassSignMisses = 0;
+                Log?.Invoke("The compass re-learned its mirror, so the drag direction is an open question again.");
+            }
+
+            if (answerable && !_turnSignProven)
+            {
+                if (Math.Sign(moved) != Math.Sign(err))
+                {
+                    dir = -dir;                       // fix THIS turn immediately…
+                    _compassSignHits = 0;
+                    if (++_compassSignMisses >= 2)    // …and commit only on a second, independent look
+                    {
+                        _turnSign = dir; _compassSignMisses = 0;
+                        Prove(mirrorNow, "inverted — flipped it for good");
+                    }
+                    else Log?.Invoke("Compass suggests the drag turned the wrong way — correcting this turn and watching.");
+                }
+                else
+                {
+                    // TWO LOOKS TO AGREE, TOO. The first version latched on a single agreeing
+                    // sample, which is the more dangerous asymmetry of the two: a bad needle read
+                    // agrees with a WRONG sign about half the time, and latching on it kills the
+                    // in-call correction, muzzles CalibrateTurn, and gates off the px learner —
+                    // every turn afterwards drags backwards with no route back.
+                    _compassSignMisses = 0;
+                    if (++_compassSignHits >= 2) { _compassSignHits = 0; Prove(mirrorNow, "correct — settled"); }
+                }
+            }
+            else if (it == 0)
+                // Inconclusive — a barely-moved needle or a turn too big to read. No vote may
+                // survive it: a stale 1 from minutes ago would let one later reading commit alone.
+                { _compassSignMisses = 0; _compassSignHits = 0; }
+
+            // LEARN THE STRENGTH FROM THE SAME MEASUREMENT. Without this the loop can diverge:
+            // px is captured once, and at an overshoot factor of 2 or more each iteration leaves
+            // a residual at least as large as the one before it, so four iterations end further
+            // off than they started — and can push |err| past 180 into the wrap above.
+            if (Math.Abs(moved) > 8 && Math.Sign(moved) == Math.Sign(err))
+            {
+                double commandedDeg = Math.Abs(err);
+                double ratio = Math.Clamp(commandedDeg / Math.Abs(moved), 0.34, 3.0);
+                px = Math.Clamp(px * (0.7 + 0.3 * ratio), 0.8, 12);
+                // AND IT HAS TO SURVIVE THE CALL. `px` is a local re-seeded on every entry, so a
+                // systematically wrong PxPerDeg was re-paid in full on the first iteration of
+                // every turn, for ever. Worse, while the compass path works CalibrateTurn never
+                // runs, so the open-loop fallback kept its 3.5 default and inherited nothing —
+                // meaning the moment the needle became unreadable the bot turned by a number
+                // nothing had ever measured. This is the one place both paths can learn from.
+                _pxPerDeg = px;
+            }
             cur = now;
         }
         if (_compass.ReadLocDeg() is double fin) { _hdg = fin * Math.PI / 180.0; _hdgValid = true; }
         return true;
+    }
+
+    /// <summary>Record that the drag polarity has been observed, stamped with the compass mapping
+    /// it was observed under.</summary>
+    private void Prove(int mirror, string what)
+    {
+        if (_turnSignProven) return;
+        // NEVER UNDER AN ASSUMED MAPPING. Mirror 0 means the reader has not learned its polarity
+        // and is assuming +1; proving against an assumption can latch _turnSign in the wrong
+        // space, and CalibrateTurn — the only witness that works in true /loc space — is gated
+        // off the moment we do. Wait for the real mapping; it costs a few more turns.
+        if (mirror == 0) return;
+        _turnSignProven = true; _turnSignMirror = mirror;
+        Log?.Invoke("Compass says the drag direction is " + what + " for this run.");
     }
 
     /// <summary>Refresh the heading straight off the compass; true when a read landed.</summary>
