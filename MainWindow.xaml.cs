@@ -416,8 +416,16 @@ public partial class MainWindow : Window
         // a half is "stay where you are".
         if (SplashUp) return;
         // On top of everything (Hayden's two-monitor preference). Only step aside DURING an auto-login
-        // so the app can't cover the launcher and read its own window with OCR.
-        bool launching = _login is { Running: true };
+        // so the app can't cover the launcher and read its own window with OCR — AND during a
+        // re-instance, which reads the game's own windows the same way and for higher stakes.
+        //
+        // A FLAG, NOT A SAVE-AND-RESTORE. The first version of Re-Instance set Topmost = false
+        // itself and put it back in a finally; this method runs off the 300 ms UI tick and put it
+        // straight back up again, over a game that had just been brought forward, about a third of
+        // a second later. Every OCR pass then read this window's own console — which at that exact
+        // moment is full of the words "instance", "Enter", "Create" and "charge", because this
+        // feature had just written them there. Whatever decides Topmost has to know.
+        bool launching = _login is { Running: true } || ReInstanceBusy;
         bool want = _settings.AlwaysOnTop && !launching;
         if (Topmost != want) Topmost = want;
     }
@@ -966,6 +974,11 @@ public partial class MainWindow : Window
             // a keep-alive only moves the loss from a drowning to an idle kick half an hour
             // later, and the user still wakes up to a closed game.
             _hunt.Parked += () => Dispatcher.Invoke(OnHuntParked);
+            // The role decides WHEN a new instance is needed; this window decides whether it can
+            // safely be got. Handed over as a callback rather than built into the role because
+            // every step of it is reading and clicking the game's own windows, and a role that
+            // starts doing windows stops being testable.
+            _hunt.ReInstance = ReInstanceAsync;
             _hunt.Start();
             FocusGameSoon();
             _grindTimer.Start();
@@ -1080,6 +1093,7 @@ public partial class MainWindow : Window
         BardBox.IsChecked = _settings.GrindBardMode;
         CastOnlyBox.IsChecked = _settings.GrindCastOnly;
         InitUnattendedUi();
+        InitReInstanceUi();
         InitRecoveryUi();
         LevBox.IsChecked = _settings.LevEnabled;
         LevKeyBox.Text = _settings.LevCastKey;
@@ -1320,6 +1334,7 @@ public partial class MainWindow : Window
         if (ev.Kind == LogEventKind.Location && ev.X is double x && ev.Y is double y)
         {
             _lastLocEw = x; _lastLocNs = y; _lastLocAt = DateTime.Now;   // live position for remote status
+            if (ev.Z is double z) _lastLocZ = z;                         // …and for the re-entry pick
             // marker only when the map on screen is the zone the character is in (or unknown)
             if (_charZoneStem is null || _charZoneStem == _mapZone)
             {

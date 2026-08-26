@@ -131,6 +131,62 @@ public sealed class AppSettings
     public double RespawnClickNX { get; set; }
     public double RespawnClickNY { get; set; }
 
+    // --- Re-Instance (0.10.61) ---------------------------------------------------------------
+    /// <summary>
+    /// When the instance expires and the character is thrown to the zone-in, get into a NEW
+    /// instance and walk back, instead of parking for the night.
+    ///
+    /// Hayden, 08-26: "Please try to make it automatically get back into a new instance, otherwise
+    /// there is no point in having the bot running." 0.10.59 made the eject SAFE — it stops rather
+    /// than swimming home — but safe and asleep is still the night gone, and the public zone is
+    /// not somewhere to be dropped anyway: other players are there.
+    ///
+    /// OFF by default, because it clicks buttons in a window that can also END an instance, and
+    /// nobody should get that unasked.
+    /// </summary>
+    public bool ReInstanceEnabled { get; set; } = false;
+
+    /// <summary>Centre of the instance icon on the game's menu bar, normalized to the game window
+    /// (0..1 each axis); 0/0 = never picked. Ctrl+Z is said to open the same window but does not
+    /// come up from inside an instance, so the icon is the route that works from both sides.</summary>
+    public double InstanceIconNX { get; set; }
+    public double InstanceIconNY { get; set; }
+
+    /// <summary>
+    /// Where to walk to FIRST after getting into a new instance — the one spot on the shore where
+    /// the land is shallow enough to walk out of the water. Kerra Isle's is /loc -384.16, -163.78,
+    /// 4.60 — which is Y then X, the order the GAME prints; stored here EW (X) first, like every
+    /// other coordinate pair in this app.
+    ///
+    /// It is the return route AND the drowning escape: a character in deep water swims toward this
+    /// point rather than toward camp, because camp is inland and the straight line to it is the
+    /// line that drowned the character twice. Two uses, one number, and the user only picks it once.
+    /// </summary>
+    public double ReEntryX { get; set; }
+    public double ReEntryY { get; set; }
+    /// <summary>Set with the other two, and only used to tell the user what they picked.</summary>
+    public double ReEntryZ { get; set; }
+    /// <summary>Has a re-entry point been chosen at all? 0,0 is a real coordinate in some zones,
+    /// so this is stored rather than inferred.</summary>
+    public bool ReEntrySet { get; set; } = false;
+
+    /// <summary>
+    /// WHICH ZONE the point above belongs to (the short stem the maps and plans use), or "" when
+    /// it was saved without one.
+    ///
+    /// A coordinate on its own is not a place. Kerra Isle's shore is -384, -163; in the next zone
+    /// along those same numbers are a wall, or the middle of a lake, and the character would be
+    /// sent swimming at them by a feature whose entire purpose is keeping it out of the water.
+    /// Stored so the point is used where it means something and ignored where it does not.
+    /// </summary>
+    public string ReEntryZone { get; set; } = "";
+
+    /// <summary>How far above the horizon to hold the camera while walking back. Hayden: "15
+    /// degrees is perfectly fine for levitate, 5 degrees would be enough. It simply needs to be
+    /// straight ahead or a little above." The grind leaves the camera pointed at the ground, and
+    /// swim direction follows camera pitch — which is how "run home" became "swim down".</summary>
+    public double ReturnPitchDeg { get; set; } = 12;
+
     /// <summary>Make the roles narrate the numbers behind their decisions — match distances, click
     /// coordinates, the raw text an OCR read before anything parsed it. Off by default: these lines
     /// are voluminous enough to push the real narration out of the buffer, and they are only worth

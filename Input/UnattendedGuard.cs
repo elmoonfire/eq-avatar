@@ -45,7 +45,10 @@ public sealed class UnattendedGuard : IDisposable
     // input stopped and the kick ~31.6 min after the flag, so the guard has minutes of slack —
     // these can afford to be conservative.
     private const int FocusGraceSec = 75;      // unfocused this long before a rescue is considered
-    private const int IdleGateSec = 60;        // no real input for this long = machine unattended
+    /// <summary>No real input for this long = machine unattended. INTERNAL, not private, because
+    /// Re-Instance asks the same question before it takes the foreground and the app must not have
+    /// two different answers to it.</summary>
+    internal const int IdleGateSec = 60;
     private const int HardGraceSec = 600;      // unfocused this long = unattended regardless of idle
     private const int RescueCooldownSec = 45;  // one rescue attempt per this window
     private const int KeepAliveMinutes = 5;    // hold-mode heartbeat; the client flags AFK only after ~30

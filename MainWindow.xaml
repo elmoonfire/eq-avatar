@@ -773,7 +773,18 @@
                                                       ToolTip="If the game closes while a run is going and you're away, wait out the outage, relaunch it, log back in, and restart the run. Reads the client's own dbg.txt first: a server patch gets a long wait, a crash a short one, and a deliberate camp-out is left alone. Bounded to a few attempts over four hours, and it never fires while you're at the keyboard."/>
                                             <Button x:Name="RespawnPickBtn" Content="pick: respawn button" Click="RespawnPick_Click" VerticalAlignment="Center" Margin="0,0,6,4"
                                                     ToolTip="Drag a box over the respawn window's accept button — do it once while the window is really up (die somewhere safe). After a death the bot clicks it, then parks at the respawn point with the session held alive; it does NOT hunt on from bind."/>
-                                            <TextBlock x:Name="RespawnPickLabel" Text="respawn: not picked" VerticalAlignment="Center" Margin="0,0,0,4"
+                                            <TextBlock x:Name="RespawnPickLabel" Text="respawn: not picked" VerticalAlignment="Center" Margin="0,0,10,4"
+                                                       Foreground="{StaticResource TextDim}"/>
+                                            <CheckBox x:Name="ReInstanceBox" Content="Re-Instance" Click="ReInstance_Click" VerticalAlignment="Center" Margin="0,0,10,4"
+                                                      Foreground="{StaticResource TextDim}"
+                                                      ToolTip="When the instance expires and the character is dumped at the zone-in of the public zone, make a NEW instance and walk back to camp instead of stopping for the night. Needs the instance icon picked; if there is water between the zone-in and camp, set a re-entry point too and it walks to that first. It will never press Quit or Leave in the instance window — if it cannot tell those apart from Enter, it presses nothing."/>
+                                            <Button x:Name="InstanceIconPickBtn" Content="pick: instance icon" Click="InstanceIconPick_Click" VerticalAlignment="Center" Margin="0,0,6,4"
+                                                    ToolTip="Drag a box over the instance button on the game's menu bar — the one that opens the create/manage instance menu."/>
+                                            <TextBlock x:Name="InstanceIconLabel" Text="icon: not picked" VerticalAlignment="Center" Margin="0,0,10,4"
+                                                       Foreground="{StaticResource TextDim}"/>
+                                            <Button x:Name="ReEntryHereBtn" Content="re-entry: use here" Click="ReEntryHere_Click" VerticalAlignment="Center" Margin="0,0,6,4"
+                                                    ToolTip="Stand on the safe spot where the land is shallow enough to walk out of the water, then press this. After a re-instance the character walks here first and then to camp — and if it ever ends up in deep water it swims for this point instead of back the way it fell in."/>
+                                            <TextBlock x:Name="ReEntryLabel" Text="re-entry: not set" VerticalAlignment="Center" Margin="0,0,0,4"
                                                        Foreground="{StaticResource TextDim}"/>
                                         </WrapPanel>
                                     </StackPanel>

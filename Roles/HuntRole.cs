@@ -150,6 +150,11 @@ public sealed class HuntRole
     /// fallback that exists to notice exactly that cannot be counted with _meleeSwings.</summary>
     private int _autoSwings;
 
+    /// <summary>How many 400 ms polls a walk will wait for the game to come back to the front
+    /// before it gives up — two minutes, which is a long look at another window and nowhere near
+    /// the ~30 minutes it takes the client to raise the A.F.K. flag.</summary>
+    private const int PausedPollsBeforeGivingUp = 300;
+
     /// <summary>How close together two "can't see it / too far" passes have to be before they are
     /// read as one target being genuinely unreachable, rather than two unrelated blips in a long
     /// fight. Four seconds is a little over one cast.</summary>
@@ -202,6 +207,13 @@ public sealed class HuntRole
     public double? AnchorEw => _startX;
     public double? AnchorNs => _startY;
 
+    /// <summary>Where the character was when this role last accepted a position line — accepted
+    /// meaning it survived the chat guard AND the "could it physically have got there" test, so
+    /// it is the same number the navigation is steering by, not a raw log read.</summary>
+    public double? LastX => _x;
+    public double? LastY => _y;
+    public double? LastZ => _z;
+
     private string Stance => (_s.GrindStance ?? "aggressive").Trim().ToLowerInvariant();
     private string Mode => (_s.GrindMode ?? "hunt").Trim().ToLowerInvariant();
 
@@ -241,6 +253,7 @@ public sealed class HuntRole
     {
         if (Running) return;
         _cts = new CancellationTokenSource();
+        _reInstanceTried = false;                            // a new run gets a fresh attempt
         if (_watcher != null) { _watcher.LineRead += OnLine; _watcher.Start(fromStart: false); }
         Log?.Invoke($"HUNT started — target={_target.Display}, con={_con.Display}, move={_fwd.Display}/{_left.Display}/{_right.Display}/{_back.Display}"
                     + (_loc.IsNone ? "" : $", /loc key={_loc.Display}") + ". Keep EQ focused; F12 stops. Watch it.");
@@ -463,7 +476,25 @@ public sealed class HuntRole
                             }
                             // …but not for ever. Three in a row means the refusal is now the thing
                             // that is wrong — a real teleport, a zone I missed — so take it and say so.
-                            if (_wildLocs < 4) break;
+                            if (_wildLocs < 4)
+                            {
+                                // AND THE MOVEMENT LEDGER RESETS WITH IT. This `break` skips the
+                                // bookkeeping at the bottom of the case, so the forward/strafe
+                                // milliseconds kept banking across every refusal — and then the
+                                // fourth reading, the one accepted BECAUSE it is a teleport, was
+                                // handed to the heading learner as though the character had walked
+                                // that thousand units. It set _hdg to the camp→zone-in bearing,
+                                // taught the COMPASS that mapping (which is saved to disk), and
+                                // re-fit the walking speed from it. A compass confidently wrong by
+                                // fifteen degrees then steers every leg of the walk home, and the
+                                // only correction downstream is a 180° flip the next compass read
+                                // undoes. Nothing was measured here, so nothing is learned here.
+                                _fwdMsSinceLoc = 0; _sideMsSinceLoc = 0;
+                                Interlocked.Exchange(ref _prevSegTicks, now);
+                                break;
+                            }
+                            // The accepted-teleport reading is the same story with the volume up.
+                            _fwdMsSinceLoc = 0; _sideMsSinceLoc = 0;
                             // AND THAT IS THE TELEPORT SIGNAL. Three readings in a row that were
                             // physically impossible, and then one accepted anyway, is precisely
                             // what an instance eject looks like — this guard already measures
@@ -833,10 +864,25 @@ public sealed class HuntRole
         // recovery swims the character to the bottom. Hayden watched exactly that on 08-26: it
         // never tilted up. 55° was already too shallow to climb the one shelf that gets you out.
         await PitchTo(_fell ? 75 : 55, ct);
+        if (ReEntryUsableHere() && _z is double z0 && _startZ is double s0 && z0 < s0 - DeepBelowAnchor)
+            Log?.Invoke($"Deep water — swimming for the shore point at /loc {_s.ReEntryY:0.0}, {_s.ReEntryX:0.0} with the "
+                      + "camera up, rather than back the way I fell in.");
         while (!ct.IsCancellationRequested && _sink.Ready && (DateTime.Now - began).TotalSeconds < 45)
         {
             RefreshHeadingFromCompass();
-            if (_goodX is double gx && _goodY is double gy && _hdgValid)
+            // WHERE TO SWIM, and "back the way we came" is the wrong answer in the one place that
+            // matters. Hayden: "Not all characters have levitate, so a method to get out of water
+            // is also critical." The last good ground is wherever the character was standing when
+            // it fell in — which, on a coastline, is a bank it may not be able to climb, and on
+            // Kerra Isle is the deep side of the island. The re-entry point is the ONE spot the
+            // user has told us the land is shallow enough to walk out of, so a character in the
+            // water swims for that, and only falls back on the last good ground when nobody has
+            // picked one. The point does double duty: shore to walk out at, and shore to come
+            // back to after an eject. One number, picked once.
+            bool swimToShore = ReEntryUsableHere() && _z is double zw && _startZ is double zs && zw < zs - DeepBelowAnchor;
+            if (swimToShore && _hdgValid)
+                await TurnBy(BearingErrorDegTo(_s.ReEntryX, _s.ReEntryY), ct);
+            else if (_goodX is double gx && _goodY is double gy && _hdgValid)
                 await TurnBy(BearingErrorDegTo(gx, gy), ct);
             await HoldKey(_fwd, 1000, ct);
             await FreshLoc(ct);
@@ -866,6 +912,12 @@ public sealed class HuntRole
                       + "That is water or a pit, not new ground — treating it as ground is what drowned the "
                       + "character before. Stopping here so it stays alive.");
             await PitchTo(_s.LevEnabled ? 10 : 2, ct);
+            // UNLESS IT DIDN'T. This method spends up to 45 seconds in water, which is the single
+            // most likely place in the run for the character to drown, and parking a CORPSE raises
+            // Parked instead of Died: the session is held but the respawn window is never clicked,
+            // so the character sits in it with no input until the server AFK-kicks the client an
+            // hour later. That is the measured 08-24 chain, arrived at from a new direction.
+            if (_selfDead) { Log?.Invoke("…and it didn't stay alive. Handing this to the death path."); return; }
             ParkSafely();
             return;
         }
@@ -911,6 +963,179 @@ public sealed class HuntRole
         finally { Stop(); }
     }
 
+    /// <summary>
+    /// Get the character into a NEW instance. Supplied by the owner, because everything it does is
+    /// clicking buttons on the game's own UI and this class does not do windows — it drives a
+    /// character. Returns true only on PROOF (a zone line), never on "I clicked something".
+    ///
+    /// Null, or ReInstanceEnabled off, and an eject parks the run exactly as 0.10.59 shipped it.
+    /// </summary>
+    public Func<CancellationToken, Task<bool>>? ReInstance;
+
+    /// <summary>One attempt per ejection. A failed re-entry parks; it does not sit in a loop
+    /// clicking at a window that is not answering, unattended, for hours. Cleared in Start() as
+    /// well as being fresh per instance, so this stays true if the class is ever reused.</summary>
+    private bool _reInstanceTried;
+
+    /// <summary>
+    /// The whole point of the feature: an instance expired, the character has been dropped at the
+    /// zone-in of the PUBLIC zone, and instead of standing there all night among other players it
+    /// makes a new instance and walks back to camp.
+    ///
+    /// Order matters and each step is a refusal point:
+    ///
+    ///  1. Ask the owner to work the instance UI. It returns true only when the log has printed a
+    ///     zone line — clicking "Enter" proves nothing, being somewhere else does.
+    ///  2. LEVITATE FIRST, THEN PITCH. Hayden: "the camera just needs to be pointed above the
+    ///     horizon and have levitate on. The character will never enter the water if this is the
+    ///     case." Both halves are load-bearing and the pitch is the half this app kept getting
+    ///     wrong: swim and float direction follow the camera, and the grind leaves the camera on
+    ///     the ground, so "walk home" reads as "go down".
+    ///  3. THE SHORE POINT FIRST, CAMP SECOND. The camp is inland; the straight line to it from
+    ///     the zone-in crosses the sea. The re-entry point is the one place the land is shallow
+    ///     enough to walk out, so it is a waypoint, not a nicety — going straight for camp is
+    ///     precisely what drowned the character on 08-23 and 08-26.
+    ///  4. Anything unproven parks. A character standing still in a new instance is a bad night;
+    ///     a character walking somewhere nobody modelled is a dead one.
+    /// </summary>
+    private async Task ReInstanceAndReturn(CancellationToken ct)
+    {
+        _reInstanceTried = true;
+        Stats.State = "re-instancing";
+        Log?.Invoke("The instance expired and the character is at the zone-in of the public zone. Making a new "
+                  + "instance rather than standing here — this takes a moment.");
+
+        bool inside;
+        try { inside = await ReInstance!(ct); }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception ex)
+        {
+            Log?.Invoke("Re-Instance failed with an error, so I'm stopping with the character alive: " + ex.Message);
+            ParkSafely();
+            return;
+        }
+        if (ct.IsCancellationRequested) return;
+
+        if (!inside)
+        {
+            // The owner has already said WHY in its own words — a missing charge, a window it
+            // could not read, a button it refused to press. Repeating a guess here would only
+            // compete with the true reason.
+            Log?.Invoke("I could not get into a new instance, so I'm stopping here with the character alive rather "
+                      + "than hunting in the public zone. The reason is in the line above this one.");
+            ParkSafely();
+            return;
+        }
+
+        // A new instance is a new world: everything measured about the old one is now a lie. The
+        // heading is stale, the last position is a thousand units away, and the fall detector's
+        // idea of "ground" belongs to a zone we are no longer in.
+        _teleported = false;
+        _hdgValid = false;
+        _fell = false;
+        _deepReadings = 0;
+        _goodX = null; _goodY = null; _zGood = null;
+        _wildLocs = 0;
+        // A ZONE SILENCES THE MELODY. _singing is cleared only by a log line saying the song
+        // stopped, and a zone does not print one — so a bard would come back into the new instance
+        // still believing it was singing, never press the melody key again, and run every fight to
+        // the timeout with no output at all, for the rest of the night.
+        _singing = false;
+        // Nothing has been walked in this instance yet, so there is no movement to learn a heading
+        // from, and the /loc that arrives next is a teleport's worth of distance away.
+        _fwdMsSinceLoc = 0; _sideMsSinceLoc = 0;
+        // A ledge dodge recorded in the old instance is not a fact about this one.
+        _dip = false;
+
+        Log?.Invoke("In a new instance. Getting levitate and the camera sorted before moving.");
+        _levNeeded = true;                                   // a zone strips buffs; do not assume
+        await MaybeLev(ct);
+        await PitchTo(Math.Clamp(_s.ReturnPitchDeg, 2, 45), ct);
+        _lastPitchFix = DateTime.Now;
+
+        if (!await FreshLoc(ct))
+        {
+            Log?.Invoke("I'm in a new instance but I can't get a position fix, and walking without one is how the "
+                      + "character ended up in the sea. Stopping here — it is safe and it is in an instance.");
+            ParkSafely();
+            return;
+        }
+        // _startZ IS DELIBERATELY LEFT ALONE. An instance is a copy of the same zone, so the camp
+        // altitude this run started at is still the right reference for "am I under water?" — and
+        // the zone-in is not: it is a dock or a rise somewhere else entirely. Re-baselining to it
+        // was in the first draft and it breaks the depth guard in both directions. A zone-in 30
+        // units above camp means every reading at camp reads as 30 units under water and the run
+        // parks on dry land three passes after a successful return; 30 units below camp leaves the
+        // guard that much less sensitive for the rest of the night, and Recover would refuse to
+        // swim for the shore while actually drowning. _zGood, which means "the last ground I stood
+        // on", is a different question and repopulates from the next reading on its own.
+
+        if (ReEntryUsableHere())
+        {
+            Log?.Invoke($"Walking to the shore point at /loc {_s.ReEntryY:0.0}, {_s.ReEntryX:0.0} first — camp is inland "
+                      + "and the straight line to it crosses water.");
+            if (!await LegDone(await WalkTo(_s.ReEntryX, _s.ReEntryY, 25, 20, "Re-entry", ReturnWaterFloor(), ct),
+                               "reach the shore point", ct)) return;
+        }
+        else
+        {
+            Log?.Invoke(_s.ReEntrySet
+                ? $"The re-entry point that's saved belongs to {_s.ReEntryZone}, and this isn't it — so I'm not "
+                  + "walking at those numbers here. Going straight for camp instead; set a re-entry point for "
+                  + "this zone if there's water in the way."
+                : "No re-entry point is picked, so I'll go straight for camp — pick one on the Grind page if "
+                  + "there is water between the zone-in and your camp, because a straight line will cross it.");
+        }
+
+        if (_startX is not double cx || _startY is not double cy)
+        { Log?.Invoke("Back in an instance, but this run has no camp anchor to return to — stopping here."); ParkSafely(); return; }
+
+        Log?.Invoke("Now walking back to camp.");
+        Stats.State = "re-instancing — returning to camp";
+        double leash = Math.Max(30, _s.HuntTetherRadius * 0.5);
+        if (!await LegDone(await WalkTo(cx, cy, leash, 30, "Return", ReturnWaterFloor(), ct),
+                           $"close the last {DistanceTo(cx, cy):0} units to camp", ct)) return;
+
+        _reInstanceTried = false;                            // a clean return re-arms it for next time
+        Stats.State = "seeking";
+        Log?.Invoke("Back at camp in a fresh instance — carrying on.");
+    }
+
+    /// <summary>
+    /// Turn one leg of the walk home into "carry on" or "we're finished here", and — the part
+    /// that matters — end it the RIGHT WAY.
+    ///
+    /// A death during the return is not a park. Parking raises <c>Parked</c>, which holds the
+    /// session; a death has to raise <c>Died</c>, which clicks the respawn window as well. Report
+    /// a drowning as a park and the character sits in the respawn window with no input until the
+    /// server AFK-kicks the client an hour later — the measured chain from 08-24, arrived at by a
+    /// different road.
+    /// </summary>
+    private async Task<bool> LegDone(WalkResult r, string what, CancellationToken ct)
+    {
+        switch (r)
+        {
+            case WalkResult.Arrived:
+                return true;
+            case WalkResult.Stopped:
+                return false;
+            case WalkResult.Died:
+                // Loop's own death handling narrates and raises Died; it runs on the next pass.
+                return false;
+            case WalkResult.InWater:
+                Log?.Invoke("I ended up in water on the way back, which is the thing this was meant to avoid. "
+                          + "Trying to climb out, then stopping with the character where it is.");
+                await Recover(ct);
+                if (!ct.IsCancellationRequested && !_selfDead) ParkSafely();
+                return false;
+            default:
+                Log?.Invoke($"I got back into an instance, but I couldn't {what}. Stopping with the character "
+                          + "alive and in an instance.");
+                ParkSafely();
+                return false;
+        }
+    }
+
     /// <summary>Signed degrees to turn so the current heading points at the tether anchor.</summary>
     private double HomeErrorDeg()
         => _startX is double sx && _startY is double sy ? BearingErrorDegTo(sx, sy) : 0;
@@ -940,6 +1165,12 @@ public sealed class HuntRole
         // route — and until that exists, standing still beats drowning.
         if (_teleported || away > refuseAt)
         {
+            // The teleport FLAG is handled centrally in Loop now, so what reaches here is either
+            // that same flag caught a moment earlier, or a distance nothing explains. Either way
+            // Re-Instance is the better answer than standing still, when it is switched on.
+            if (_s.ReInstanceEnabled && ReInstance is not null && !_reInstanceTried)
+            { await ReInstanceAndReturn(ct); return; }
+
             Log?.Invoke($"I am {away:0} units from camp — that is a teleport, not drift, and it usually means the "
                       + "instance expired and put the character at the zone-in. I will NOT try to walk back: the "
                       + "straight line from here crosses water, and that is exactly how the character drowned on "
@@ -960,10 +1191,92 @@ public sealed class HuntRole
             await HoldKey(_fwd, Vary(1100), ct);
             return;
         }
-        for (int leg = 0; leg < 8 && !ct.IsCancellationRequested && _sink.Ready; leg++)
+        if (_startX is not double hx || _startY is not double hy) return;
+        switch (await WalkTo(hx, hy, r * 0.55, 8, "Homing", _startZ - DeepBelowAnchor, ct))
         {
-            double before = TetherDistance();
-            if (before <= r * 0.55) { Log?.Invoke($"Back inside the tether ({before:0} ≤ {r:0})."); Stats.State = "seeking"; return; }
+            case WalkResult.Arrived: Stats.State = "seeking"; return;
+            case WalkResult.Stopped: return;
+            // The Loop watchdogs handle both of these on the very next pass, exactly as they did
+            // before this method delegated its legs — so homing just yields to them.
+            case WalkResult.Died:
+            case WalkResult.InWater: return;
+        }
+        Log?.Invoke("Homing paused this pass (wall or bad reads) — will keep trying.");
+    }
+
+    /// <summary>
+    /// Walk to a point, closed loop: measure, turn, run a distance-sized burst, re-measure,
+    /// correct — and reverse the heading if the burst made things worse.
+    ///
+    /// LIFTED OUT OF GoHome UNCHANGED, not written fresh. This loop is the one piece of navigation
+    /// in this class that has been in the field long enough to trust: it learns a heading from a
+    /// /loc pair when the compass can't answer, it sizes each burst off the measured walking
+    /// speed, and it catches a stale heading by noticing the distance grew. The instance return
+    /// needs exactly that, and the honest way to get it is to share the code rather than to write
+    /// a second, younger version of it and find out what it does at four in the morning.
+    /// </summary>
+    /// <returns>See <see cref="WalkResult"/>.</returns>
+    private async Task<WalkResult> WalkTo(double tx, double ty, double arrive, int maxLegs, string what,
+                                          double? waterBelowZ, CancellationToken ct)
+    {
+        int paused = 0;
+        for (int leg = 0; leg < maxLegs && !ct.IsCancellationRequested; leg++)
+        {
+            // NOT FOCUSED IS A PAUSE, NOT A FAILURE. `_sink.Ready` means "EverQuest is the front
+            // window"; everywhere else in this class losing it pauses the loop, and it was in this
+            // method's for-condition, which quietly turned a click on the EQ Avatar window during
+            // a five-minute walk home into "I couldn't reach the shore point — stopping."
+            //
+            // AND A PAUSE MUST NOT SPEND A LEG. `continue` in a for-loop still runs the increment,
+            // so the first version merely made the same failure take twelve seconds instead of
+            // none: click this app's window during the return, watch thirty legs tick past at 400
+            // ms each without the character moving an inch, and get told the walk home failed.
+            // The wait gets its own budget, measured in wall time, and gives the leg back.
+            if (!_sink.Ready)
+            {
+                if (++paused > PausedPollsBeforeGivingUp)
+                {
+                    Log?.Invoke($"{what}: EverQuest hasn't been the front window for "
+                              + $"{PausedPollsBeforeGivingUp * 400 / 1000}s, so I can't walk.");
+                    return WalkResult.OutOfLegs;
+                }
+                await Task.Delay(400, ct);
+                leg--;                                       // this pass did nothing; give it back
+                continue;
+            }
+            paused = 0;
+
+            // THE WATCHDOGS LIVE AT THE TOP OF Loop, AND THIS METHOD IS NOT IN Loop.
+            //
+            // A 30-leg walk is minutes of held-down movement, and for all of it the death check,
+            // the fall recovery and the deep-water park were suspended. That is the exact hazard
+            // this whole feature exists to remove: the return line clips the sea, the character
+            // drowns, _fell and _selfDead are set on the log thread with nobody reading them, and
+            // the walk finishes its thirty legs and reports "stopping with the character alive
+            // and in an instance" over a corpse — with no respawn click and no session hold,
+            // because Parked fired instead of Died. So each leg checks for itself.
+            if (_selfDead) return WalkResult.Died;
+
+            // FALL FIRST, DEEP SECOND — the order Loop uses, and its comment says why: the fall
+            // threshold is lower than the depth one, so a depth test in front pre-empts every real
+            // dunk and the climb-out never runs. Reversed here in the first draft, which made the
+            // "climbed out, carrying on" path unreachable for exactly the case it was written for.
+            if (_fell)
+            {
+                Log?.Invoke($"{what}: fell on the way. Climbing out before going on.");
+                await Recover(ct);
+                if (ct.IsCancellationRequested || _selfDead) return _selfDead ? WalkResult.Died : WalkResult.Stopped;
+                continue;                                    // re-measure; the fall moved us
+            }
+            if (waterBelowZ is double floorZ && _z is double zw && zw < floorZ)
+            {
+                Log?.Invoke($"{what}: I am at z {zw:0}, below the {floorZ:0} I treat as water on this leg — "
+                          + "not walking any further through it.");
+                return WalkResult.InWater;
+            }
+
+            double before = DistanceTo(tx, ty);
+            if (before <= arrive) { Log?.Invoke($"{what}: arrived ({before:0} ≤ {arrive:0})."); return WalkResult.Arrived; }
             RefreshHeadingFromCompass();                     // the compass makes this instant + exact
             if (!_hdgValid)
             {
@@ -973,18 +1286,66 @@ public sealed class HuntRole
                 if (!await FreshLoc(ct)) { await Task.Delay(300, ct); }
                 if (!_hdgValid) continue;                    // try another stride
             }
-            await TurnBy(HomeErrorDeg(), ct);
+            await TurnBy(BearingErrorDegTo(tx, ty), ct);
             int run = (int)Math.Clamp(before / Math.Max(20, _speed) * 1000 * 0.8, 450, 2400);
             await HoldKey(_fwd, run, ct);
             await FreshLoc(ct);
-            double after = TetherDistance();
+            double after = DistanceTo(tx, ty);
             if (after > before + 5 && _hdgValid)
             {
-                Log?.Invoke($"Homing leg went the wrong way ({before:0} → {after:0}) — reversing.");
+                Log?.Invoke($"{what}: that leg went the wrong way ({before:0} → {after:0}) — reversing.");
                 _hdg += Math.PI;                             // stale heading; flip and re-run the loop
             }
         }
-        Log?.Invoke("Homing paused this pass (wall or bad reads) — will keep trying.");
+        return ct.IsCancellationRequested ? WalkResult.Stopped : WalkResult.OutOfLegs;
+    }
+
+    /// <summary>Why a walk ended — because "false" was three different things and the callers were
+    /// telling the user the wrong one of them.</summary>
+    private enum WalkResult
+    {
+        Arrived,
+        /// <summary>Ran out of legs still short of the target: a wall, bad reads, or just far.</summary>
+        OutOfLegs,
+        /// <summary>Standing in water well below where the run started. Do not keep walking.</summary>
+        InWater,
+        /// <summary>The character died on the way. The DEATH path has to run, not the park path.</summary>
+        Died,
+        /// <summary>The run was cancelled (F12, or the role stopping).</summary>
+        Stopped,
+    }
+
+    /// <summary>
+    /// The altitude below which, on the way home, the character is in the sea rather than on the
+    /// ground.
+    ///
+    /// NOT camp's altitude, which is what Loop's own depth guard uses and what the first draft of
+    /// the return walk used. The re-entry point is BY DEFINITION at the waterline — Hayden's is
+    /// z 4.60, "the one spot where the land is shallow enough to walk out" — so an inland camp
+    /// more than DeepBelowAnchor above it makes the shore itself read as drowning. The walk would
+    /// have aborted on dry sand, every time, and parked: a feature that never once completed a
+    /// return, failing in the most confusing way available.
+    ///
+    /// So the floor is the LOWER of the two known-good grounds, minus the same margin. Anything
+    /// under the shallowest place a character can stand is sea, and nothing above it is.
+    /// </summary>
+    private double? ReturnWaterFloor()
+    {
+        double? camp = _startZ;
+        double? shore = ReEntryUsableHere() ? _s.ReEntryZ : null;
+        if (camp is null && shore is null) return null;
+        double lowest = camp is double c && shore is double sh ? Math.Min(c, sh) : (camp ?? shore)!.Value;
+        return lowest - DeepBelowAnchor;
+    }
+
+    /// <summary>Flat distance from where we last measured ourselves to a point, or 0 when we do
+    /// not know where we are — the same "0 means unknown" convention TetherDistance uses, and for
+    /// the same reason: every caller treats 0 as "nothing to do".</summary>
+    private double DistanceTo(double tx, double ty)
+    {
+        if (_x is not double x || _y is not double y) return 0;
+        double dx = x - tx, dy = y - ty;
+        return Math.Sqrt(dx * dx + dy * dy);
     }
 
     /// <summary>Does the last con line name a mob on the directive target list?</summary>
@@ -994,6 +1355,25 @@ public sealed class HuntRole
         string con = _lastConText.ToLowerInvariant();
         foreach (string t in _targets) if (con.Contains(t)) return true;
         return false;
+    }
+
+    /// <summary>
+    /// May the saved re-entry point be used where the character is standing?
+    ///
+    /// Yes if it was saved without a zone (an older settings file — believe the user rather than
+    /// silently retiring a point they set on purpose), or if the zone matches. No if we can see
+    /// that it belongs somewhere else: a coordinate from another zone is a random point on this
+    /// one's map, and this app's whole recent history is about not walking at numbers it cannot
+    /// vouch for.
+    /// </summary>
+    private bool ReEntryUsableHere()
+    {
+        if (!_s.ReEntrySet) return false;
+        string saved = (_s.ReEntryZone ?? "").Trim();
+        if (saved.Length == 0) return true;
+        string? here = ZoneTable.ShortFor(_heat.Current ?? "") ?? _planZone ?? _fallbackZone?.Invoke();
+        if (string.IsNullOrWhiteSpace(here)) return true;    // can't tell — the user's pick wins
+        return string.Equals(saved, here, StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>Distance from the tether anchor, or 0 when unknown.</summary>
@@ -1025,6 +1405,31 @@ public sealed class HuntRole
                     break;
                 }
                 if (!_sink.Ready) { Stats.State = "paused (EQ not focused)"; await Task.Delay(400, ct); continue; }
+
+                // AN EJECT IS NOT A TETHER PROBLEM, and treating it as one hid it from two whole
+                // modes. `_teleported` was only ever acted on inside GoHome, which is reached from
+                // the roam tether and the camp scan — so a WAYPOINTS patrol that got ejected
+                // walked its recorded route around the PUBLIC zone, among other players, all night,
+                // with the flag set and nobody reading it. It belongs here, where every mode passes.
+                if (_teleported)
+                {
+                    if (_s.ReInstanceEnabled && ReInstance is not null && !_reInstanceTried)
+                    { await ReInstanceAndReturn(ct); continue; }
+                    // AND IF THERE IS NOTHING LEFT TO TRY, PARK — do not fall through. The first
+                    // version only parked when _reInstanceTried was false, so a second teleport
+                    // after one attempt hit an empty branch: no re-instance, no park, no message,
+                    // and the run carried on hunting in the PUBLIC zone with the flag set and
+                    // nobody reading it. That is the exact failure this block was added to close.
+                    Log?.Invoke(_reInstanceTried
+                        ? "Teleported again, and I've already used my one re-instance attempt this run. Stopping "
+                        + "here with the character alive rather than hunting on in the public zone."
+                        : "Something teleported the character — almost always the instance expiring and putting it "
+                        + "at the zone-in. I will not walk back from a teleport: the straight line crosses water "
+                        + "and that is how the character drowned on 08-23 and 08-26. Stopping here, alive. Turn on "
+                        + "Re-Instance if you want it to make a new instance and walk back on its own.");
+                    ParkSafely();
+                    break;
+                }
 
                 await MaybeLev(ct);                          // keep Levitate up + view above horizon
                 if (_fell) { await Recover(ct); continue; }  // fell into a pit / water → climb out first
@@ -1368,7 +1773,16 @@ public sealed class HuntRole
             }
         }
         catch (OperationCanceledException) { }
-        catch (Exception ex) { Log?.Invoke("Hunt error: " + ex.Message); }
+        catch (Exception ex)
+        {
+            // AND STOP, or the role is a ZOMBIE: _cts uncancelled, Running still true, Stopped
+            // never raised, the grind timer painting a character that is doing nothing, and
+            // Start() refusing to begin another run for the rest of the session. The same shape
+            // the death path was fixed for in 0.10.55, and reachable again the moment this loop
+            // started calling out to code that touches windows.
+            Log?.Invoke("Hunt error: " + ex.Message);
+            Stop();
+        }
         finally { ReleaseKeys(); }
     }
 

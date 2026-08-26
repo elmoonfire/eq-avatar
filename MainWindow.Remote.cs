@@ -19,7 +19,7 @@ public partial class MainWindow
     private RemoteClient? _remote;
 
     // Live position for the phone map — fed from the maps log tap (OnMapsLogLine).
-    private double _lastLocEw = double.NaN, _lastLocNs = double.NaN;
+    private double _lastLocEw = double.NaN, _lastLocNs = double.NaN, _lastLocZ = double.NaN;
     private DateTime _lastLocAt = DateTime.MinValue;
 
     private void StartRemoteControl()

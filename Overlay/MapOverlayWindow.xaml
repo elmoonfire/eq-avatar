@@ -5,7 +5,7 @@
         Title="EQ Avatar — Map Overlay"
         Width="460" Height="500" MinWidth="280" MinHeight="300"
         WindowStyle="None" AllowsTransparency="True" Background="Transparent"
-        Topmost="True" ShowInTaskbar="False" ResizeMode="CanResizeWithGrip"
+        Topmost="True" ShowInTaskbar="False" ShowActivated="False" ResizeMode="CanResizeWithGrip"
         WindowStartupLocation="Manual">
 
     <Border CornerRadius="14" BorderThickness="1.5" BorderBrush="#664FC3F7">

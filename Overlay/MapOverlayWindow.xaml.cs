@@ -58,6 +58,29 @@ public partial class MapOverlayWindow : Window
         OverlayMap.Fit();
     }
 
+    /// <summary>
+    /// Get out of the frame while something OCRs the game underneath.
+    ///
+    /// This window is unconditionally Topmost and deliberately sits over the game, which is
+    /// exactly right for a map and exactly wrong for a screen read: ScreenText copies the
+    /// ON-SCREEN pixels of the game's rectangle, so whatever this is drawing is read as though the
+    /// game had drawn it. Hidden rather than merely un-topmosted, because "not topmost" still
+    /// leaves it in front of a window that has just been brought forward.
+    /// </summary>
+    public void StepAside(bool aside)
+    {
+        // Show() ACTIVATES by default, and this window is the last thing that should. Coming back
+        // after a re-instance it would take the foreground from EverQuest at the exact moment the
+        // role is about to cast levitate and take a position fix — and every one of those checks
+        // "is EQ the front window?" first. The run would spend a real instance charge, arrive in a
+        // new instance, find it could do nothing, and park blaming the log. ShowActivated="False"
+        // in the XAML is what actually stops it; this is the note explaining why it is there.
+        if (aside) { if (IsVisible) { _hiddenForCapture = true; Hide(); } }
+        else if (_hiddenForCapture) { _hiddenForCapture = false; Show(); }
+    }
+
+    private bool _hiddenForCapture;
+
     public void SetLayers(bool showHeat, bool showTrail)
     {
         OverlayMap.ShowHeat = showHeat;
