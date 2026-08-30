@@ -2105,9 +2105,16 @@ public partial class MainWindow : Window
         catch { /* no bundled mascot — the glow shows instead */ }
     }
 
+    /// <summary>
+    /// Stamped, because Hayden asked the right question about the wrong thing: "maybe you could add
+    /// timestamps to this logging if that would help show how long something takes". It does — the
+    /// pasted console that diagnosed the character-select stall was a wall of identical OCR dumps
+    /// with no way to tell whether they spanned two seconds or thirty-five. Same format the bot log
+    /// uses, so a login can be laid alongside the game's own log line for line.
+    /// </summary>
     private void LoginLogLine(string msg)
     {
-        LoginLog.AppendText(msg + Environment.NewLine);
+        LoginLog.AppendText(DateTime.Now.ToString("HH:mm:ss.f") + "  " + msg + Environment.NewLine);
         LoginLog.ScrollToEnd();
     }
 

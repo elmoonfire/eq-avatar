@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
@@ -68,6 +69,11 @@ public sealed class AutoLogin
     private long _saidWaitingWindow = long.MinValue / 4;
     private long _saidWaitingScreen = long.MinValue / 4;
     private long _saidSeen = long.MinValue / 4;
+    /// <summary>When the character screen was first recognised. With every console line now
+    /// stamped, the gap between that line and the click is readable straight off the log.</summary>
+    private long _charSelectSeen = long.MinValue / 4;
+    /// <summary>When this launch began, for the total on the last line.</summary>
+    private long _startedTicks;
 
     /// <summary>Say something at most once every <paramref name="sec"/> seconds. The loop looks ten
     /// times more often than it used to, and a line that was reasonable at one every second and a
@@ -81,6 +87,48 @@ public sealed class AutoLogin
     }
 
     private static bool Cooling(long lastTicks, double sec) => Environment.TickCount64 - lastTicks < sec * 1000;
+
+    /// <summary>
+    /// Find a button whose label IS this word — not one that merely contains it.
+    ///
+    /// ⚠ FROM HAYDEN'S 08-29 CONSOLE, and it is worse than a near miss. ScreenText.Find is a
+    /// case-insensitive SUBSTRING match, and one pass OCR'd his Windows TASKBAR instead of the
+    /// launcher:
+    ///
+    ///   OCR sees: EQ | Rocket League | Synergy | VLC media player | Telegram | Driver Booster 13
+    ///           | PDF-XCha.. Editor | Roblox Studio | Playe | Roblox Playe | AMD Ryzen Master …
+    ///   Clicked PLAY (launcher, by text).
+    ///
+    /// "Playe" contains "play". The app clicked the Roblox Player button on his taskbar and
+    /// announced it as pressing PLAY on the launcher. Every other word on that list is a program
+    /// too — "Player", "Last Played", "Replay" are all one bad OCR pass away from being a click on
+    /// something nobody asked for.
+    ///
+    /// So a button label has to match EXACTLY. ScreenText emits every WORD at its own centre and
+    /// then the whole LINE at the average of those centres, so an exact test naturally lands on the
+    /// word itself; the near-duplicate line entry for a one-word button sits at the same point and
+    /// is harmless. Anything OCR renders as part of a longer run is left to the green-button
+    /// fallback, which is a colour test and cannot be fooled by a neighbouring program's name.
+    /// </summary>
+    private static bool FindWord(List<FoundText> items, string word, out Point center)
+    {
+        // A WORD BOUNDARY, NOT AN EXACT MATCH. Exact was the first draft and review found it too
+        // strict in the one place with no safety net: the launcher has a green-button fallback when
+        // OCR mangles PLAY, and the SERVER screen cannot have one (it is the game window, and the
+        // fallback is gated to non-game windows). The same OCR that returns "Charactee" for Create
+        // Character returns "PLAY!" or "PLAY NOW" for a PLAY button, and demanding equality there
+        // would re-click the server row for eight minutes and never press it.
+        //
+        // \b keeps everything that reads as the word and rejects everything that merely contains
+        // its letters: "PLAY!" and "PLAY NOW" match; "Playe", "Played", "player" and "Replay" do
+        // not — which is the whole point, because "Roblox Playe" is what it clicked.
+        var re = new Regex($@"\b{Regex.Escape(word)}\b", RegexOptions.IgnoreCase);
+        foreach (FoundText f in items)
+            if (re.IsMatch(f.Text))
+            { center = new Point(f.X, f.Y); return true; }
+        center = default;
+        return false;
+    }
 
     /// <summary>THE LOOP IS ALIVE — not "cancel wasn't requested", which is what this used to
     /// test. The loop also ENDS by itself: reaching the game, the 8-minute timeout, an error. None
@@ -118,6 +166,7 @@ public sealed class AutoLogin
     {
         try
         {
+        _startedTicks = Environment.TickCount64;
         Log?.Invoke($"Auto-login started (server: {_server}). Leave the launcher/game in front.");
         long deadline = Environment.TickCount64 + 8 * 60_000;   // generous — the launcher can update for a while
         try
@@ -156,15 +205,59 @@ public sealed class AutoLogin
                 if (!Cooling(_saidSeen, 1.5)) { _saidSeen = Environment.TickCount64; LogSeen(found); }
 
                 // 1) Character select — click the green 'Enter World' in the LEFT menu.
-                bool charSelect = ScreenText.Find(found, "Enter World", out Point pEnter)
-                               || ScreenText.Find(found, "Create Character", out _)
-                               || ScreenText.Find(found, "Return Home", out _);
+                //
+                // ⚠ WHAT THIS SCREEN ACTUALLY OCRs AS, from Hayden's console on 08-29. Every one of
+                // the three phrases this used to look for is stylized art on his client, and OCR
+                // reads none of them reliably:
+                //
+                //   "Enter World"      → never read once, in either login
+                //   "Create Character" → "Charactee", "Chåeactéf", "ICreate Character"
+                //   "Return Home"      → absent entirely
+                //
+                // So the test was false on pass after pass while the character screen sat there in
+                // plain sight, and the bot only got in when OCR happened to render Create Character
+                // legibly. In the pasted log that took roughly THIRTY-FIVE SECONDS and about
+                // eighteen OCR passes — the "lingers too long" Hayden reported, and the reason
+                // making the loop poll faster (0.10.63) barely helped: a faster loop asking a
+                // question that is nearly always "no" just gets told "no" more often.
+                //
+                // What IS on every single one of those dumps is the panel header "Characters" and
+                // the "Reset UI to Default" button. Those are ordinary UI text, not the stylized
+                // art, which is exactly why OCR can read them. Neither appears on the launcher or
+                // the server screen (checked against the dumps of both), and the click this
+                // unlocks is confined to the left-menu column, where the launcher's green buttons
+                // — at x≈1505 and x≈1946 on a 2560-wide screen — cannot reach.
+                //
+                // "Reset" is deliberately matched on its own: the tail of that button came back as
+                // "to Default", "to Detault" and "LII to Default" across passes, and the one word
+                // that survived every reading is the first one.
+                // AND ONLY IN THE GAME WINDOW. Character select does not exist anywhere else, and
+                // without this gate a launcher frame — whose patch notes are ordinary OCR-friendly
+                // text and can easily say "Characters" — would enter this branch, click whatever
+                // scattered green the left column happened to contain, raise Done, and print
+                // "Reached the game. Launch complete." over a launch that had not started.
+                //
+                // A "Reset"+"Default" signal was in the first draft and is gone: those are two
+                // unanchored substrings that appear together in EQ's own Options window, AMD Ryzen
+                // Master and Driver Booster — two of which are on Hayden's taskbar — and unlike the
+                // launcher case, isGame does not save you from the game's own Options panel.
+                bool charSelect = isGame
+                               && (ScreenText.Find(found, "Enter World", out Point pEnter)
+                                || ScreenText.Find(found, "Create Character", out _)
+                                || ScreenText.Find(found, "Return Home", out _)
+                                || ScreenText.Find(found, "Characters", out _));
+                if (!charSelect) pEnter = default;
                 if (charSelect)
                 {
+                    if (_charSelectSeen == long.MinValue / 4)
+                    {
+                        _charSelectSeen = Environment.TickCount64;
+                        Log?.Invoke("Character screen recognised.");
+                    }
                     if (ScreenText.Find(found, "Enter World", out pEnter))
                     {
                         Click(pEnter);
-                        Log?.Invoke("Clicked 'Enter World' (by text) — logging into the game.");
+                        Log?.Invoke($"Clicked 'Enter World' (by text) {SinceStart()} — logging into the game.");
                         Done?.Invoke();
                         return;
                     }
@@ -172,17 +265,23 @@ public sealed class AutoLogin
                     if (ScreenText.FindGreenButton(w, 0.0, 0.30, 0.20, 0.99, 30) is Point pGreenEW)
                     {
                         Click(pGreenEW);
-                        Log?.Invoke($"OCR couldn't read 'Enter World' — clicked the green button in the left menu at {pGreenEW.X:0},{pGreenEW.Y:0}. Logging in.");
+                        Log?.Invoke($"OCR couldn't read 'Enter World' — clicked the green button in the left menu at "
+                                  + $"{pGreenEW.X:0},{pGreenEW.Y:0} {SinceStart()}. Logging in.");
                         Done?.Invoke();
                         return;
                     }
                     // RATE-LIMITED, because at a 400 ms poll this would otherwise write the same
                     // sentence a hundred and fifty times a minute and bury the OCR dump that is the
                     // only thing able to explain it.
+                    // FALL THROUGH, don't `continue`. This branch sits in front of the server and
+                    // launcher ones, so a frame that looked like character select but had no green
+                    // button in the left column used to starve BOTH of them — the login then
+                    // repeated one sentence every five seconds for the full eight minutes without
+                    // pressing anything. Letting it drop into the next branch means a false
+                    // positive costs a wasted test rather than the whole launch.
                     LogOccasionally(ref _saidNoEnterWorld, 5,
-                        "At character select, but couldn't locate 'Enter World'. Roughly where is it on screen?");
-                    await Task.Delay(Vary(PollMs), ct);
-                    continue;
+                        "Something looked like character select, but there is no 'Enter World' and no green button "
+                      + "in the left menu — carrying on with the other screens.");
                 }
 
                 // 2) Server select — choose the server, then PLAY.
@@ -217,7 +316,7 @@ public sealed class AutoLogin
                         await Task.Delay(700, ct);
                     }
                     var f2 = await ScreenText.ReadAsync(w);
-                    if (ScreenText.Find(f2, "PLAY", out Point pPlay2))
+                    if (FindWord(f2, "PLAY", out Point pPlay2))
                     {
                         Click(pPlay2);
                         _lastServerPlay = Environment.TickCount64;
@@ -228,7 +327,7 @@ public sealed class AutoLogin
                 }
 
                 // 3) LaunchPad — click PLAY. Try OCR text first, then the green-button colour fallback.
-                if (ScreenText.Find(found, "PLAY", out Point pPlay))
+                if (FindWord(found, "PLAY", out Point pPlay))
                 {
                     if (Cooling(_lastLauncherPlay, LauncherPlayCoolSec)) { await Task.Delay(Vary(PollMs), ct); continue; }
                     Click(pPlay);
@@ -281,6 +380,18 @@ public sealed class AutoLogin
             Log?.Invoke("OCR sees: " + (joined.Length == 0 ? "(no text recognized on this screen)" : joined));
         }
     }
+
+    /// <summary>
+    /// How long this whole launch has taken, on the line that ends it.
+    ///
+    /// The first draft measured from "character screen recognised" to the click — and recognition
+    /// and click happen in the SAME loop iteration, so it printed "(0.0s after seeing it)" every
+    /// time. It would have printed that during the thirty-five-second stall too, because the stall
+    /// was time spent NOT recognising the screen. The honest number is the one the user is timing
+    /// with a wristwatch: how long from pressing Launch to being in.
+    /// </summary>
+    private string SinceStart()
+        => $"(login took {(Environment.TickCount64 - _startedTicks) / 1000.0:0.0}s)";
 
     private int Vary(int ms) => _settings.Vary(ms, _rng);
 
